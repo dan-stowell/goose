@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "additionalDirectories": ["~/goose-wt"],
+    "allow": [
+      "Bash(.claude/codex-run:*)",
+      "Bash(codex exec:*)",
+      "Bash(git:*)",
+      "Bash(cmake:*)",
+      "Bash(python3 test/run_tests.py:*)",
+      "Bash(build/goose:*)"
+    ]
+  }
+}

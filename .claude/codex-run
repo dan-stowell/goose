@@ -1,0 +1,42 @@
+#!/bin/sh
+# Runs one Codex job for the coordinator and prints the path of its final report.
+# usage: .claude/codex-run work|verify|review <worktree> <prompt-file>
+#   work    writes code and commits it in the worktree
+#   verify  builds and tests, writes nothing in the worktree but build/
+#   review  reads the diff against master; read-only sandbox
+# Verify and review get the same instructions as the Claude verifier and
+# reviewer, so either model can play either part.
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+role=$1
+wt=$(cd "$2" && pwd)
+prompt=$3
+logs="$HOME/goose-wt/logs"
+mkdir -p "$logs"
+name="$(basename "$wt").$role.$(date +%Y%m%d-%H%M%S)"
+
+case $role in
+  work)   set -- -s workspace-write --add-dir "$logs"; brief= ;;
+  verify) set -- -s workspace-write --add-dir "$logs"; brief=$here/agents/verifier.md ;;
+  review) set -- -s read-only; brief=$here/agents/reviewer.md ;;
+  *) echo "role must be work, verify or review" >&2; exit 2 ;;
+esac
+
+{
+  # The agent file without its frontmatter.
+  [ -n "$brief" ] && sed '1,/^---$/d' "$brief"
+  printf '\n\nWorktree: %s\n\n' "$wt"
+  cat "$prompt"
+  # Codex's sandbox keeps .git read-only even under --add-dir, so a work
+  # job can't commit; it leaves a message and this script commits for it.
+  [ "$role" = work ] && printf '\n\nYou cannot run git commit here: the sandbox keeps .git read-only. Leave your changes uncommitted, and when you are done write a commit message in the style of `git log` to %s. The wrapper commits everything for you.\n' "$logs/$name.commit-msg"
+} | codex exec "$@" -C "$wt" \
+    -c model_reasoning_effort='"high"' -c approval_policy='"never"' \
+    --json -o "$logs/$name.md" - > "$logs/$name.jsonl"
+
+if [ "$role" = work ] && [ -s "$logs/$name.commit-msg" ] && [ -n "$(git -C "$wt" status --porcelain)" ]; then
+  git -C "$wt" add -A
+  git -C "$wt" commit -q -F "$logs/$name.commit-msg"
+fi
+
+echo "$logs/$name.md"
