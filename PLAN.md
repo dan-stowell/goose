@@ -54,10 +54,10 @@ say so.
 | task | worker | state | notes |
 |------|--------|-------|-------|
 | selfhost-seed | claude | done | Merged 2026-10-24. Codex review and verify clean |
-| scoreboard-run | codex | checking | 19/639 pass at first run. Claude verifier and reviewer running. Codex's sandbox has no network, so its full-suite run fails on package fetches; Claude checks it |
+| scoreboard-run | codex | round 2 | Verify passed, review found 1 blocker (`// runtime-define:` fixtures built without their `-D`) and 11 smaller fixes, incl. splitting out a generic board so the errors/stdlib boards reuse it. Codex fixing. Codex's sandbox has no network, so Claude reruns the full suite |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
-| gap-param-defaults | claude | in flight | Parameter defaults (§7.1). `std.goose:1077` `parse_int(.., base: i64 = 10)` blocks 142 fixtures at parse. Branched off scoreboard-run |
+| gap-param-defaults | claude | in flight | Parameter defaults (§7.1). `std.goose:1077` `parse_int(.., base: i64 = 10)` blocks 142 fixtures at parse. Branched off scoreboard-run's first commit; rebase onto round 2 before merging |
 
 Next gaps, from scoreboard-run's first rejection clusters (counts are first
 errors only, so they hide what's behind the stdlib parse failure):
