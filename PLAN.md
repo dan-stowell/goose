@@ -57,7 +57,7 @@ say so.
 | scoreboard-run | codex | round 3 | Round 2 verified and reviewed: everything holds except that the cc step depends on cwd (fails unless run from the repo root). Round 3 fixes that plus Windows tree-kill, posix paths, restored comments, per-board statuses |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
-| gap-param-defaults | claude | round 2 | Codex review found 3 blockers. Only one is from defaults: a block default called from a global initializer crashes emission (scope owner -1). Claude fixing. The other two are existing bugs: float text, and constants not adapting to their target type |
+| gap-param-defaults | claude | checking r2 | Fix 253425a: global-initializer locals (not only defaults) now live in gg_globals. 22 pass. Codex re-review running |
 | gap-float-text | codex | in flight | `print(2.0)` prints `2`; shortest round-trip text per §3. Causes all 4 new mismatches. Branched off gap-param-defaults |
 | gap-multi-return | codex | checking | 20→23 pass, no regressions; multi-return and multi-binding clusters at zero. Exposed 47 range-checked float-to-integer conversions. Claude verify and review running. Base bb6807c |
 
@@ -77,7 +77,11 @@ from a constant float expression (`let x: f32 = 1.0 + 2.0`) fails with an
 internal "incompatible types (type 2 kind 2 width 8 -> ...)". Same root:
 constant expressions don't adapt to their target type at all (`let y: u8 =
 1 + 1` fails), and it's probably a large hidden cluster. Both should be
-"not implemented yet" at least.
+"not implemented yet" at least. Also: a string literal passed to a `u8[:]`
+parameter is rejected (`greet("hi")`), probably a large hidden cluster.
+For the error board: selfhost accepts `f() + { let t = 4; t }` as a binary
+operand and `let block = ...` as a global, which build/goose rejects at
+parse.
 
 ## Decisions
 
