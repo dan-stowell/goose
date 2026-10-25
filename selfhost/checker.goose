@@ -18,17 +18,13 @@ struct Specialization {
     scope: i64,
     result: i64,
     state: i64 = 0,
-    result_root: i64 = -1,
+    // Each result descriptor stores its type and provenance; flag 1 marks a
+    // checked return and flag 2 a recursive caller using that provenance.
+    results: i64 = -1,
     parameters: i64 = -1,
     shrinks: i64 = -1,
     caller: i64 = -1,
     in_cycle: bool = false,
-    return_seen: bool = false,
-    result_fields: i64 = -1,
-    result_readonly: bool = false,
-    result_growshrink: bool = false,
-    result_inexact: bool = false,
-    result_used: bool = false,
     visit: i64 = 0,
 }
 struct CheckedCall { node: i64, scope: i64, callee: i64 }
@@ -244,6 +240,7 @@ fn first_child(ctx: Compiler&, n: i64) -> i64 {
     return ctx.edges[ctx.nodes[n].first].value;
 }
 fn child_count(ctx: Compiler&, n: i64) -> i64 {
+    if n < 0 { return 0; }
     var count = 0; var e = ctx.nodes[n].first;
     while e >= 0 { count++; e = ctx.edges[e].next; }
     return count;
@@ -353,6 +350,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     } else if tag == N_ARRAY || tag == N_FILL || tag == N_LIMITED { v = check_array(ctx, n, scope, expected); }
     else if tag == N_CONSTRUCT { v = check_construct(ctx, n, scope); }
     else if tag == N_CALL { v = check_call(ctx, n, scope); }
+    else if tag == N_RESULT { v = value_of(ctx, n); }
     else if tag == N_BLOCK { v = check_block(ctx, n, scope, expected); }
     else if tag == N_IF {
         let c = decay(ctx, check_expression(ctx, x.a, scope, -1)); require_fit(ctx, x.a, c, boolean_type(ctx));
@@ -378,12 +376,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     else if tag == N_RETURN {
         if ctx.checking_function < 0 { error_at(ctx, x.token, "return outside a function"); }
         if x.a >= 0 { error_at(ctx, x.token, "not implemented yet: long-distance returns"); }
-        let expected_result = ctx.specializations[ctx.checking_function].result;
-        let e = first_child(ctx, n);
-        if child_count(ctx, n) > 1 { error_at(ctx, x.token, "not implemented yet: multiple results"); }
-        var result = Value {};
-        if e >= 0 { result = check_expression(ctx, e, scope, expected_result); }
-        check_return(ctx, e, result, ctx.checking_function, x.token);
+        check_returns(ctx, n, scope);
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
     } else if tag == N_BREAK || tag == N_CONTINUE {
         if ctx.loop_depth == 0 { error_at(ctx, x.token, "loop exit outside a loop or block"); }
@@ -506,8 +499,132 @@ recursive fn check_block(ctx: Compiler&, n: i64, parent: i64, expected: i64) -> 
     if contains_view(ctx, result.ty) && content_root(ctx, result) >= 0 && scope_contains(ctx, scope, ctx.symbols[content_root(ctx, result)].scope) { error_at(ctx, ctx.nodes[n].token, "block result refers to a local or temporary that has ended"); }
     return result;
 }
+// Each result keeps its own lifetime bound. Several results are a calling
+// convention, so only projections of a call can supply a multi-name receiver.
+fn result_value(ctx: Compiler&, result: i64) -> Value {
+    var v = value_of(ctx, result); v.place = -1; v.held = v.root; v.known = false;
+    return v;
+}
+recursive fn resolve_result_type(ctx: Compiler&, n: i64, scope: i64, multiple: bool) -> i64 {
+    let syntax = ctx.nodes[n];
+    if multiple && syntax.tag == N_TYPE_ARRAY {
+        let mode = syntax.flags & 15;
+        // Recognize unsupported non-fixed headers before general storage
+        // resolution rejects them, including through a type alias.
+        if mode == 1 || mode >= 3 || (mode == 2 && (syntax.b < 0 || ctx.nodes[syntax.b].tag == N_TYPE)) { error_at(ctx, syntax.token, "not implemented yet: non-fixed multiple results"); }
+    }
+    if multiple && syntax.tag == N_TYPE {
+        let s = lookup(ctx, n, scope, 1);
+        if s >= 0 && ctx.symbols[s].decl >= 0 && ctx.nodes[ctx.symbols[s].decl].tag == N_ALIAS {
+            if ctx.symbols[s].state == 1 { error_at(ctx, syntax.token, "cyclic type alias"); }
+            if syntax.first >= 0 { error_at(ctx, syntax.token, "a type alias takes no type arguments"); }
+            ctx.symbols[s].state = 1;
+            let ty = resolve_result_type(ctx, ctx.nodes[ctx.symbols[s].decl].a, ctx.symbols[s].scope, true);
+            ctx.symbols[s].state = 2; return ty;
+        }
+    }
+    return resolve_type(ctx, n, scope);
+}
+fn reject_nonfixed_results(ctx: Compiler&, results: i64) {
+    if child_count(ctx, results) < 2 { return; }
+    var e = ctx.nodes[results].first;
+    while e >= 0 {
+        let r = ctx.edges[e].value;
+        if ctx.nodes[r].ty >= 0 && ctx.types[ctx.nodes[r].ty].size_class > 0 { error_at(ctx, ctx.nodes[r].token, "not implemented yet: non-fixed multiple results"); }
+        e = ctx.edges[e].next;
+    }
+}
+fn result_call(ctx: Compiler&, n: i64) -> i64 {
+    var call = n;
+    while call >= 0 && ctx.nodes[call].tag == N_UNARY && ctx.tokens[ctx.nodes[call].token].text == "(" { call = ctx.nodes[call].a; }
+    if call >= 0 && ctx.nodes[call].tag == N_CALL && ctx.nodes[call].symbol >= 0 { return call; }
+    return -1;
+}
+fn call_result_count(ctx: Compiler&, call: i64) -> i64 {
+    if call < 0 { return 1; }
+    return child_count(ctx, ctx.specializations[ctx.nodes[call].symbol].results);
+}
+fn project_result(ctx: Compiler&, call: i64, index: i64, scope: i64) -> i64 {
+    var e = ctx.nodes[ctx.specializations[ctx.nodes[call].symbol].results].first;
+    for i in index { e = ctx.edges[e].next; }
+    let n = node(ctx, N_RESULT, ctx.nodes[call].token);
+    ctx.nodes[n].a = call; ctx.nodes[n].flags = index;
+    var v = result_value(ctx, ctx.edges[e].value);
+    if ctx.types[v.ty].kind == T_ARRAY || ctx.types[v.ty].kind == T_STRUCT {
+        let temporary_scope = scope_new(ctx, scope, ctx.checking_function);
+        v.root = ctx.symbols.len;
+        ctx.symbols.push(Symbol { token: ctx.nodes[n].token, ns: -1, kind: 4, decl: n, scope: temporary_scope, ty: v.ty, state: 2 });
+    }
+    annotate(ctx, n, v);
+    return n;
+}
+recursive fn check_returns(ctx: Compiler&, n: i64, scope: i64) {
+    let spec = ctx.checking_function;
+    let results = ctx.specializations[spec].results;
+    var count = child_count(ctx, n);
+    var call = -1;
+    if count == 1 {
+        let value = first_child(ctx, n);
+        check_expression(ctx, value, scope, ctx.specializations[spec].result);
+        call = result_call(ctx, value);
+        count = call_result_count(ctx, call);
+    }
+    let first = first_child(ctx, results);
+    if ctx.nodes[first].ty < 0 && count > 1 {
+        for i in 1..count { child(ctx, results, node(ctx, N_PAD, ctx.nodes[n].token)); }
+    }
+    if count != child_count(ctx, results) && !(count == 0 && child_count(ctx, results) == 1) { error_at(ctx, ctx.nodes[n].token, "return result count mismatch"); }
+    if call >= 0 && count > 1 {
+        ctx.nodes[n].b = call; ctx.nodes[n].first = -1; ctx.nodes[n].last = -1;
+        for i in count { child(ctx, n, project_result(ctx, call, i, scope)); }
+    }
+    var e = ctx.nodes[n].first; var re = ctx.nodes[results].first;
+    while re >= 0 {
+        let r = ctx.edges[re].value;
+        var value = -1; var raw = Value {};
+        if e >= 0 {
+            value = ctx.edges[e].value;
+            // A single written expression was already checked above. A
+            // forwarded call is represented by its checked projections.
+            raw = if child_count(ctx, n) == 1 || ctx.nodes[n].b >= 0 { value_of(ctx, value) } else { check_expression(ctx, value, scope, ctx.nodes[r].ty) };
+            e = ctx.edges[e].next;
+        }
+        check_result(ctx, value, raw, spec, r, ctx.nodes[n].token);
+        re = ctx.edges[re].next;
+    }
+    reject_nonfixed_results(ctx, results);
+}
+recursive fn check_receiving(ctx: Compiler&, n: i64, scope: i64, binding: bool) {
+    let x = ctx.nodes[n];
+    if binding && child_count(ctx, x.b) != 1 { error_at(ctx, x.token, "a binding needs one initializer"); }
+    let init = if binding { first_child(ctx, x.b) } else { x.b };
+    check_expression(ctx, init, scope, -1);
+    let call = result_call(ctx, init);
+    let count = child_count(ctx, n);
+    if call < 0 || call_result_count(ctx, call) != count { error_at(ctx, x.token, "binding or assignment result count mismatch"); }
+    ctx.nodes[n].tag = N_RECEIVE; ctx.nodes[n].a = call; ctx.nodes[n].b = -1;
+    ctx.nodes[n].first = -1; ctx.nodes[n].last = -1;
+    var e = x.first; var index = 0;
+    while e >= 0 {
+        let dest = ctx.edges[e].value;
+        let value = project_result(ctx, call, index, scope);
+        let receiver = node(ctx, if binding { N_BIND } else { N_ASSIGN }, x.token);
+        if binding {
+            ctx.nodes[receiver].flags = x.flags; ctx.nodes[receiver].a = x.a;
+            child(ctx, receiver, dest);
+            let values = node(ctx, N_BLOCK, x.token); child(ctx, values, value); ctx.nodes[receiver].b = values;
+            check_binding(ctx, receiver, scope);
+        } else {
+            ctx.nodes[receiver].a = dest; ctx.nodes[receiver].b = value;
+            check_assignment(ctx, receiver, scope);
+        }
+        child(ctx, n, receiver); e = ctx.edges[e].next; index++;
+    }
+}
+
 recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
-    if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "not implemented yet: multiple bindings"); }
+    if child_count(ctx, n) > 1 { check_receiving(ctx, n, scope, true); return; }
+    if child_count(ctx, ctx.nodes[n].b) > 1 { error_at(ctx, ctx.nodes[n].token, "a binding needs one initializer"); }
     let name = first_child(ctx, n);
     var s = ctx.nodes[name].symbol;
     if scope != 0 { s = register_symbol(ctx, ctx.nodes[name].token, ctx.nodes[name].ns, 2, n, scope, ctx.nodes[n].flags); ctx.nodes[name].symbol = s; }
@@ -543,6 +660,7 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     store_lifetime(ctx, Value { ty: declared, root: v.root, held: v.held }, s, ctx.nodes[n].token);
 }
 recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
+    if ctx.nodes[n].first >= 0 { check_receiving(ctx, n, scope, false); return; }
     let x = ctx.nodes[n];
     let raw = check_expression(ctx, x.a, scope, -1); let dest = decay(ctx, raw);
     if dest.place < 0 { error_at(ctx, x.token, "assignment requires a stored value"); }
@@ -604,16 +722,21 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64) -> Value {
     return Value {};
 }
 fn check_return(ctx: Compiler&, n: i64, raw: Value, spec: i64, token: i64) {
+    if child_count(ctx, ctx.specializations[spec].results) != 1 { error_at(ctx, token, "return result count mismatch"); }
+    check_result(ctx, n, raw, spec, first_child(ctx, ctx.specializations[spec].results), token);
+}
+fn check_result(ctx: Compiler&, n: i64, raw: Value, spec: i64, result: i64, token: i64) {
     var v = raw;
     let own_local = v.place >= 0 && ctx.scopes[ctx.symbols[v.place].scope].function == spec && ctx.types[ctx.symbols[v.place].ty].kind != T_REFERENCE;
-    if ctx.specializations[spec].result < 0 {
+    if ctx.nodes[result].ty < 0 {
         let value = decay(ctx, v);
         var inferred = value.ty;
         let explicit_ref = n >= 0 && ctx.nodes[n].tag == N_UNARY && ctx.tokens[ctx.nodes[n].token].text == "&";
         if explicit_ref || (ctx.types[value.ty].size_class > 0 && (ctx.types[v.ty].kind == T_REFERENCE || (v.place >= 0 && !own_local))) { inferred = reference_type(ctx, value.ty, v.readonly); }
-        ctx.specializations[spec].result = inferred;
+        ctx.nodes[result].ty = inferred;
+        if result == first_child(ctx, ctx.specializations[spec].results) { ctx.specializations[spec].result = inferred; }
     }
-    let target = ctx.specializations[spec].result;
+    let target = ctx.nodes[result].ty;
     if ctx.types[target].kind != T_REFERENCE { v = decay(ctx, v); }
     if ctx.types[target].size_class > 0 && v.place >= 0 && !own_local { error_at(ctx, token, "returning nonfixed storage by value requires an explicit copy"); }
     let decl = ctx.symbols[ctx.specializations[spec].symbol].decl;
@@ -622,19 +745,19 @@ fn check_return(ctx: Compiler&, n: i64, raw: Value, spec: i64, token: i64) {
     else if target != 0 { error_at(ctx, token, "missing return value"); }
     let root = content_root(ctx, received(ctx, v, target));
     if contains_view(ctx, target) && root >= 0 && ctx.scopes[ctx.symbols[root].scope].function == spec { error_at(ctx, token, "returned reference refers to a local"); }
-    if contains_view(ctx, target) && ctx.specializations[spec].result_used {
-        if root_depth(ctx, root) > root_depth(ctx, ctx.specializations[spec].result_root) || (v.growshrink && !ctx.specializations[spec].result_growshrink) { error_at(ctx, token, "return weakens the provenance already used by a recursive call"); }
-        if root != ctx.specializations[spec].result_root && v.inexact && v.place >= 0 && ctx.symbols[v.place].scope != 0 && ctx.scopes[ctx.symbols[v.place].scope].function != spec { error_at(ctx, token, "not implemented yet: recursive result gains a captured inexact reference"); }
+    if contains_view(ctx, target) && ctx.nodes[result].flags & 2 != 0 {
+        if root_depth(ctx, root) > root_depth(ctx, ctx.nodes[result].root) || (v.growshrink && !ctx.nodes[result].growshrink) { error_at(ctx, token, "return weakens the provenance already used by a recursive call"); }
+        if root != ctx.nodes[result].root && v.inexact && v.place >= 0 && ctx.symbols[v.place].scope != 0 && ctx.scopes[ctx.symbols[v.place].scope].function != spec { error_at(ctx, token, "not implemented yet: recursive result gains a captured inexact reference"); }
     }
     // Each return must be safe on its own. A merged result is bounded by
     // the innermost owner, rather than forcing all paths to one arena.
-    if root >= 0 && root_depth(ctx, root) >= root_depth(ctx, ctx.specializations[spec].result_root) { ctx.specializations[spec].result_root = root; }
-    if !ctx.specializations[spec].return_seen { ctx.specializations[spec].result_fields = v.fields; }
-    else if ctx.specializations[spec].result_fields != v.fields { ctx.specializations[spec].result_fields = -1; }
-    ctx.specializations[spec].return_seen = true;
-    ctx.specializations[spec].result_readonly = ctx.specializations[spec].result_readonly || v.readonly;
-    ctx.specializations[spec].result_growshrink = ctx.specializations[spec].result_growshrink || v.growshrink;
-    ctx.specializations[spec].result_inexact = ctx.specializations[spec].result_inexact || v.inexact;
+    if root >= 0 && root_depth(ctx, root) >= root_depth(ctx, ctx.nodes[result].root) { ctx.nodes[result].root = root; }
+    if ctx.nodes[result].flags & 1 == 0 { ctx.nodes[result].fields = v.fields; }
+    else if ctx.nodes[result].fields != v.fields { ctx.nodes[result].fields = -1; }
+    ctx.nodes[result].flags |= 1;
+    ctx.nodes[result].readonly = ctx.nodes[result].readonly || v.readonly;
+    ctx.nodes[result].growshrink = ctx.nodes[result].growshrink || v.growshrink;
+    ctx.nodes[result].inexact = ctx.nodes[result].inexact || v.inexact;
 }
 
 recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
@@ -733,7 +856,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         effect = ctx.edges[effect].next;
     }
     ctx.nodes[n].symbol = spec;
-    return Value { ty: ctx.specializations[spec].result, root: ctx.specializations[spec].result_root, readonly: ctx.specializations[spec].result_readonly, growshrink: ctx.specializations[spec].result_growshrink, inexact: ctx.specializations[spec].result_inexact, held: ctx.specializations[spec].result_root, fields: ctx.specializations[spec].result_fields };
+    return result_value(ctx, first_child(ctx, ctx.specializations[spec].results));
 }
 // A call leaving out trailing parameters gets a fresh clone of each one's
 // default after its written arguments, in parameter order (§7.1). The
@@ -833,24 +956,39 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
                 }
             }
             if existing.state == 1 && existing.result < 0 { ctx.specializations[i].result = 0; }
-            if existing.state == 1 && contains_view(ctx, ctx.specializations[i].result) {
-                if !existing.return_seen { error_at(ctx, ctx.nodes[call].token, "not implemented yet: recursive reference result before a checked return"); }
-                ctx.specializations[i].result_used = true;
+            if existing.state == 1 {
+                var re = ctx.nodes[existing.results].first;
+                while re >= 0 {
+                    let r = ctx.edges[re].value;
+                    if ctx.nodes[r].ty < 0 { ctx.nodes[r].ty = ctx.specializations[i].result; }
+                    if contains_view(ctx, ctx.nodes[r].ty) {
+                        if ctx.nodes[r].flags & 1 == 0 { error_at(ctx, ctx.nodes[call].token, "not implemented yet: recursive reference result before a checked return"); }
+                        ctx.nodes[r].flags |= 2;
+                    }
+                    re = ctx.edges[re].next;
+                }
             }
             return i;
         }
     }
-    var result = -1;
+    let results = node(ctx, N_BLOCK, ctx.nodes[decl].token);
     if ctx.nodes[decl].b >= 0 {
-        if child_count(ctx, ctx.nodes[decl].b) > 1 { error_at(ctx, ctx.nodes[decl].token, "not implemented yet: multiple return values"); }
-        result = resolve_type(ctx, first_child(ctx, ctx.nodes[decl].b), ctx.symbols[symbol].scope);
-    }
+        var re = ctx.nodes[ctx.nodes[decl].b].first;
+        while re >= 0 {
+            let r = node(ctx, N_PAD, ctx.nodes[decl].token);
+            ctx.nodes[r].ty = resolve_result_type(ctx, ctx.edges[re].value, ctx.symbols[symbol].scope, child_count(ctx, ctx.nodes[decl].b) > 1);
+            child(ctx, results, r); re = ctx.edges[re].next;
+        }
+    } else { child(ctx, results, node(ctx, N_PAD, ctx.nodes[decl].token)); }
+    reject_nonfixed_results(ctx, results);
+    if child_count(ctx, results) > 1 && ctx.nodes[decl].flags & 2 != 0 { error_at(ctx, ctx.nodes[decl].token, "not implemented yet: extern multiple results"); }
+    let result = ctx.nodes[first_child(ctx, results)].ty;
     let id = ctx.specializations.len;
     let scope = scope_new(ctx, ctx.symbols[symbol].scope, id);
     if ctx.scopes[scope].depth <= ctx.scopes[caller_scope].depth { ctx.scopes[scope].depth = ctx.scopes[caller_scope].depth + 1; }
     let body = clone_tree(ctx, ctx.nodes[decl].c);
     let specialized_params = clone_tree(ctx, params);
-    ctx.specializations.push(Specialization { symbol: symbol, body: body, scope: scope, result: result, state: 1, parameters: specialized_params, caller: ctx.checking_function });
+    ctx.specializations.push(Specialization { symbol: symbol, body: body, scope: scope, result: result, state: 1, results: results, parameters: specialized_params, caller: ctx.checking_function });
     p = ctx.nodes[specialized_params].first; actual = -1; if call >= 0 { actual = ctx.nodes[call].first; }
     while p >= 0 {
         let param = ctx.edges[p].value;
@@ -881,6 +1019,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         ctx.checking_function = previous; ctx.loop_depth = previous_loop;
     } else if result < 0 { ctx.specializations[id].result = 0; }
     if ctx.specializations[id].result < 0 { ctx.specializations[id].result = 0; }
+    if ctx.nodes[first_child(ctx, results)].ty < 0 { ctx.nodes[first_child(ctx, results)].ty = ctx.specializations[id].result; }
     ctx.specializations[id].state = 2;
     return id;
 }

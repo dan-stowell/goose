@@ -8,12 +8,15 @@ cycle_threaded_slices.goose
 fill_counts.goose
 growshrink_literal_views.goose
 holder_param_bounds.goose
+inline_nested_calls.goose
 let_contents.goose
 local_name_suffixes.goose
+multiple_fixed_results.goose
 namespace_comparisons.goose
 namespaces_lib.goose
 param_default_overloads.goose
 reftops_call_sync.goose
+return_root_merge.goose
 slice_ref_loads.goose
 slice_ref_stores.goose
 tre_trailing_abort.goose

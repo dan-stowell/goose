@@ -372,7 +372,15 @@ recursive fn block_contents(ctx: Compiler&, t: i64) -> i64 {
         if at(ctx, "fn") || at(ctx, "recursive") { child(ctx, n, function_decl(ctx, true)); continue; }
         if at(ctx, "guard") { guard_statement(ctx, n); return n; }
         let e = expression(ctx, 0, true, true);
-        if assignment_op(ctx, ctx.tokens[ctx.cursor].text) {
+        if take(ctx, ",") {
+            let targets = node(ctx, N_ASSIGN, ctx.cursor);
+            child(ctx, targets, e);
+            loop { child(ctx, targets, expression(ctx, 0, true, false)); if !take(ctx, ",") { break; } }
+            ctx.nodes[targets].token = expect(ctx, "=");
+            ctx.nodes[targets].b = expression(ctx, 0, true, false);
+            ctx.nodes[ctx.nodes[targets].b].standalone = true;
+            expect(ctx, ";"); child(ctx, n, targets);
+        } else if assignment_op(ctx, ctx.tokens[ctx.cursor].text) {
             let a = node(ctx, N_ASSIGN, ctx.cursor); ctx.cursor++; ctx.nodes[a].a = e;
             if ctx.tokens[ctx.nodes[a].token].text != "++" && ctx.tokens[ctx.nodes[a].token].text != "--" { ctx.nodes[a].b = expression(ctx, 0, true, false); ctx.nodes[ctx.nodes[a].b].standalone = true; }
             expect(ctx, ";"); child(ctx, n, a);

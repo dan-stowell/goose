@@ -250,6 +250,7 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
     let syntax = ctx.nodes[n];
     var ty = -1;
     if syntax.tag == N_TYPE {
+        if ctx.tokens[syntax.token].text == "fn" && syntax.b >= 0 && child_count(ctx, syntax.b) > 1 { error_at(ctx, syntax.token, "not implemented yet: function types with multiple results"); }
         ty = builtin_type(ctx, ctx.tokens[syntax.token].text);
         if ty < 0 {
             let s = lookup(ctx, n, scope, 1);

@@ -165,10 +165,20 @@ fn c_render(ctx: Compiler&, out: CValue, v: CValue) {
     else if element_type(ctx, a.ty) == integer_type(ctx, 1, true) { emit(ctx, str("  gg_text(", dst, ", ", c_view(ctx, a), ");\n")); }
     else { emit(ctx, str("  gg_render_", a.ty, "(", dst, ",", a.code, ");\n")); }
 }
+fn c_result_field(ctx: Compiler&, code: const u8[:], ty: i64, index: i64) -> CValue {
+    let field = save_text(ctx, str(code, ".r", index));
+    return CValue { code: field, ty: ty, address: save_text(ctx, str("&(", field, ")")), stack: "" };
+}
+fn c_return_value(ctx: Compiler&, index: i64) -> CValue {
+    var e = ctx.nodes[ctx.specializations[ctx.c_function].results].first;
+    for i in index { e = ctx.edges[e].next; }
+    return c_result_field(ctx, "gg_return", ctx.nodes[ctx.edges[e].value].ty, index);
+}
 recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
     let x = ctx.nodes[n];
     let tag = x.tag;
     if tag == N_NAME { return symbol_value(ctx, x.symbol); }
+    if tag == N_RESULT { return c_result_field(ctx, save_text(ctx, str("gg_multi_", x.a)), x.ty, x.flags); }
     if tag == N_INT || tag == N_BOOL {
         return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")UINT64_C(", x.bits, "))")), ty: x.ty, address: "", stack: "" };
     }
@@ -369,7 +379,9 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     }
     var dest = destination;
     if ctx.types[spec.result].size_class > 0 && dest.ty == 0 { dest = c_array_temp(ctx, spec.result); }
-    let ret = if spec.result != 0 && ctx.types[spec.result].size_class == 0 { temporary(ctx, spec.result) } else { "" };
+    let multiple = child_count(ctx, spec.results) > 1;
+    let ret = if multiple { save_text(ctx, str("gg_multi_", n)) } else if spec.result != 0 && ctx.types[spec.result].size_class == 0 { temporary(ctx, spec.result) } else { "" };
+    if multiple { format(ctx.c_declarations, "  gg_results_", builtin, " ", ret, ";\n"); }
     emit(ctx, "  "); if ret.len > 0 { emit(ctx, str(ret, " = ")); }
     if decl.flags & 2 != 0 { emit(ctx, if decl.symbol >= 0 { ctx.tokens[decl.symbol].text } else { ctx.tokens[decl.token].text }); }
     else { emit(ctx, str("gg_function_", builtin)); }
@@ -388,12 +400,19 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     }
     emit(ctx, ");\n");
     if ctx.types[spec.result].size_class > 0 { return dest; }
+    if multiple { return c_result_field(ctx, ret, spec.result, 0); }
     return CValue { code: ret, ty: spec.result, address: save_text(ctx, str("&", ret)), stack: "" };
 }
 
 recursive fn c_statement(ctx: Compiler&, n: i64) {
     let x = ctx.nodes[n];
     if x.tag == N_FUNCTION { return; }
+    if x.tag == N_RECEIVE {
+        c_expression(ctx, x.a);
+        var e = x.first;
+        while e >= 0 { c_statement(ctx, ctx.edges[e].value); e = ctx.edges[e].next; }
+        return;
+    }
     if x.tag == N_BIND {
         let symbol = ctx.nodes[first_child(ctx, n)].symbol;
         let dest = symbol_value(ctx, symbol);
@@ -404,7 +423,12 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         return;
     }
     if x.tag == N_RETURN {
-        let first = first_child(ctx, n); if first >= 0 { c_into(ctx, first, ctx.c_result); }
+        if x.b >= 0 { c_expression(ctx, x.b); }
+        var e = x.first; var index = 0;
+        while e >= 0 {
+            let dest = if child_count(ctx, ctx.specializations[ctx.c_function].results) > 1 { c_return_value(ctx, index) } else { ctx.c_result };
+            c_into(ctx, ctx.edges[e].value, dest); e = ctx.edges[e].next; index++;
+        }
         emit(ctx, "  goto gg_done;\n"); return;
     }
     if x.tag == N_BREAK || x.tag == N_CONTINUE {
@@ -494,7 +518,7 @@ recursive fn returned_local(ctx: Compiler&, n: i64, spec: i64) -> i64 {
 }
 fn c_signature(ctx: Compiler&, spec_id: i64) {
     let spec = ctx.specializations[spec_id]; let decl = ctx.nodes[ctx.symbols[spec.symbol].decl];
-    emit(ctx, str("static ", if ctx.types[spec.result].size_class > 0 { "void" } else { c_type(ctx, spec.result) }, " gg_function_", spec_id, "("));
+    emit(ctx, str("static ", if child_count(ctx, spec.results) > 1 { save_text(ctx, str("gg_results_", spec_id)) } else if ctx.types[spec.result].size_class > 0 { "void" } else { c_type(ctx, spec.result) }, " gg_function_", spec_id, "("));
     var e = ctx.nodes[spec.parameters].first; var comma = false;
     while e >= 0 {
         let symbol = ctx.nodes[ctx.edges[e].value].symbol;
@@ -519,7 +543,14 @@ fn c_frames(ctx: Compiler&) {
         for s, symbol in ctx.symbols {
             if s.kind == 2 && s.scope != 0 && ctx.scopes[s.scope].function == id && symbol != ctx.return_locals[id] { emit(ctx, str("  ", c_type(ctx, s.ty), " ", c_name(ctx, symbol), ";\n")); }
         }
-        emit(ctx, "};\n"); c_signature(ctx, id); emit(ctx, ";\n");
+        emit(ctx, "};\n");
+        if child_count(ctx, spec.results) > 1 {
+            emit(ctx, "typedef struct {\n");
+            var re = ctx.nodes[spec.results].first; var index = 0;
+            while re >= 0 { emit(ctx, str("  ", c_type(ctx, ctx.nodes[ctx.edges[re].value].ty), " r", index, ";\n")); re = ctx.edges[re].next; index++; }
+            emit(ctx, str("} gg_results_", id, ";\n"));
+        }
+        c_signature(ctx, id); emit(ctx, ";\n");
     }
 }
 fn prepare_emission(ctx: Compiler&) {
@@ -554,7 +585,10 @@ fn emit_function(ctx: Compiler&, id: i64) {
     let body_start = ctx.c_output.len;
     emit(ctx, "  frame.base = base;\n");
     if ctx.scopes[ctx.symbols[spec.symbol].scope].function >= 0 { emit(ctx, "  frame.parent = parent;\n"); }
-    if ctx.types[spec.result].size_class > 0 {
+    if child_count(ctx, spec.results) > 1 {
+        format(ctx.c_declarations, "  gg_results_", id, " gg_return;\n");
+        ctx.c_result = c_return_value(ctx, 0);
+    } else if ctx.types[spec.result].size_class > 0 {
         emit(ctx, "  frame.result = result;\n");
         ctx.c_result = CValue { code: "(*result.header)", ty: spec.result, address: "result.header", stack: "result.stack" };
     } else if spec.result != 0 {
@@ -568,7 +602,7 @@ fn emit_function(ctx: Compiler&, id: i64) {
     if ctx.c_slots > 0 {
         let k = raw_temporary(ctx, "int64_t"); emit(ctx, str("  for (", k, " = 0; ", k, " < ", ctx.c_slots, "; ", k, "++) gg_stacks[base + ", k, "].top = 0;\n"));
     }
-    if spec.result != 0 && ctx.types[spec.result].size_class == 0 { emit(ctx, str("  return ", ctx.c_result.code, ";\n")); }
+    if spec.result != 0 && ctx.types[spec.result].size_class == 0 { emit(ctx, str("  return ", if child_count(ctx, spec.results) > 1 { "gg_return" } else { ctx.c_result.code }, ";\n")); }
     emit(ctx, "}\n");
     ctx.c_final.append(ctx.c_declarations[declaration_start..]); ctx.c_final.append(ctx.c_output[body_start..]);
 }
