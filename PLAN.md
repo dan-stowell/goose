@@ -57,9 +57,15 @@ say so.
 | scoreboard-run | codex | round 3 | Round 2 verified and reviewed: everything holds except that the cc step depends on cwd (fails unless run from the repo root). Round 3 fixes that plus Windows tree-kill, posix paths, restored comments, per-board statuses |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
-| gap-param-defaults | claude | checking r2 | Fix 253425a: global-initializer locals (not only defaults) now live in gg_globals. 22 pass. Codex re-review running |
-| gap-float-text | codex | in flight | `print(2.0)` prints `2`; shortest round-trip text per §3. Causes all 4 new mismatches. Branched off gap-param-defaults |
+| gap-param-defaults | claude | ready | Fix 253425a re-reviewed by Codex: clean. 22 pass. Merges after scoreboard-run |
+| gap-float-text | codex | checking | 20→29 pass, 19→11 mismatch; 8,365 values match build/goose. Claude verify and review running. Base bb6807c |
 | gap-multi-return | codex | checking | 20→23 pass, no regressions; multi-return and multi-binding clusters at zero. Exposed 47 range-checked float-to-integer conversions. Claude verify and review running. Base bb6807c |
+
+Mismatches left after gap-float-text (11) are almost all runtime
+diagnostic text: assertion messages, bounds-failure wording, negative
+length wording (and selfhost prints abort messages glued together,
+`boomgoose runtime error: abort`), plus three that need GS_DEBUG traps.
+A small runtime-diagnostics task would clear most of them.
 
 Next gaps, first-error clusters on gap-multi-return (2026-10-24): variable
 and limited array storage (84), relative and optional references (60),
