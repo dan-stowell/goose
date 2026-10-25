@@ -1,5 +1,14 @@
 # Plan
 
+## Status
+
+**Paused 2026-10-24 at Dan's request.** No workers are running. Every task
+branch is pushed to origin with its worktree left in place under
+~/goose-wt/. Nothing beyond selfhost-seed is merged. To resume: finish
+scoreboard-run round 3 (its last commit is a WIP of Codex's interrupted
+work, so check it against ~/goose-wt/logs/scoreboard-run.r3.prompt.md),
+merge it, then rebase and merge the gap branches in order.
+
 ## Goal
 
 Grow a self-hosted Goose compiler, written in Goose, in `selfhost/`, until it
@@ -54,12 +63,12 @@ say so.
 | task | worker | state | notes |
 |------|--------|-------|-------|
 | selfhost-seed | claude | done | Merged 2026-10-24. Codex review and verify clean |
-| scoreboard-run | codex | round 3 | Round 2 verified and reviewed: everything holds except that the cc step depends on cwd (fails unless run from the repo root). Round 3 fixes that plus Windows tree-kill, posix paths, restored comments, per-board statuses |
+| scoreboard-run | codex | paused in round 3 | Round 2 verified and reviewed: everything holds except that the cc step depends on cwd (fails unless run from the repo root). Round 3 fixes that plus Windows tree-kill, posix paths, restored comments, per-board statuses | WIP commit holds the interrupted round-3 changes |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
 | gap-param-defaults | claude | ready | Fix 253425a re-reviewed by Codex: clean. 22 pass. Merges after scoreboard-run |
-| gap-float-text | codex | checking | 20→29 pass, 19→11 mismatch; 8,365 values match build/goose. Claude verify and review running. Base bb6807c |
-| gap-multi-return | codex | checking | 20→23 pass, no regressions; multi-return and multi-binding clusters at zero. Exposed 47 range-checked float-to-integer conversions. Claude verify and review running. Base bb6807c |
+| gap-float-text | codex | unchecked | 20→29 pass, 19→11 mismatch; 8,365 values match build/goose. Base bb6807c. Verify and review were stopped before they reported |
+| gap-multi-return | codex | verified | 20→23 pass. Claude verify PASS (full suite, 22 adversarial programs). Review was stopped before it reported. Base bb6807c |
 
 Mismatches left after gap-float-text (11) are almost all runtime
 diagnostic text: assertion messages, bounds-failure wording, negative
