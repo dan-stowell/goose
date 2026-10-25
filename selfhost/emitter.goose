@@ -30,14 +30,21 @@ fn c_frame(ctx: Compiler&, target: i64) -> const u8[:] {
     }
     return save_text(ctx, out);
 }
+// A global initializer runs in main before any function frame exists, so the
+// locals of its blocks, and of the defaults its calls take, are kept beside
+// the globals rather than in a frame.
+fn global_storage(ctx: Compiler&, symbol: i64) -> bool {
+    let scope = ctx.symbols[symbol].scope;
+    return scope == 0 || ctx.scopes[scope].function < 0;
+}
 fn c_symbol(ctx: Compiler&, symbol: i64) -> const u8[:] {
-    if ctx.symbols[symbol].scope == 0 { return save_text(ctx, str("gg_globals.", c_name(ctx, symbol))); }
+    if global_storage(ctx, symbol) { return save_text(ctx, str("gg_globals.", c_name(ctx, symbol))); }
     let owner = ctx.scopes[ctx.symbols[symbol].scope].function;
     if ctx.return_locals[owner] == symbol { return save_text(ctx, str("(*", c_frame(ctx, owner), "->result.header)")); }
     return save_text(ctx, str(c_frame(ctx, ctx.scopes[ctx.symbols[symbol].scope].function), "->", c_name(ctx, symbol)));
 }
 fn c_stack(ctx: Compiler&, symbol: i64) -> const u8[:] {
-    if ctx.symbols[symbol].scope == 0 { return save_text(ctx, str("gg_get_stack(", ctx.symbol_slots[symbol], ")")); }
+    if global_storage(ctx, symbol) { return save_text(ctx, str("gg_get_stack(", ctx.symbol_slots[symbol], ")")); }
     let owner = ctx.scopes[ctx.symbols[symbol].scope].function;
     if ctx.return_locals[owner] == symbol { return save_text(ctx, str(c_frame(ctx, owner), "->result.stack")); }
     return save_text(ctx, str("gg_get_stack(", c_frame(ctx, ctx.scopes[ctx.symbols[symbol].scope].function), "->base + ", ctx.symbol_slots[symbol], ")"));
@@ -508,7 +515,7 @@ fn c_signature(ctx: Compiler&, spec_id: i64) {
 }
 fn c_frames(ctx: Compiler&) {
     emit(ctx, "static struct {\n  unsigned char dummy;\n");
-    for s, i in ctx.symbols { if s.kind == 2 && s.scope == 0 { emit(ctx, str("  ", c_type(ctx, s.ty), " ", c_name(ctx, i), ";\n")); } }
+    for s, i in ctx.symbols { if s.kind == 2 && s.ty >= 0 && global_storage(ctx, i) { emit(ctx, str("  ", c_type(ctx, s.ty), " ", c_name(ctx, i), ";\n")); } }
     emit(ctx, "} gg_globals;\n");
     for spec, id in ctx.specializations {
         if ctx.nodes[ctx.symbols[spec.symbol].decl].flags & 2 != 0 { continue; }
@@ -536,7 +543,7 @@ fn prepare_emission(ctx: Compiler&) {
     for s, i in ctx.symbols {
         var slot = -1;
         if s.kind == 2 && s.ty >= 0 && ctx.types[s.ty].size_class == 2 {
-            if s.scope == 0 { slot = ctx.c_global_slots; ctx.c_global_slots++; }
+            if global_storage(ctx, i) { slot = ctx.c_global_slots; ctx.c_global_slots++; }
             else { let owner = ctx.scopes[s.scope].function; if ctx.return_locals[owner] != i { slot = ctx.function_slots[owner]; ctx.function_slots[owner]++; } }
         }
         ctx.symbol_slots.push(slot);
