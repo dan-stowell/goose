@@ -63,7 +63,7 @@ say so.
 | task | worker | state | notes |
 |------|--------|-------|-------|
 | selfhost-seed | claude | done | Merged 2026-10-24. Codex review and verify clean |
-| scoreboard-run | codex | paused in round 3 | Round 2 verified and reviewed: everything holds except that the cc step depends on cwd (fails unless run from the repo root). Round 3 fixes that plus Windows tree-kill, posix paths, restored comments, per-board statuses | WIP commit holds the interrupted round-3 changes |
+| scoreboard-run | codex | paused in round 3 | Round 2 verified and reviewed: everything holds except that the cc step depends on cwd (fails unless run from the repo root). Round 3 fixes that plus Windows tree-kill, posix paths, restored comments, per-board statuses. A WIP commit holds the interrupted round-3 changes |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
 | gap-param-defaults | claude | ready | Fix 253425a re-reviewed by Codex: clean. 22 pass. Merges after scoreboard-run |
