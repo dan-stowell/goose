@@ -46,7 +46,9 @@ Clang -O1 with ASan/UBSan on Linux, including the samples and C runtime tests.
 The goose_in_goose/ compiler is one multi-file bootstrap fixture: build three
 native generations, require identical stage-2/stage-3 C, and run a self-check
 of the stage-2 compiler, which stands for both, beside stage 3's build.
-TinyCC also emits the same C when available.
+TinyCC also emits the same C when available. The self-hosted compiler in
+selfhost/, grown from the same sources, goes through the same bootstrap as a
+section of its own.
 
 The work runs on --jobs threads, each waiting on the processes it starts, and
 the log comes out in the same order whatever the number of jobs: each piece of
@@ -1133,10 +1135,16 @@ class Runner:
                 valid = False
         return valid
 
-    # --- the Goose-written compiler ---------------------------------------
+    # --- the Goose-written compilers --------------------------------------
 
-    def goose_in_goose(self, cc, profile, extra, jit):
-        """Exercise the compiler as a large program, then execute its output.
+    def bootstrap(self, name, root, cc, profile, extra, jit):
+        """Exercise a Goose-written compiler as a large program, then execute
+        its output.
+
+        The same chain serves both of them: the frozen goose_in_goose
+        regression under test/ and the self-hosted compiler under selfhost/.
+        name labels the section, its checks and the directory of its outputs;
+        root holds the compiler's main.goose.
 
         Stage 1 comes from the compiler under test; each subsequent stage is
         emitted by the preceding executable from the same Goose sources.
@@ -1146,8 +1154,8 @@ class Runner:
         The chain of stages at each level, and the JIT self-compile at each,
         are jobs of their own, started here; what this returns adds their
         slots, and those of the comparisons between them, to the log."""
-        source = HERE / "goose_in_goose" / "main.goose"
-        directory = tc.REPO_ROOT / "build" / "gen" / profile / "goose_in_goose"
+        source = root / "main.goose"
+        directory = tc.REPO_ROOT / "build" / "gen" / profile / name
 
         # Generated compilers need the same stack budget as the host. Only
         # the child's soft limit is raised, by the shell that starts it: the
@@ -1207,7 +1215,7 @@ class Runner:
         def chain(ol):
             """The native stages at one level; the stage-2 C, when they all
             built."""
-            label = f"goose_in_goose -O{ol}"
+            label = f"{name} -O{ol}"
             work = directory / f"O{ol}"
             work.mkdir(parents=True, exist_ok=True)
             if not cc:
@@ -1264,7 +1272,7 @@ class Runner:
         def jit_self_compile(ol):
             """The Goose-written compiler run through TinyCC, compiling
             itself; the C it wrote."""
-            label = f"goose_in_goose -O{ol}"
+            label = f"{name} -O{ol}"
             work = directory / f"O{ol}"
             work.mkdir(parents=True, exist_ok=True)
             cfile = work / "jit-stage2.c"
@@ -1286,22 +1294,22 @@ class Runner:
             jit_c, native_c = jits[ol].result().value, chains[ol].result().value
             if jit_c is not None and native_c is not None:
                 if jit_c != native_c:
-                    self.fail(f"JIT/native self-compile differs goose_in_goose -O{ol}")
+                    self.fail(f"JIT/native self-compile differs {name} -O{ol}")
                 else:
-                    self.ok(f"JIT/native self-compile matches goose_in_goose -O{ol}")
+                    self.ok(f"JIT/native self-compile matches {name} -O{ol}")
 
         def compare_levels():
             outputs = [chains[ol].result().value for ol in levels]
             if len(outputs) == 2 and None not in outputs:
                 if outputs[0] != outputs[1]:
-                    self.fail("goose_in_goose self-compile differs between O0 and O2")
+                    self.fail(f"{name} self-compile differs between O0 and O2")
                 else:
-                    self.ok("goose_in_goose self-compile matches between O0 and O2")
+                    self.ok(f"{name} self-compile matches between O0 and O2")
 
         def show():
-            self.section("goose_in_goose bootstrap")
+            self.section(f"{name} bootstrap")
             if not cc:
-                self.show_later(self.say, "skip native goose_in_goose bootstrap "
+                self.show_later(self.say, f"skip native {name} bootstrap "
                                           "(no C compiler found or --nocgen)")
             for ol in levels:
                 self.show(chains[ol])
@@ -1335,6 +1343,9 @@ def main():
                     help="skip the in-process TinyCC runs even where they are available")
     ap.add_argument("--goose-in-goose-only", action="store_true",
                     help="run only the multi-stage Goose-written compiler regression")
+    ap.add_argument("--selfhost-only", action="store_true",
+                    help="run only the multi-stage bootstrap of the self-hosted compiler "
+                         "in selfhost/")
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs(),
                     help=f"how many jobs run at once (default {default_jobs()}); "
                          "1 runs everything in order on one thread")
@@ -1356,6 +1367,8 @@ def main():
     if args.profile == "sanitize" and (not sys.platform.startswith("linux") or
                                         args.cc not in (None, "clang")):
         ap.error("the sanitize profile requires Linux and Clang")
+    if args.goose_in_goose_only and args.selfhost_only:
+        ap.error("--goose-in-goose-only and --selfhost-only cannot be combined")
     if args.jobs < 1 or args.gpu_jobs < 0 or args.batch < 0:
         ap.error("--jobs must be at least 1, and --gpu-jobs and --batch at least 0")
 
@@ -1382,11 +1395,18 @@ def main():
     r.gpulock = threading.BoundedSemaphore(args.gpu_jobs) if args.gpu_jobs else None
     r.batch = args.batch
 
-    # The bootstrap is the longest chain of work in the suite, so it starts
-    # first, and the samples' runner, a process of its own, next.
-    show_goose_in_goose = r.goose_in_goose(cc, args.profile, extra, jit)
-    if args.goose_in_goose_only:
-        show_goose_in_goose()
+    # The bootstraps are the longest chains of work in the suite, so they
+    # start first, and the samples' runner, a process of its own, next. Each
+    # --*-only flag starts only its own bootstrap.
+    show_goose_in_goose = show_selfhost = None
+    if not args.selfhost_only:
+        show_goose_in_goose = r.bootstrap("goose_in_goose", HERE / "goose_in_goose",
+                                          cc, args.profile, extra, jit)
+    if not args.goose_in_goose_only:
+        show_selfhost = r.bootstrap("selfhost", tc.REPO_ROOT / "selfhost",
+                                    cc, args.profile, extra, jit)
+    if args.goose_in_goose_only or args.selfhost_only:
+        (show_goose_in_goose or show_selfhost)()
         r.flush()
         return r.finish()
 
@@ -2245,6 +2265,7 @@ def main():
         r.show_task(native_builder)
 
     show_goose_in_goose()
+    show_selfhost()
 
     # --- JIT: the same programs, compiled and run inside the compiler --------
     # No C file, no external toolchain: what this checks is that the generated
