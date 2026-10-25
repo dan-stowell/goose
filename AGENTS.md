@@ -59,3 +59,12 @@ calling a task done. It takes about as long as the -O0 bootstrap chain does.
   in full sentences.
 - Finish with a short report: what you changed, what you ran and its result
   (paste the summary lines), and anything you weren't sure about.
+
+## The self-hosted compiler
+
+`selfhost/` is a Goose compiler written in Goose, grown toward doing what
+`src/` does (see `PLAN.md`). It is clean-room: when you write `selfhost/`
+code, don't read `src/`. Work from `docs/`, `stdlib/`, the fixtures and what
+`build/goose` does when you run it. If the docs don't settle a behavior, say
+so in your report rather than guessing. Reviewers and verifiers may read
+`src/`. `test/goose_in_goose/` stays frozen; don't change it.
