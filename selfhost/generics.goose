@@ -60,7 +60,7 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
         if written >= 0 { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, "non-generic function takes no type arguments"); }
         return symbol;
     }
-    if child_count(ctx, decl.a) != child_count(ctx, call) { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, "argument count mismatch"); }
+    if !arity_fits(ctx, original.decl, child_count(ctx, call)) { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, "argument count mismatch"); }
     let bindings = scope_new(ctx, original.scope, ctx.scopes[original.scope].function);
     var key = -1; var last = -1;
     var g = decl.first; var supplied = written;
@@ -89,8 +89,10 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
     }
     // Read each argument once. Explicitly supplied type arguments can give
     // empty array literals and branch expressions their destination type.
+    // Parameters left to their defaults have no argument here: a default
+    // decides no type variable, and check_function checks it later.
     p = ctx.nodes[ctx.nodes[specialized].a].first; var a = ctx.nodes[call].first;
-    while p >= 0 {
+    while p >= 0 && a >= 0 {
         let param = ctx.nodes[ctx.edges[p].value]; let arg = ctx.edges[a].value;
         var expected = -1;
         if !unresolved_type(ctx, param.a, bindings) { expected = resolve_type(ctx, param.a, bindings); }
@@ -101,7 +103,7 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
     // Nonliteral values constrain a shared type before adaptable literals do.
     for pass in 2 {
         p = ctx.nodes[ctx.nodes[specialized].a].first; a = ctx.nodes[call].first;
-        while p >= 0 {
+        while p >= 0 && a >= 0 {
             let value = value_of(ctx, ctx.edges[a].value);
             if (pass == 1) == value.known { infer_type_pattern(ctx, ctx.nodes[ctx.edges[p].value].a, natural_argument_type(ctx, value), bindings); }
             p = ctx.edges[p].next; a = ctx.edges[a].next;
@@ -124,6 +126,15 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
     return concrete;
 }
 
+// A call may leave out trailing parameters that declare defaults (§7.1).
+fn arity_fits(ctx: Compiler&, decl: i64, written: i64) -> bool {
+    var count = 0; var e = ctx.nodes[ctx.nodes[decl].a].first;
+    while e >= 0 {
+        if count >= written && ctx.nodes[ctx.edges[e].value].b < 0 { return false; }
+        count++; e = ctx.edges[e].next;
+    }
+    return count >= written;
+}
 fn overload_member(ctx: Compiler&, candidate: i64, selected: i64) -> bool {
     let a = ctx.symbols[candidate]; let b = ctx.symbols[selected];
     return a.kind == 3 && a.scope == b.scope && same_name(ctx, a.token, b.token) && (a.scope != 0 || same_name(ctx, a.ns, b.ns));
@@ -142,15 +153,15 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
     var best = -1; var best_tier = 3; var ambiguous = false;
     for i in limit {
         if !overload_member(ctx, i, selected) { continue; }
-        let original = ctx.nodes[ctx.symbols[i].decl];
-        if child_count(ctx, original.a) != child_count(ctx, call) { continue; }
+        if !arity_fits(ctx, ctx.symbols[i].decl, child_count(ctx, call)) { continue; }
         let concrete = specialize_signature(ctx, i, call, scope, true);
         if concrete < 0 { continue; }
         let decl = ctx.nodes[ctx.symbols[concrete].decl];
         var tier = 0; if concrete != i { tier = 1; }
         var matches = true;
+        // A default is no argument: the written arguments alone rank.
         var p = ctx.nodes[decl.a].first; e = ctx.nodes[call].first;
-        while p >= 0 {
+        while p >= 0 && e >= 0 {
             let actual = value_of(ctx, ctx.edges[e].value);
             let expected = resolve_type(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.symbols[concrete].scope);
             if !fits(ctx, actual, expected) { matches = false; }

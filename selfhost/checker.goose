@@ -713,6 +713,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     if s < 0 { error_at(ctx, ctx.nodes[callee].token, str("unknown function '", name, "'")); }
     if ctx.symbols[s].scope != 0 && ctx.symbols[s].state != 2 { error_at(ctx, ctx.nodes[callee].token, "nested function called before its declaration is reached"); }
     let concrete = resolve_overload(ctx, s, n, scope);
+    fill_defaults(ctx, concrete, n);
     let spec = check_function(ctx, concrete, n, scope);
     ctx.checked_calls.push(CheckedCall { node: n, scope: scope, callee: spec });
     var effect = ctx.specializations[spec].shrinks;
@@ -725,6 +726,44 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     ctx.nodes[n].symbol = spec;
     return Value { ty: ctx.specializations[spec].result, root: ctx.specializations[spec].result_root, readonly: ctx.specializations[spec].result_readonly, growshrink: ctx.specializations[spec].result_growshrink, inexact: ctx.specializations[spec].result_inexact, held: ctx.specializations[spec].result_root, fields: ctx.specializations[spec].result_fields };
 }
+// A call leaving out trailing parameters gets a fresh clone of each one's
+// default after its written arguments, in parameter order (§7.1). Field c
+// of the call is the edge of the first, so it is checked as a default.
+fn fill_defaults(ctx: Compiler&, symbol: i64, call: i64) {
+    if ctx.nodes[call].flags & 1024 != 0 { return; }
+    ctx.nodes[call].flags |= 1024;
+    var p = ctx.nodes[ctx.nodes[ctx.symbols[symbol].decl].a].first; var e = ctx.nodes[call].first;
+    while p >= 0 && e >= 0 { p = ctx.edges[p].next; e = ctx.edges[e].next; }
+    if p >= 0 && ctx.nodes[call].flags & 128 != 0 { error_at(ctx, ctx.nodes[call].token, "not implemented yet: a trailing block with parameter defaults"); }
+    while p >= 0 {
+        let parameter = ctx.edges[p].value;
+        if ctx.nodes[parameter].b < 0 { error_at(ctx, ctx.nodes[call].token, "argument count mismatch"); }
+        child(ctx, call, clone_tree(ctx, ctx.nodes[parameter].b));
+        if ctx.nodes[call].c < 0 { ctx.nodes[call].c = ctx.nodes[call].last; }
+        p = ctx.edges[p].next;
+    }
+}
+// A default is checked at the call, as the argument written there, so its
+// temporaries and block locals belong to the caller. Only the names it
+// reads come from the declaration, through the floor lookup redirects.
+recursive fn check_default(ctx: Compiler&, n: i64, symbol: i64, parameter: i64, caller_scope: i64, expected: i64) -> Value {
+    let defaults = ctx.default_stack;
+    let token = ctx.nodes[parameter].token;
+    var i = defaults.len;
+    while i > 0 && defaults[i - 1] >= 0 {
+        i--;
+        if defaults[i] == token { error_at(ctx, ctx.nodes[n].token, str("the default of parameter ", ctx.tokens[token].text, " leads to a call that takes it again")); }
+    }
+    let mark = defaults.len; defaults.push(token);
+    let floor = ctx.default_floor; let outer = ctx.default_scope; let limit = ctx.default_limit; let decl = ctx.default_decl; let param = ctx.default_param;
+    let scope = scope_new(ctx, caller_scope, ctx.checking_function);
+    ctx.default_floor = scope; ctx.default_scope = ctx.symbols[symbol].scope; ctx.default_limit = ctx.symbols[symbol].capture_limit;
+    ctx.default_decl = ctx.symbols[symbol].decl; ctx.default_param = parameter;
+    let v = check_expression(ctx, n, scope, expected);
+    ctx.default_floor = floor; ctx.default_scope = outer; ctx.default_limit = limit; ctx.default_decl = decl; ctx.default_param = param;
+    defaults.resize(mark);
+    return v;
+}
 recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope: i64) -> i64 {
     let decl = ctx.symbols[symbol].decl;
     if ctx.nodes[decl].first >= 0 { error_at(ctx, ctx.nodes[decl].token, "not implemented yet: generic functions"); }
@@ -733,13 +772,15 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
     var actual = -1;
     if call >= 0 { actual = ctx.nodes[call].first; }
     var p = ctx.nodes[params].first;
+    var defaulted = false;
     while p >= 0 {
         let parameter = ctx.edges[p].value;
         if ctx.nodes[parameter].a < 0 { error_at(ctx, ctx.nodes[parameter].token, "not implemented yet: inferred parameter types"); }
         let expected = resolve_type(ctx, ctx.nodes[parameter].a, ctx.symbols[symbol].scope);
         if actual >= 0 {
             let arg = ctx.edges[actual].value;
-            let v = if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
+            if actual == ctx.nodes[call].c { defaulted = true; }
+            let v = if defaulted { check_default(ctx, arg, symbol, parameter, caller_scope, expected) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
             require_fit(ctx, arg, v, expected);
             if ctx.types[expected].size_class > 0 && v.place >= 0 { error_at(ctx, ctx.nodes[arg].token, "nonfixed value parameter needs a fresh value or explicit copy"); }
             actual = ctx.edges[actual].next;
@@ -819,8 +860,12 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
     if ctx.nodes[decl].flags & 2 == 0 {
         let previous = ctx.checking_function; let previous_loop = ctx.loop_depth;
         ctx.checking_function = id; ctx.loop_depth = 0;
+        // A body declared outside a default may take that default again,
+        // which makes it recursive rather than an endless default (§3.2).
+        let defaults = ctx.default_stack; let default_mark = defaults.len; defaults.push(-1);
         let tail = check_expression(ctx, body, scope, result);
         if ctx.types[tail.ty].kind != T_BOTTOM { check_return(ctx, ctx.nodes[body].a, tail, id, ctx.nodes[decl].token); }
+        defaults.resize(default_mark);
         ctx.checking_function = previous; ctx.loop_depth = previous_loop;
     } else if result < 0 { ctx.specializations[id].result = 0; }
     if ctx.specializations[id].result < 0 { ctx.specializations[id].result = 0; }

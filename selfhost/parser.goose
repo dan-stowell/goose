@@ -418,12 +418,21 @@ recursive fn function_decl(ctx: Compiler&, nested: bool) -> i64 {
     let old_namespace = ctx.current_namespace; ctx.current_namespace = ctx.nodes[n].ns;
     generics(ctx, n);
     let params = node(ctx, N_BLOCK, expect(ctx, "(")); ctx.nodes[n].a = params;
+    var defaulted = false;
     if !at(ctx, ")") {
         loop {
             var mutable = false; if take(ctx, "var") { mutable = true; }
             let p = node(ctx, N_PARAM, identifier(ctx));
             if mutable { ctx.nodes[p].flags = 1; }
             if take(ctx, ":") { ctx.nodes[p].a = parse_type(ctx); }
+            // A default stays syntax on the parameter. Each call leaving it
+            // out checks and evaluates its own clone (§7.1).
+            if at(ctx, "=") {
+                if ctx.nodes[p].a < 0 { error_at(ctx, ctx.cursor, str("parameter ", ctx.tokens[ctx.nodes[p].token].text, " has a default but no type")); }
+                if flags & 4 != 0 { error_at(ctx, ctx.cursor, "a thread_fn's parameters have no defaults"); }
+                ctx.cursor++;
+                ctx.nodes[p].b = expression(ctx, 0, true, false); defaulted = true;
+            } else if defaulted { error_at(ctx, ctx.nodes[p].token, str("parameter ", ctx.tokens[ctx.nodes[p].token].text, " needs a default: only trailing parameters have defaults")); }
             child(ctx, params, p);
             if !take(ctx, ",") || at(ctx, ")") { break; }
         }
