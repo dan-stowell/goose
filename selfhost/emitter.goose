@@ -160,7 +160,7 @@ fn converted(ctx: Compiler&, v: CValue, target: i64) -> CValue {
 fn c_render(ctx: Compiler&, out: CValue, v: CValue) {
     let a = c_decay(ctx, v); let t = ctx.types[a.ty]; let dst = c_reference(ctx, out);
     if t.kind == T_INTEGER { emit(ctx, str("  ", if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(", dst, ", ", a.code, ");\n")); }
-    else if t.kind == T_FLOAT { emit(ctx, str("  gg_float(", dst, ", ", a.code, ");\n")); }
+    else if t.kind == T_FLOAT { emit(ctx, str("  gg_float(", dst, ", ", a.code, ", ", if t.bytes == 4 { "1" } else { "0" }, ");\n")); }
     else if t.kind == T_BOOL { emit(ctx, str("  gg_bool(", dst, ", ", a.code, ");\n")); }
     else if element_type(ctx, a.ty) == integer_type(ctx, 1, true) { emit(ctx, str("  gg_text(", dst, ", ", c_view(ctx, a), ");\n")); }
     else { emit(ctx, str("  gg_render_", a.ty, "(", dst, ",", a.code, ");\n")); }

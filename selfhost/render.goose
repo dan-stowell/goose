@@ -33,7 +33,7 @@ fn c_format_helpers(ctx: Compiler&) {
         emit(ctx, "}\n");
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value) {\n"));
         if t.kind == T_INTEGER { emit(ctx, str(if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(out,value);\n")); }
-        else if t.kind == T_FLOAT { emit(ctx, "gg_float(out,value);\n"); }
+        else if t.kind == T_FLOAT { emit(ctx, str("gg_float(out,value,", if t.bytes == 4 { "1" } else { "0" }, ");\n")); }
         else if t.kind == T_BOOL { emit(ctx, "gg_bool(out,value);\n"); }
         else if t.kind == T_REFERENCE {
             emit(ctx, str("gg_render_", t.element, "(out,", if ctx.types[t.element].size_class == 2 { "*value.header" } else { "*value" }, ");\n"));

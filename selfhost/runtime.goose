@@ -107,7 +107,81 @@ fn runtime_source() -> const u8[:] {
     static void gg_text(gg_reference out, gg_slice v) { gg_append(out,v.data,v.len,1); }
     static void gg_integer(gg_reference out,int64_t n) { char b[32]; int k=snprintf(b,sizeof b,"%lld",(long long)n);gg_append(out,b,k,1); }
     static void gg_unsigned(gg_reference out,uint64_t n) { char b[32]; int k=snprintf(b,sizeof b,"%llu",(unsigned long long)n);gg_append(out,b,k,1); }
-    static void gg_float(gg_reference out,double n) { char b[64];int k=snprintf(b,sizeof b,"%.15g",n);if(strtod(b,NULL)!=n)k=snprintf(b,sizeof b,"%.17g",n);gg_append(out,b,k,1); }
+    /* Build the exact decimal digits before rounding. Trying only the nearest
+       spelling can miss a shortest spelling across a power-of-two boundary,
+       where the two round-trip margins have different widths. */
+    static int gg_float_matches(double n, int narrow, uint64_t m, int exponent) {
+        char b[40];
+        snprintf(b,sizeof b,"%llue%+d",(unsigned long long)m,exponent);
+        return narrow ? strtof(b,NULL)==(float)n : strtod(b,NULL)==n;
+    }
+    static void gg_float(gg_reference out,double n,int narrow) {
+        unsigned char exact[1100];
+        char digits[32], b[64];
+        uint64_t bits, m, rounded=0;
+        int binary, scale=0, len=0, i, j, carry, factor, p, q=0, up, tail, k, e, pos=0;
+        if(narrow) n=(float)n;
+        memcpy(&bits,&n,sizeof bits);
+        binary=(int)((bits>>52)&2047);
+        m=bits&UINT64_C(4503599627370495);
+        if(binary==2047) {
+            if(m) gg_append(out,"nan",3,1);
+            else gg_append(out,bits>>63?"-inf":"inf",bits>>63?4:3,1);
+            return;
+        }
+        if(bits>>63) { b[pos++]='-'; n=-n; }
+        if(!binary && !m) {
+            memcpy(b+pos,"0.0",3); gg_append(out,b,pos+3,1); return;
+        }
+        if(binary) { m|=UINT64_C(4503599627370496); binary-=1075; }
+        else binary=-1074;
+        do { exact[len++]=(unsigned char)(m%10); m/=10; } while(m);
+        /* Multiplying by 5 and shifting the decimal point is division by 2.
+           Even the smallest f64 needs fewer than 1100 exact decimal digits. */
+        factor=binary<0?5:2;
+        if(binary<0) { scale=binary; binary=-binary; }
+        for(i=0;i<binary;i++) {
+            carry=0;
+            for(j=0;j<len;j++) { carry+=exact[j]*factor; exact[j]=(unsigned char)(carry%10); carry/=10; }
+            if(carry) exact[len++]=(unsigned char)carry;
+        }
+        for(p=1;p<=(narrow?9:17);p++) {
+            m=0;
+            for(i=len-1;i>=0 && i>=len-p;i--) m=m*10+exact[i];
+            q=scale+(len>p?len-p:0); rounded=m;
+            if(p>=len) break;
+            tail=0;
+            for(i=0;i<len-p-1;i++) if(exact[i]) tail=1;
+            up=exact[len-p-1]>5 || (exact[len-p-1]==5 && (tail || (m&1)));
+            if(up) rounded++;
+            if(gg_float_matches(n,narrow,rounded,q)) break;
+            /* The nearest candidate failed. Only its neighbor across the
+               exact value can lie inside the other round-trip margin. */
+            m=up?rounded-1:rounded+1;
+            if(gg_float_matches(n,narrow,m,q)) { rounded=m; break; }
+        }
+        while(rounded%10==0) { rounded/=10; q++; }
+        k=snprintf(digits,sizeof digits,"%llu",(unsigned long long)rounded);
+        e=q+k-1;
+        /* The observed layout uses general notation with at least 15 digits
+           of precision, even when the shortest significand has fewer. */
+        if(e < -4 || e >= (k>15?k:15)) {
+            b[pos++]=digits[0];
+            if(k>1) { b[pos++]='.'; memcpy(b+pos,digits+1,(size_t)k-1); pos+=k-1; }
+            pos+=snprintf(b+pos,sizeof b-(size_t)pos,"e%+03d",e);
+        } else if(e<0) {
+            b[pos++]='0'; b[pos++]='.';
+            for(i=-1;i>e;i--) b[pos++]='0';
+            memcpy(b+pos,digits,(size_t)k); pos+=k;
+        } else {
+            for(i=0;i<=e || i<k;i++) {
+                if(i==e+1) b[pos++]='.';
+                b[pos++]=i<k?digits[i]:'0';
+            }
+            if(q>=0) { b[pos++]='.'; b[pos++]='0'; }
+        }
+        gg_append(out,b,pos,1);
+    }
     static void gg_bool(gg_reference out,uint8_t n) { gg_append(out,n?"true":"false",n?4:5,1); }
     static void gg_write(FILE *file,gg_slice text) { if(text.len && fwrite(text.data,1,(size_t)text.len,file)!=(size_t)text.len)gg_fail("write failed"); }
     static char *gg_cstring(gg_slice path) {
