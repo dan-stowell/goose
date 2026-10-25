@@ -152,9 +152,10 @@ def runtime_defines(source):
 
 
 def positive_fixtures():
-    """One level of categories, excluding the bootstraps' modules, syntax
-    helpers and LSP fixtures. Native-module rejection fixtures stay beside
-    their positive fixtures, so return those separately for error checks."""
+    """Discover one level of categories. Bootstrap modules and syntax helpers
+    are covered through their entry points, and lsp/ belongs to lsp_protocol.py.
+    Gfx rejection tests live beside what they reject, so return native-module
+    rejection fixtures separately for error checks."""
     tests = [f for f in sorted(HERE.glob("*/*.goose"))
              if f.parent.name not in ("errors", "errors_tc", "goose_in_goose", "lsp") and
              f.name != "lexer_tokens.goose"]
@@ -164,7 +165,8 @@ def positive_fixtures():
 
 def compiler_stack_prefix():
     """Give generated compilers the host's stack budget without changing the
-    runner's limit or using a preexec_fn in its threaded process."""
+    runner's limit or using a preexec_fn in its threaded process. Only the
+    child's soft limit is raised, by the shell that starts it."""
     if sys.platform.startswith("linux"):
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
@@ -1196,7 +1198,13 @@ class Runner:
             return code, out, err
 
         def diagnostic(err, fallback):
-            return next((line.strip() for line in err.splitlines() if line.strip()), fallback)
+            return shorten(next((line.strip() for line in err.splitlines() if line.strip()), fallback))
+
+        def shorten(detail):
+            for path in (cfile, executable, f):
+                relative = path.relative_to(tc.REPO_ROOT).as_posix()
+                detail = detail.replace(str(path), relative).replace(path.as_posix(), relative)
+            return detail
 
         def crashed(code):
             return code < 0 or (tc.IS_WINDOWS and code >= 0x80000000)
@@ -1211,7 +1219,7 @@ class Runner:
         phase = "emit"
         try:
             code, out, err = run([*compiler_stack_prefix(), compiler, "-o", cfile,
-                                 f.relative_to(tc.REPO_ROOT)], phase)
+                                 f.relative_to(tc.REPO_ROOT).as_posix()], phase)
             if crashed(code):
                 return "crash", crash_detail(code, err, "selfhost")
             if code and "goose runtime error:" in err:
@@ -1223,14 +1231,14 @@ class Runner:
             # Selfhost's C includes its runtime, as bootstrap stages 2 and 3
             # do, so it links no host runtime object.
             opt, defines = self.build_options(0)
-            ok, log = cc.compile(cfile.relative_to(tc.REPO_ROOT), executable, opt=opt,
+            ok, log = cc.compile(cfile, executable, opt=opt,
                                  defines=defines + runtime_defines(f), extra=extra,
                                  strict_decls=True, log=work / "cc.log",
                                  timeout=max(0, deadline - time.monotonic()))
             if not ok:
                 lines = log.splitlines()
                 error = next((line.strip() for line in lines if re.search(r"\berror\b", line)), None)
-                return "cc-error", error or diagnostic(log, "C compiler failed")
+                return "cc-error", shorten(error) if error else diagnostic(log, "C compiler failed")
 
             phase = "run"
             code, out, err = run([executable], phase)
@@ -1244,15 +1252,16 @@ class Runner:
                 return "crash", crash_detail(code, err, "program")
             reason = next((line.removeprefix("FAIL ").strip() for line in checked.text
                            if line.startswith("FAIL ")), "output differs")
-            return "mismatch", f"{reason}: {diagnostic(err, '')}"
+            detail = diagnostic(err, "")
+            return "mismatch", reason + (f": {detail}" if detail else "")
         except subprocess.TimeoutExpired as exc:
             tc.write_text(work / f"{phase}.log", tc.decode(exc.output or b"") +
                           tc.decode(exc.stderr or b""))
             return "timeout", f"{phase}: {timeout}s fixture timeout"
         except OSError as exc:
-            return {"emit": "rejected", "cc": "cc-error", "run": "crash"}[phase], str(exc)
+            return {"emit": "rejected", "cc": "cc-error", "run": "crash"}[phase], shorten(str(exc))
 
-    def score_runs(self, stage2, tests, cc, profile, extra, bless=False):
+    def score_runs(self, stage2, tests, cc, extra, bless=False):
         """Score execution fixtures only after the bootstrap has succeeded.
         A broken compiler build must leave the last useful report intact so
         it cannot hide the language coverage the coordinator is working from."""
@@ -1265,7 +1274,7 @@ class Runner:
             if bless:
                 self.fail("refusing --bless-selfhost for run: stage-2 bootstrap failed")
             return
-        directory = tc.REPO_ROOT / "build" / "gen" / profile / "selfhost" / "scoreboard"
+        directory = tc.REPO_ROOT / "build" / "gen" / self.profile / "selfhost" / "scoreboard"
         files = [f for f in tests if "parse-only" not in first_line(f)]
         futures = {f: self.submit(self.score_fixture, compiler, f, cc, directory, extra)
                    for f in files}
@@ -1276,14 +1285,15 @@ class Runner:
             if defines and status != "pass":
                 detail = f"runtime-define {', '.join(defines)}: {detail}"
             results[f.name] = (f.parent.name, status, detail)
-        self.scoreboard("run", results, profile, bless)
+        self.scoreboard("run", results, bless, statuses=(
+            "pass", "mismatch", "rejected", "cc-error", "crash", "timeout", "unsupported"))
 
-    def scoreboard(self, board, results, profile, bless=False):
+    def scoreboard(self, board, results, bless=False, statuses=()):
         """Save coverage results before enforcing the board's passing baseline.
         Keeping all diagnostics lets the coordinator choose the next feature,
         while an add-only baseline prevents blessing away a regression. Missing
         fixtures count as regressions too, so discovery changes cannot lose ground."""
-        directory = tc.REPO_ROOT / "build" / "gen" / profile / "selfhost" / "scoreboard"
+        directory = tc.REPO_ROOT / "build" / "gen" / self.profile / "selfhost" / "scoreboard"
         directory.mkdir(parents=True, exist_ok=True)
         with (directory / f"{board}.tsv").open("w", encoding="utf-8", newline="") as report:
             report.write("fixture\tcategory\tstatus\tstderr\n")
@@ -1291,7 +1301,7 @@ class Runner:
                 fields = (name, category, status, detail)
                 report.write("\t".join(field.replace("\t", " ").replace("\r", " ").split("\n")[0]
                                        for field in fields) + "\n")
-        statuses = ("pass", "mismatch", "rejected", "cc-error", "crash", "timeout", "unsupported")
+        statuses = list(statuses) + sorted({status for _, status, _ in results.values()} - set(statuses))
         self.say(f"selfhost {board} scoreboard: " + ", ".join(
             f"{sum(status == s for _, status, _ in results.values())} {s}" for s in statuses))
 
@@ -1316,6 +1326,13 @@ class Runner:
                 self.ok(f"selfhost {board} scoreboard baseline ({len(passes)} fixtures)")
         elif baseline.exists() and not regressions:
             self.ok(f"selfhost {board} scoreboard baseline ({len(previous)} fixtures)")
+
+    def scoreboard_checks(self):
+        code, out, err = tc.run_capture([sys.executable, HERE / "selfhost_scoreboard.py"])
+        if code:
+            self.fail("selfhost scoreboard runner", out + err)
+        else:
+            self.ok("selfhost scoreboard runner: regression checks passed")
 
     def bootstrap(self, name, root, cc, profile, extra, jit):
         """Exercise a Goose-written compiler as a large program, then execute
@@ -1599,7 +1616,8 @@ def main():
         (show_goose_in_goose or show_selfhost)()
         if args.selfhost_score_only:
             r.section("selfhost scoreboard")
-            r.show_later(r.score_runs, selfhost_stage2, tests, cc, args.profile, extra,
+            r.show_task(r.scoreboard_checks)
+            r.show_later(r.score_runs, selfhost_stage2, tests, cc, extra,
                          args.bless_selfhost)
         r.flush()
         if r.pool:
@@ -1653,7 +1671,7 @@ def main():
     dumpdir.mkdir(parents=True, exist_ok=True)
     gendir = builddir / "gen" / args.profile
     gendir.mkdir(parents=True, exist_ok=True)
-    r.cc, r.native, r.profile, r.extra, r.jit = cc, native, args.profile, extra, jit
+    r.cc, r.native, r.extra, r.jit = cc, native, extra, jit
     r.levels = ("0", "2") if args.profile == "baseline" else ("2",)
     r.gendir, r.dumpdir = gendir, dumpdir
     deepdir = gendir
@@ -2451,15 +2469,8 @@ def main():
     show_selfhost()
     r.section("selfhost scoreboard")
 
-    def scoreboard_checks():
-        code, out, err = tc.run_capture([sys.executable, HERE / "selfhost_scoreboard.py"])
-        if code:
-            r.fail("selfhost scoreboard runner", out + err)
-        else:
-            r.ok("selfhost scoreboard runner: regression checks passed")
-
-    r.show_task(scoreboard_checks)
-    r.show_later(r.score_runs, selfhost_stage2, tests, cc, args.profile, extra,
+    r.show_task(r.scoreboard_checks)
+    r.show_later(r.score_runs, selfhost_stage2, tests, cc, extra,
                  args.bless_selfhost)
 
     # --- JIT: the same programs, compiled and run inside the compiler --------

@@ -1,5 +1,6 @@
 """Keep coverage reports useful when a compiler, expectation or bootstrap fails."""
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -41,14 +42,14 @@ class Scoreboard(unittest.TestCase):
             result = self.runner.score_fixture("stage2", self.fixture, self.cc, self.directory)
         return result, run
 
-    def test_runtime_defines_and_relative_paths(self):
+    def test_runtime_defines_and_build_options(self):
         self.fixture.write_text("// runtime-define: GS_DEBUG=1\nmain() {}\n")
         self.runner.profile = "sanitize"
         (status, _), run = self.score()
         self.assertEqual(status, "pass")
-        self.assertEqual(run.call_args_list[0].args[0][-1], Path("test/codegen/example.goose"))
+        self.assertEqual(run.call_args_list[0].args[0][-1], "test/codegen/example.goose")
         args, kwargs = self.cc.compile.call_args
-        self.assertFalse(args[0].is_absolute())
+        self.assertEqual(args[0], self.directory / "codegen/example/out.c")
         self.assertEqual(kwargs["opt"], 1)
         self.assertEqual(kwargs["defines"], ["GS_DEBUG=1"])
         self.assertTrue(kwargs["strict_decls"])
@@ -59,8 +60,34 @@ class Scoreboard(unittest.TestCase):
         (self.baselines / "run.txt").write_text("")
         with patch.object(self.runner, "score_fixture", return_value=("mismatch", "why")):
             with self.runner.into(rt.Out()):
-                self.runner.score_runs(lambda: "stage2", [self.fixture], self.cc, "baseline", ())
+                self.runner.score_runs(lambda: "stage2", [self.fixture], self.cc, ())
         self.assertIn("runtime-define GS_DEBUG=1: why", (self.directory / "run.tsv").read_text())
+
+    def test_emitted_c_builds_and_runs_from_any_working_directory(self):
+        cc = tc.test_cc()
+        if cc is None:
+            self.skipTest("no native C compiler")
+        capture = tc.run_capture
+
+        def emit_or_run(argv, **kwargs):
+            if "stage2" in argv:
+                Path(argv[argv.index("-o") + 1]).write_text(
+                    '#include <stdio.h>\nint main(void) { puts("ok"); return 0; }\n')
+                return 0, "", ""
+            return capture(argv, **kwargs)
+
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        original_cwd = Path.cwd()
+        try:
+            with patch.object(tc, "run_capture", side_effect=emit_or_run):
+                for cwd in (self.root, self.here, elsewhere):
+                    with self.subTest(cwd=cwd):
+                        os.chdir(cwd)
+                        result = self.runner.score_fixture("stage2", self.fixture, cc, self.directory)
+                        self.assertEqual(result, ("pass", ""))
+        finally:
+            os.chdir(original_cwd)
 
     def test_native_and_sidecar_fixtures_are_unsupported_before_emission(self):
         for source, sidecar in (("import gfx;\n", False), ("main() {}\n", True)):
@@ -82,6 +109,10 @@ class Scoreboard(unittest.TestCase):
         self.assertEqual(status, "mismatch")
         self.assertEqual(detail, "expected-output example.goose: program diagnostic")
 
+    def test_mismatch_without_stderr_has_no_separator(self):
+        (status, detail), _ = self.score(program=(0, "wrong", ""))
+        self.assertEqual((status, detail), ("mismatch", "expected-output example.goose"))
+
     def test_runtime_failure_in_selfhost_is_a_crash(self):
         (status, detail), _ = self.score(emission=(1, "", "goose runtime error: index out of bounds\n"))
         self.assertEqual(status, "crash")
@@ -98,6 +129,13 @@ class Scoreboard(unittest.TestCase):
         (status, detail), _ = self.score()
         self.assertEqual((status, detail), ("cc-error", 'build/out.c:2: error: "bad"'))
 
+    def test_cc_error_shortens_only_diagnostic_paths_with_posix_separators(self):
+        cfile = self.directory / "codegen/example/out.c"
+        self.cc.compile.return_value = (False, f"{cfile}:2: error: bad\n")
+        (status, detail), _ = self.score()
+        self.assertEqual(status, "cc-error")
+        self.assertEqual(detail, f"{cfile.relative_to(self.root).as_posix()}:2: error: bad")
+
     def test_cc_timeout_reports_phase(self):
         self.cc.compile.side_effect = subprocess.TimeoutExpired("cc", 30, stderr=b"compiling\n")
         (status, detail), _ = self.score()
@@ -109,13 +147,13 @@ class Scoreboard(unittest.TestCase):
         baseline.write_text("example.goose\n\n")
         out = rt.Out()
         with self.runner.into(out):
-            self.runner.scoreboard("run", {"example.goose": ("codegen", "pass", "")}, "baseline")
+            self.runner.scoreboard("run", {"example.goose": ("codegen", "pass", "")})
         self.assertEqual(out.failures, 0)
         results = {"example.goose": ("codegen", "mismatch", 'reason: "bad"\tvalue\nmore'),
                    "new.goose": ("codegen", "pass", "")}
         out = rt.Out()
         with self.runner.into(out):
-            self.runner.scoreboard("run", results, "baseline", bless=True)
+            self.runner.scoreboard("run", results, bless=True)
         self.assertEqual(out.failures, 2)
         self.assertIn("refusing --bless-selfhost for run", "".join(out.text))
         self.assertEqual(baseline.read_text(), "example.goose\n\n")
@@ -123,7 +161,7 @@ class Scoreboard(unittest.TestCase):
                       (self.directory / "run.tsv").read_text())
         with self.runner.into(rt.Out()):
             self.runner.scoreboard("check", {"stdlib/x.goose": ("stdlib", "pass", "")},
-                                   "baseline", bless=True)
+                                   bless=True)
         self.assertEqual((self.baselines / "check.txt").read_text(), "stdlib/x.goose\n")
         self.assertTrue((self.directory / "check.tsv").exists())
         self.assertEqual(baseline.read_text(), "example.goose\n\n")
@@ -135,11 +173,20 @@ class Scoreboard(unittest.TestCase):
         with patch.object(self.runner, "score_fixture") as score:
             out = rt.Out()
             with self.runner.into(out):
-                self.runner.score_runs(lambda: None, [self.fixture], self.cc, "baseline", (), True)
+                self.runner.score_runs(lambda: None, [self.fixture], self.cc, (), True)
         score.assert_not_called()
         self.assertEqual(out.failures, 2)
         self.assertIn("stage-2 bootstrap", "".join(out.text))
         self.assertEqual(report.read_text(), "previous report\n")
+
+    def test_summary_counts_each_boards_own_statuses_in_stable_order(self):
+        out = rt.Out()
+        results = {"x.goose": ("stdlib", "unchecked", ""),
+                   "y.goose": ("stdlib", "checked", "")}
+        (self.baselines / "check.txt").touch()
+        with self.runner.into(out):
+            self.runner.scoreboard("check", results)
+        self.assertIn("selfhost check scoreboard: 1 checked, 1 unchecked\n", out.text)
 
 
 class ToolTimeouts(unittest.TestCase):
@@ -156,7 +203,6 @@ class ToolTimeouts(unittest.TestCase):
                 self.assertIn(flag, run.call_args.args[0])
                 self.assertEqual(run.call_args.kwargs["timeout"], 2)
 
-    @unittest.skipIf(tc.IS_WINDOWS, "POSIX process groups")
     def test_timeout_kills_children_holding_output_open(self):
         start = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired) as caught:
@@ -173,10 +219,34 @@ class ToolTimeouts(unittest.TestCase):
         process.communicate.side_effect = [subprocess.TimeoutExpired("cc", 1), (b"", b"")]
         with patch.object(tc.subprocess, "Popen") as popen, \
                 patch.object(tc.os, "killpg", side_effect=ProcessLookupError):
-            popen.return_value.__enter__.return_value = process
+            popen.return_value = process
             with self.assertRaises(subprocess.TimeoutExpired):
                 tc.run_capture(["cc"], timeout=1)
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_windows_timeout_kills_tree_and_bounds_pipe_cleanup(self):
+        for kill_error in (None, OSError("taskkill unavailable"), subprocess.TimeoutExpired("taskkill", 5)):
+            for drain_timeout in (False, True):
+                with self.subTest(kill_error=kill_error, drain_timeout=drain_timeout):
+                    process = Mock(pid=123)
+                    final = subprocess.TimeoutExpired("cc", 5, output=b"partial", stderr=b"error") \
+                        if drain_timeout else (b"partial", b"error")
+                    process.communicate.side_effect = [subprocess.TimeoutExpired("cc", 1), final]
+                    with patch.object(tc, "IS_WINDOWS", True), \
+                            patch.object(tc.subprocess, "Popen", return_value=process), \
+                            patch.object(tc.subprocess, "run", side_effect=kill_error) as kill:
+                        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                            tc.run_capture(["cc"], timeout=1)
+                    self.assertEqual(kill.call_args.args[0], ["taskkill", "/T", "/F", "/PID", "123"])
+                    self.assertEqual(kill.call_args.kwargs["timeout"], 5)
+                    process.kill.assert_called_once_with()
+                    self.assertEqual(process.communicate.call_args.kwargs["timeout"], 5)
+                    self.assertEqual(caught.exception.timeout, 1)
+                    self.assertEqual(caught.exception.output, b"partial")
+                    self.assertEqual(caught.exception.stderr, b"error")
+                    if drain_timeout:
+                        process.stdout.close.assert_not_called()
+                        process.stderr.close.assert_not_called()
 
 
 if __name__ == "__main__":

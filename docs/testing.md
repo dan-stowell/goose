@@ -149,9 +149,10 @@ that need `goose build` for sidecar C, packages or native modules are marked
 `unsupported` before compilation. Runtime defines are passed to the C compiler;
 non-passing rows with them carry a `runtime-define <defs>:` prefix because
 selfhost's runtime may not implement those checks yet.
-`--selfhost-score-only` runs this scoreboard and its bootstrap alone. Each
-fixture has a 30-second emit/build/run budget; the summary counts `pass`,
-`mismatch`, `rejected`, `cc-error`, `crash`, `timeout` and `unsupported`. The full
+`--selfhost-score-only` runs this scoreboard, its bootstrap and the runner's
+regression checks. Each fixture has a 30-second emit/build/run budget; the
+summary counts `pass`, `mismatch`, `rejected`, `cc-error`, `crash`, `timeout`
+and `unsupported`. The full
 report is `build/gen/<profile>/selfhost/scoreboard/run.tsv`. Passing fixture names in
 `selfhost/scoreboard/run.txt` must keep passing; additional passes are reported
 as newly passing. `--bless-selfhost` records those additions in the sorted
@@ -162,8 +163,8 @@ A failed stage-2 bootstrap fails the section and leaves the previous report inta
 Like other native execution checks, the scoreboard is skipped with `--nocgen`
 or without a C compiler.
 `test/selfhost_scoreboard.py` checks the runner's classification, diagnostics,
-timeout cleanup and per-board regression protection in scratch directories;
-the full suite runs it too.
+timeout cleanup, working-directory independence and per-board regression
+protection in scratch directories; the full suite runs it too.
 
 The sanitizer job builds Goose with
 `-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all`,

@@ -662,7 +662,7 @@ def run_capture(argv, cwd=None, stdin_path=None, timeout=None):
     text. Used where the output is a result rather than something to time.
     A timeout kills the process group as well as the driver, so compiler
     children cannot survive a fixture's deadline. It raises TimeoutExpired
-    with the captured output after waiting for the children to close it."""
+    with the captured output after a bounded wait for the pipes to close."""
     argv = [str(a) for a in argv]
     stdin_f = open(stdin_path, "rb") if stdin_path else None
     try:
@@ -672,21 +672,41 @@ def run_capture(argv, cwd=None, stdin_path=None, timeout=None):
         # that child execs, so the run is retried for a moment.
         for attempt in range(100):
             try:
-                with subprocess.Popen(argv, cwd=cwd, stdin=stdin_f or subprocess.DEVNULL,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      start_new_session=timeout is not None and not IS_WINDOWS) as process:
+                process = subprocess.Popen(argv, cwd=cwd, stdin=stdin_f or subprocess.DEVNULL,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           start_new_session=timeout is not None and not IS_WINDOWS)
+                drained = False
+                try:
                     try:
                         out, err = process.communicate(timeout=timeout)
+                        drained = True
                     except subprocess.TimeoutExpired:
                         if IS_WINDOWS:
+                            try:
+                                subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.DEVNULL, timeout=5)
+                            except (OSError, subprocess.TimeoutExpired):
+                                pass
                             process.kill()
                         else:
                             try:
                                 os.killpg(process.pid, signal.SIGKILL)
                             except ProcessLookupError:
                                 pass
-                        out, err = process.communicate()
+                        try:
+                            out, err = process.communicate(timeout=5)
+                            drained = True
+                        except subprocess.TimeoutExpired as exc:
+                            out, err = exc.output, exc.stderr
                         raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
+                finally:
+                    # Windows pipe readers can still be blocked if tree cleanup
+                    # failed. Closing their streams or using Popen's context
+                    # manager would wait without a bound for those readers.
+                    if drained:
+                        process.stdout.close()
+                        process.stderr.close()
                 break
             except OSError as e:
                 if e.errno != errno.ETXTBSY or attempt == 99:
