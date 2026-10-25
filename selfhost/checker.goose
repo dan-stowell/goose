@@ -302,8 +302,12 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     } else if tag == N_CAST {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1)); v.ty = resolve_type(ctx, x.b, scope);
         if !numeric(ctx, a.ty) || !numeric(ctx, v.ty) { error_at(ctx, x.token, "casts require numeric types"); }
-        if ctx.types[a.ty].kind == T_FLOAT && ctx.types[v.ty].kind == T_INTEGER { error_at(ctx, x.token, "not implemented yet: defined wrapping float-to-integer conversion"); }
         v.known = a.known; v.bits = a.bits;
+        if ctx.types[a.ty].kind == T_FLOAT && ctx.types[v.ty].kind == T_INTEGER {
+            if x.flags & 1 == 0 { error_at(ctx, x.token, "not implemented yet: range-checked float-to-integer conversion"); }
+            // A float constant keeps no integer bits to fold.
+            v.known = false; v.bits = 0;
+        }
     } else if tag == N_MEMBER {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1));
         if element_type(ctx, a.ty) >= 0 && (ctx.tokens[x.token].text == "len" || ctx.tokens[x.token].text == "cap") {

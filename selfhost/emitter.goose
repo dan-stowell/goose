@@ -195,7 +195,11 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         let b = snapshot(ctx, converted(ctx, c_expression(ctx, x.b), if ctx.nodes[x.b].target >= 0 { ctx.nodes[x.b].target } else { decay(ctx, value_of(ctx, x.b)).ty }));
         return CValue { code: c_binary(ctx, op, a, b, x.ty), ty: x.ty, address: "", stack: "" };
     }
-    if tag == N_CAST { return converted(ctx, c_expression(ctx, x.a), x.ty); }
+    if tag == N_CAST {
+        let a = c_decay(ctx, c_expression(ctx, x.a));
+        if ctx.types[a.ty].kind == T_FLOAT && ctx.types[x.ty].kind == T_INTEGER { return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")gg_float_wrap((double)(", a.code, ")))")), ty: x.ty, address: "", stack: "" }; }
+        return converted(ctx, a, x.ty);
+    }
     if tag == N_MEMBER {
         let a = c_decay(ctx, c_expression(ctx, x.a));
         if element_type(ctx, a.ty) >= 0 {

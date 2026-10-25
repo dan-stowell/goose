@@ -94,6 +94,13 @@ fn runtime_source() -> const u8[:] {
         int64_t r; if (!b) gg_fail("division by zero"); if (b==-1) return 0;
         r=a%b; if(r<0) return (int64_t)((uint64_t)r + (b<0 ? (uint64_t)0-(uint64_t)b : (uint64_t)b)); return r;
     }
+    /* as! from a float: truncate toward zero, then wrap modulo 2^64; NaN and the infinities give 0. */
+    static uint64_t gg_float_wrap(double x) {
+        double t = trunc(x), m;
+        if (t != t || t - t != 0) return 0;
+        if (t >= 0) return t < 18446744073709551616.0 ? (uint64_t)t : (uint64_t)fmod(t, 18446744073709551616.0);
+        m = fmod(-t, 18446744073709551616.0); return (uint64_t)0 - (uint64_t)m;
+    }
     static uint64_t gg_udiv(uint64_t a,uint64_t b) { if(!b)gg_fail("division by zero");return a/b; }
     static uint64_t gg_umod(uint64_t a,uint64_t b) { if(!b)gg_fail("division by zero");return a%b; }
     static int gg_equal(gg_slice a, gg_slice b, size_t element) { return a.len==b.len && (!a.len || !memcmp(a.data,b.data,(size_t)a.len*element)); }
