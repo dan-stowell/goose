@@ -54,10 +54,16 @@ say so.
 | task | worker | state | notes |
 |------|--------|-------|-------|
 | selfhost-seed | claude | done | Merged 2026-10-24. Codex review and verify clean |
-| scoreboard-run | codex | in flight | Positive fixtures: pass / mismatch / rejected / cc-error / crash / timeout; `selfhost/scoreboard/run.txt` baseline, add-only bless |
+| scoreboard-run | codex | checking | 19/639 pass at first run. Claude verifier and reviewer running. Codex's sandbox has no network, so its full-suite run fails on package fetches; Claude checks it |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
-| gap-1 | claude | todo | Largest failure cluster from scoreboard-run |
+| gap-param-defaults | claude | in flight | Parameter defaults (§7.1). `std.goose:1077` `parse_int(.., base: i64 = 10)` blocks 142 fixtures at parse. Branched off scoreboard-run |
+
+Next gaps, from scoreboard-run's first rejection clusters (counts are first
+errors only, so they hide what's behind the stdlib parse failure):
+variable and limited array storage (64), relative and optional references
+(53), custom formatting dispatch (29), enum type checking (27), nonfixed
+struct fields (18), missing gfx/ui/physics imports (28).
 
 ## Decisions
 
