@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -272,13 +273,15 @@ class CC:
 
     def compile(self, sources, out, *, opt=None, defines=(), cpp=False,
                 warn="default", strict_decls=False, extra=(), libs=(), runtime=None,
-                log=None):
+                log=None, timeout=None):
         """Compile and link `sources` into the executable `out`. Returns
         (ok, combined output), and writes that output to `log` when given.
         `libs` go after the sources, where a GNU linker resolves static
         archives in order: a gfx program's `@link-*.rsp` (gfx_link).
         `runtime`, a GooseRuntime, links the runtime object that C `goose -o`
-        writes needs, built with the same opt, defines and extra flags."""
+        writes needs, built with the same opt, defines and extra flags.
+        `timeout` bounds the C driver and its children, raising TimeoutExpired
+        after stopping them, as run_capture does."""
         if cpp and not self.cxx:
             return False, f"no C++ compiler alongside {self.cc}\n"
         if isinstance(sources, (str, Path)):
@@ -307,11 +310,11 @@ class CC:
             # asking for them by name fails.
             if not IS_WINDOWS:
                 argv += ["-pthread", "-lm"] + (["-ldl"] if sys.platform.startswith("linux") else [])
-        r = subprocess.run(argv, capture_output=True, text=True, errors="replace")
-        output = (r.stdout or "") + (r.stderr or "")
+        code, stdout, stderr = run_capture(argv, timeout=timeout)
+        output = stdout + stderr
         if log:
             write_text(log, output)
-        return r.returncode == 0, output
+        return code == 0, output
 
     def compile_programs(self, cfiles, out, **kwargs):
         """Compile and link the C of several programs that `goose -o` wrote
@@ -654,9 +657,12 @@ def run_measured(exe, args=(), *, stdin_path=None):
                      err=decode(errf.read_bytes()).strip(), code=code)
 
 
-def run_capture(argv, cwd=None, stdin_path=None):
+def run_capture(argv, cwd=None, stdin_path=None, timeout=None):
     """Run a tool, returning (exit code, stdout, stderr) as LF-normalised
-    text. Used where the output is a result rather than something to time."""
+    text. Used where the output is a result rather than something to time.
+    A timeout kills the process group as well as the driver, so compiler
+    children cannot survive a fixture's deadline. It raises TimeoutExpired
+    with the captured output after waiting for the children to close it."""
     argv = [str(a) for a in argv]
     stdin_f = open(stdin_path, "rb") if stdin_path else None
     try:
@@ -666,7 +672,21 @@ def run_capture(argv, cwd=None, stdin_path=None):
         # that child execs, so the run is retried for a moment.
         for attempt in range(100):
             try:
-                r = subprocess.run(argv, cwd=cwd, stdin=stdin_f, capture_output=True)
+                with subprocess.Popen(argv, cwd=cwd, stdin=stdin_f or subprocess.DEVNULL,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      start_new_session=timeout is not None and not IS_WINDOWS) as process:
+                    try:
+                        out, err = process.communicate(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        if IS_WINDOWS:
+                            process.kill()
+                        else:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        out, err = process.communicate()
+                        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
                 break
             except OSError as e:
                 if e.errno != errno.ETXTBSY or attempt == 99:
@@ -675,7 +695,7 @@ def run_capture(argv, cwd=None, stdin_path=None):
     finally:
         if stdin_f:
             stdin_f.close()
-    return r.returncode, decode(r.stdout), decode(r.stderr)
+    return process.returncode, decode(out), decode(err)
 
 
 # --- machine description -----------------------------------------------------

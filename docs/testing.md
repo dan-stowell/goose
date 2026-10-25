@@ -143,16 +143,27 @@ in `build/gen/<profile>/selfhost/O<level>/`.
 
 After the selfhost bootstrap, the full suite runs its stage-2 compiler over
 the same positive execution fixtures, builds their C with the native toolchain
-at `-O0`, and checks the usual `.out`, `.aborts` and `.stderr` expectations.
+at the profile's lowest cgen setting (`-O0` for baseline, `-O1` for sanitize),
+and checks the usual `.out`, `.aborts` and `.stderr` expectations. Fixtures
+that need `goose build` for sidecar C, packages or native modules are marked
+`unsupported` before compilation. Runtime defines are passed to the C compiler;
+non-passing rows with them carry a `runtime-define <defs>:` prefix because
+selfhost's runtime may not implement those checks yet.
 `--selfhost-score-only` runs this scoreboard and its bootstrap alone. Each
 fixture has a 30-second emit/build/run budget; the summary counts `pass`,
-`mismatch`, `rejected`, `cc-error`, `crash` and `timeout`, and the full report is
-`build/gen/<profile>/selfhost/scoreboard/run.tsv`. Passing fixture names in
+`mismatch`, `rejected`, `cc-error`, `crash`, `timeout` and `unsupported`. The full
+report is `build/gen/<profile>/selfhost/scoreboard/run.tsv`. Passing fixture names in
 `selfhost/scoreboard/run.txt` must keep passing; additional passes are reported
 as newly passing. `--bless-selfhost` records those additions in the sorted
 baseline, but refuses to rewrite it if any existing entry fails or disappears.
+Reports and add-only baselines are kept separately for each board, and
+`--bless-selfhost` applies to every board, refusing regressions per board.
+A failed stage-2 bootstrap fails the section and leaves the previous report intact.
 Like other native execution checks, the scoreboard is skipped with `--nocgen`
 or without a C compiler.
+`test/selfhost_scoreboard.py` checks the runner's classification, diagnostics,
+timeout cleanup and per-board regression protection in scratch directories;
+the full suite runs it too.
 
 The sanitizer job builds Goose with
 `-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all`,

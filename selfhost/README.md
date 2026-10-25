@@ -32,12 +32,16 @@ and `--nocgen` options apply, as described in
 logs go in `build/gen/<profile>/selfhost/O<level>/`.
 
 The full suite also scores stage 2 against the positive execution fixtures,
-building its C at native `-O0` and checking their usual output and expected
-aborts. Run just the scoreboard and its bootstrap with
+building its C at the profile's lowest cgen setting (native `-O0` for baseline)
+and checking their usual output and expected aborts. Fixtures requiring
+`goose build` for sidecar C, packages or native modules are `unsupported`.
+Run just the scoreboard and its bootstrap with
 `python3 test/run_tests.py --selfhost-score-only --exe build/goose --cc native`.
 Each fixture has a 30-second emit/build/run budget, and every result and its
 first diagnostic go in `build/gen/<profile>/selfhost/scoreboard/run.tsv`.
 The sorted passing names in `scoreboard/run.txt` are the ground the suite
 holds: regressions fail, while newly passing fixtures are reported. Add them
 with `--bless-selfhost`; it refuses to drop any baseline entry that fails or
-disappears.
+disappears. Reports and baselines are separate for each board;
+`--bless-selfhost` applies to every board and refuses regressions per board.
+If stage 2 fails to bootstrap, the previous report is preserved.
