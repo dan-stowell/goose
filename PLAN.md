@@ -33,7 +33,11 @@ say so.
   waiting on him. Where the spec is silent, follow the real compiler, record
   it under Decisions, and add it to Questions for Dan. Only pushing, anything
   upstream, and real language changes (behavior `src/` doesn't already have)
-  wait for him.
+  wait for him. Any PR goes to `origin` (dan-stowell/goose), never
+  `upstream`; pass `-R dan-stowell/goose` to `gh pr create`.
+- **Tooling.** This machine has no system cmake. A pip-installed one lives
+  in the session scratchpad venv; tell workers its path, or ask Dan to
+  `brew install cmake`.
 
 ## Milestones
 
