@@ -31,10 +31,11 @@ say so.
   lifts the rule.
 - **Don't block on Dan.** Dan wants as much progress as possible without
   waiting on him. Where the spec is silent, follow the real compiler, record
-  it under Decisions, and add it to Questions for Dan. Only pushing, anything
-  upstream, and real language changes (behavior `src/` doesn't already have)
-  wait for him. Any PR goes to `origin` (dan-stowell/goose), never
-  `upstream`; pass `-R dan-stowell/goose` to `gh pr create`.
+  it under Decisions, and add it to Questions for Dan. Pushing to `origin`
+  (dan-stowell/goose) and PRs there are fine without asking; pass
+  `-R dan-stowell/goose` to `gh pr create`. Never push, open PRs or file
+  issues on `upstream` (aardappel/goose). Real language changes (behavior
+  `src/` doesn't already have) wait for him.
 - **Tooling.** This machine has no system cmake. A pip-installed one lives
   in the session scratchpad venv; tell workers its path, or ask Dan to
   `brew install cmake`.
