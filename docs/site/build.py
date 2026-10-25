@@ -46,6 +46,7 @@ for src in sorted(glob.glob(os.path.join(ROOT, "bench", "*.md"))):
     PAGES.append(("bench/" + name, "bench/" + name[:-3] + ".html"))
 PAGES.append(("vscode/README.md", "vscode/index.html"))
 PAGES.append(("test/goose_in_goose/README.md", "test/goose_in_goose/index.html"))
+PAGES.append(("selfhost/README.md", "selfhost/index.html"))
 
 # Source files shown as highlighted pages, and files copied as they are.
 SOURCES = sorted(os.path.relpath(p, ROOT).replace(os.sep, "/")

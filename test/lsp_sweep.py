@@ -1,7 +1,7 @@
 """A robustness and latency sweep of `goose lsp` (docs/design/language_server.md
 §12) over the repository's Goose programs: every sample, the goose_in_goose
-bootstrap, every stdlib module, every positive fixture, and every errors/ and
-errors_tc/ fixture, each opened as a root of its own. For each, the sweep
+and selfhost bootstraps, every stdlib module, every positive fixture, and
+every errors/ and errors_tc/ fixture, each opened as a root of its own. For each, the sweep
 waits for the diagnostics, then asks hover, definition, completion and
 signature help at every identifier start and at every position right after a
 `.` (found lexically, outside comments and strings), and the incoming and
@@ -66,6 +66,7 @@ def corpus(quick):
     files = []
     files += [("samples", f) for f in sorted((REPO / "samples").glob("*.goose"))]
     files += [("goose_in_goose", REPO / "test" / "goose_in_goose" / "main.goose")]
+    files += [("selfhost", REPO / "selfhost" / "main.goose")]
     files += [("stdlib", f) for f in sorted((REPO / "stdlib").glob("*.goose"))]
     files += [("fixtures", f) for f in sorted((REPO / "test").glob("*/*.goose"))
               if f.parent.name not in ("errors", "errors_tc", "lsp", "goose_in_goose")]
@@ -538,7 +539,7 @@ def main():
     ap.add_argument("--positions", type=int, help="positions per file at most, spread over the file "
                                                  "(default: all; 60 with --quick)")
     ap.add_argument("--filter", help="only files whose path has this text")
-    ap.add_argument("--group", help="only this group: samples, goose_in_goose, stdlib, fixtures, errors, errors_tc")
+    ap.add_argument("--group", help="only this group: samples, goose_in_goose, selfhost, stdlib, fixtures, errors, errors_tc")
     ap.add_argument("--seed", type=int, default=1, help="of the random edits")
     ap.add_argument("--no-edits", action="store_true", help="skip the burst of edits")
     ap.add_argument("--hang", type=float, default=60.0, help="seconds without a reply before the server is killed")
