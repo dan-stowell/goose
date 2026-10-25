@@ -54,14 +54,18 @@ say so.
 | task | worker | state | notes |
 |------|--------|-------|-------|
 | selfhost-seed | claude | done | Merged 2026-10-24. Codex review and verify clean |
-| scoreboard-run | codex | round 2 | Verify passed, review found 1 blocker (`// runtime-define:` fixtures built without their `-D`) and 11 smaller fixes, incl. a generic board for the errors/stdlib boards. First round-2 run died with the session restart; resumed from its uncommitted changes |
+| scoreboard-run | codex | round 3 | Round 2 verified and reviewed: everything holds except that the cc step depends on cwd (fails unless run from the repo root). Round 3 fixes that plus Windows tree-kill, posix paths, restored comments, per-board statuses |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
 | gap-param-defaults | claude | round 2 | Codex review found 3 blockers. Only one is from defaults: a block default called from a global initializer crashes emission (scope owner -1). Claude fixing. The other two are existing bugs: float text, and constants not adapting to their target type |
 | gap-float-text | codex | in flight | `print(2.0)` prints `2`; shortest round-trip text per §3. Causes all 4 new mismatches. Branched off gap-param-defaults |
-| gap-multi-return | codex | in flight | Multiple return values (§7.1). `std.goose:1036` `parse_uleb -> i64, i64` blocks 44 fixtures; 45 hit it first. Branched off gap-param-defaults |
+| gap-multi-return | codex | checking | 20→23 pass, no regressions; multi-return and multi-binding clusters at zero. Exposed 47 range-checked float-to-integer conversions. Claude verify and review running. Base bb6807c |
 
-Next gaps, first-error clusters on gap-param-defaults (2026-10-24):
+Next gaps, first-error clusters on gap-multi-return (2026-10-24): variable
+and limited array storage (84), relative and optional references (60),
+range-checked float-to-integer conversion (47, newly exposed), nonfixed
+struct fields (34), custom formatting dispatch (33), enum type checking (32).
+Earlier counts, on gap-param-defaults:
 variable and limited array storage (83), relative and optional references
 (60), unknown functions (46, mostly builtins), multiple return values (45),
 nonfixed struct fields (33, incl. `stdlib/dictionary.goose:24`), custom
