@@ -57,7 +57,8 @@ say so.
 | scoreboard-run | codex | round 2 | Verify passed, review found 1 blocker (`// runtime-define:` fixtures built without their `-D`) and 11 smaller fixes, incl. a generic board for the errors/stdlib boards. First round-2 run died with the session restart; resumed from its uncommitted changes |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
-| gap-param-defaults | claude | checking | 6 commits. Full suite passes (coordinator, with network): 20 pass, 19 mismatch, 599 rejected. Stdlib parse blocker gone; param_defaults fixtures now stop at enums and variable arrays. Codex verify and review running. Base is scoreboard-run's first commit |
+| gap-param-defaults | claude | round 2 | Codex review found 3 blockers. Only one is from defaults: a block default called from a global initializer crashes emission (scope owner -1). Claude fixing. The other two are existing bugs: float text, and constants not adapting to their target type |
+| gap-float-text | codex | in flight | `print(2.0)` prints `2`; shortest round-trip text per §3. Causes all 4 new mismatches. Branched off gap-param-defaults |
 | gap-multi-return | codex | in flight | Multiple return values (§7.1). `std.goose:1036` `parse_uleb -> i64, i64` blocks 44 fixtures; 45 hit it first. Branched off gap-param-defaults |
 
 Next gaps, first-error clusters on gap-param-defaults (2026-10-24):
@@ -69,7 +70,9 @@ rejection (18), missing gfx/ui/physics imports (28).
 Found by verifiers, not yet in a cluster count: static function values
 passed as arguments (§7.6) fail with "argument count mismatch"; an `f32`
 from a constant float expression (`let x: f32 = 1.0 + 2.0`) fails with an
-internal "incompatible types (type 2 kind 2 width 8 -> ...)". Both should be
+internal "incompatible types (type 2 kind 2 width 8 -> ...)". Same root:
+constant expressions don't adapt to their target type at all (`let y: u8 =
+1 + 1` fails), and it's probably a large hidden cluster. Both should be
 "not implemented yet" at least.
 
 ## Decisions
@@ -80,4 +83,12 @@ internal "incompatible types (type 2 kind 2 width 8 -> ...)". Both should be
 
 ## Questions for Dan
 
-None yet. Nothing here blocks work.
+Nothing here blocks work.
+
+- GitHub Actions has never run on dan-stowell/goose. Forks keep workflows
+  off until the owner clicks "enable" on the repo's Actions tab, and the
+  gh token here can't dispatch runs (403). Until then, branches merge on
+  macOS-only local checks; Linux, Windows and sanitizer CI would catch
+  platform differences in the selfhost baseline.
+- `brew install cmake` would give workers a permanent cmake; today they
+  use a pip-installed one in a session scratchpad under /private/tmp.
