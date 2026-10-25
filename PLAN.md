@@ -41,7 +41,7 @@ say so.
 
 ## Milestones
 
-1. `selfhost/` exists and bootstraps in the suite.
+1. `selfhost/` exists and bootstraps in the suite. (done 2026-10-24)
 2. Scoreboards for positive fixtures, error fixtures and stdlib, with a
    committed baseline the suite enforces.
 3. Close gaps, largest cluster first, until the positive fixtures pass.
@@ -52,10 +52,10 @@ say so.
 
 | task | worker | state | notes |
 |------|--------|-------|-------|
-| selfhost-seed | claude | in flight | Copy goose_in_goose to `selfhost/`; `--selfhost-only` bootstrap section |
-| scoreboard-run | codex | todo | Positive fixtures: pass / mismatch / rejected / crash / timeout; baseline enforced. Needs selfhost-seed |
-| scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Needs selfhost-seed |
-| scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Needs selfhost-seed |
+| selfhost-seed | claude | done | Merged 2026-10-24. Codex review and verify clean |
+| scoreboard-run | codex | in flight | Positive fixtures: pass / mismatch / rejected / cc-error / crash / timeout; `selfhost/scoreboard/run.txt` baseline, add-only bless |
+| scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
+| scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
 | gap-1 | claude | todo | Largest failure cluster from scoreboard-run |
 
 ## Decisions
