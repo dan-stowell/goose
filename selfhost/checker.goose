@@ -736,19 +736,22 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     return Value { ty: ctx.specializations[spec].result, root: ctx.specializations[spec].result_root, readonly: ctx.specializations[spec].result_readonly, growshrink: ctx.specializations[spec].result_growshrink, inexact: ctx.specializations[spec].result_inexact, held: ctx.specializations[spec].result_root, fields: ctx.specializations[spec].result_fields };
 }
 // A call leaving out trailing parameters gets a fresh clone of each one's
-// default after its written arguments, in parameter order (§7.1). Field c
-// of the call is the edge of the first, so it is checked as a default.
+// default after its written arguments, in parameter order (§7.1). The
+// call's flags keep the written count plus one from bit 16, so the rest are
+// checked as defaults; a flag, unlike a node link, survives clone_tree.
 fn fill_defaults(ctx: Compiler&, symbol: i64, call: i64) {
     if ctx.nodes[call].flags & 1024 != 0 { return; }
     ctx.nodes[call].flags |= 1024;
     var p = ctx.nodes[ctx.nodes[ctx.symbols[symbol].decl].a].first; var e = ctx.nodes[call].first;
-    while p >= 0 && e >= 0 { p = ctx.edges[p].next; e = ctx.edges[e].next; }
-    if p >= 0 && ctx.nodes[call].flags & 128 != 0 { error_at(ctx, ctx.nodes[call].token, "not implemented yet: a trailing block with parameter defaults"); }
+    var written = 0;
+    while p >= 0 && e >= 0 { p = ctx.edges[p].next; e = ctx.edges[e].next; written++; }
+    if p < 0 { return; }
+    if ctx.nodes[call].flags & 128 != 0 { error_at(ctx, ctx.nodes[call].token, "not implemented yet: a trailing block with parameter defaults"); }
+    ctx.nodes[call].flags |= (written + 1) << 16;
     while p >= 0 {
         let parameter = ctx.edges[p].value;
         if ctx.nodes[parameter].b < 0 { error_at(ctx, ctx.nodes[call].token, "argument count mismatch"); }
         child(ctx, call, clone_tree(ctx, ctx.nodes[parameter].b));
-        if ctx.nodes[call].c < 0 { ctx.nodes[call].c = ctx.nodes[call].last; }
         p = ctx.edges[p].next;
     }
 }
@@ -781,20 +784,20 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
     var actual = -1;
     if call >= 0 { actual = ctx.nodes[call].first; }
     var p = ctx.nodes[params].first;
-    var defaulted = false;
+    var index = 0;
+    var first_default = -1; if call >= 0 { first_default = (ctx.nodes[call].flags >> 16) - 1; }
     while p >= 0 {
         let parameter = ctx.edges[p].value;
         if ctx.nodes[parameter].a < 0 { error_at(ctx, ctx.nodes[parameter].token, "not implemented yet: inferred parameter types"); }
         let expected = resolve_type(ctx, ctx.nodes[parameter].a, ctx.symbols[symbol].scope);
         if actual >= 0 {
             let arg = ctx.edges[actual].value;
-            if actual == ctx.nodes[call].c { defaulted = true; }
-            let v = if defaulted { check_default(ctx, arg, symbol, parameter, caller_scope, expected) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
+            let v = if first_default >= 0 && index >= first_default { check_default(ctx, arg, symbol, parameter, caller_scope, expected) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
             require_fit(ctx, arg, v, expected);
             if ctx.types[expected].size_class > 0 && v.place >= 0 { error_at(ctx, ctx.nodes[arg].token, "nonfixed value parameter needs a fresh value or explicit copy"); }
             actual = ctx.edges[actual].next;
         }
-        p = ctx.edges[p].next;
+        p = ctx.edges[p].next; index++;
     }
     // A provisional record closes recursion before the body is checked.
     for existing, i in ctx.specializations {
