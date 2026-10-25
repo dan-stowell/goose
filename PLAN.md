@@ -66,6 +66,11 @@ variable and limited array storage (83), relative and optional references
 nonfixed struct fields (33, incl. `stdlib/dictionary.goose:24`), custom
 formatting dispatch (33), enum type checking (32), conservative shrink
 rejection (18), missing gfx/ui/physics imports (28).
+Found by verifiers, not yet in a cluster count: static function values
+passed as arguments (§7.6) fail with "argument count mismatch"; an `f32`
+from a constant float expression (`let x: f32 = 1.0 + 2.0`) fails with an
+internal "incompatible types (type 2 kind 2 width 8 -> ...)". Both should be
+"not implemented yet" at least.
 
 ## Decisions
 
