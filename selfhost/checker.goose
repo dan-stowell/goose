@@ -201,6 +201,8 @@ fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
         return (a.flags & 2 == b.flags & 2 && a.bytes <= b.bytes) || (a.flags & 2 != 0 && b.flags & 2 == 0 && a.bytes < b.bytes);
     }
     if a.kind == T_FLOAT && b.kind == T_FLOAT { return a.bytes <= b.bytes || v.known; }
+    // Every integer becomes a float implicitly, rounding to the nearest (§6.3).
+    if a.kind == T_INTEGER && b.kind == T_FLOAT { return true; }
     if (a.kind == T_ARRAY || a.kind == T_SLICE) && (b.kind == T_ARRAY || b.kind == T_SLICE) && a.element == b.element {
         if b.kind == T_SLICE { return !v.readonly || b.flags & 1 != 0; }
         if b.flags == 0 { return a.kind == T_ARRAY && a.flags == 0 && a.count == b.count; }
@@ -215,6 +217,9 @@ fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
 fn merge_numeric(ctx: Compiler&, a: Value, b: Value, token: i64) -> i64 {
     if !numeric(ctx, a.ty) || !numeric(ctx, b.ty) { error_at(ctx, token, "numeric operands required"); }
     if a.ty == b.ty { return a.ty; }
+    // An integer meeting a float becomes that float, a literal or not.
+    if ctx.types[a.ty].kind == T_INTEGER && ctx.types[b.ty].kind == T_FLOAT { return b.ty; }
+    if ctx.types[a.ty].kind == T_FLOAT && ctx.types[b.ty].kind == T_INTEGER { return a.ty; }
     if a.known && !b.known { if !fits(ctx, a, b.ty) { error_at(ctx, token, "constant operand does not fit the other operand's type"); } return b.ty; }
     if b.known && !a.known { if !fits(ctx, b, a.ty) { error_at(ctx, token, "constant operand does not fit the other operand's type"); } return a.ty; }
     if fits(ctx, a, b.ty) { return b.ty; }

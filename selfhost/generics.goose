@@ -150,7 +150,7 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
         e = ctx.edges[e].next;
     }
     ctx.nodes[call].flags |= 512;
-    var best = -1; var best_tier = 3; var ambiguous = false;
+    var best = -1; var best_tier = 4; var ambiguous = false;
     for i in limit {
         if !overload_member(ctx, i, selected) { continue; }
         if !arity_fits(ctx, ctx.symbols[i].decl, child_count(ctx, call)) { continue; }
@@ -168,7 +168,9 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
             else {
                 let want = ctx.types[expected];
                 let exact = actual.ty == expected || (want.kind == T_REFERENCE && decay(ctx, actual).ty == want.element && actual.place >= 0);
-                if !exact { tier = 2; }
+                // An integer converted to a float is the last resort (§7.1).
+                if ctx.types[decay(ctx, actual).ty].kind == T_INTEGER && want.kind == T_FLOAT { tier = 3; }
+                else if !exact && tier < 2 { tier = 2; }
             }
             p = ctx.edges[p].next; e = ctx.edges[e].next;
         }
