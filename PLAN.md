@@ -54,16 +54,18 @@ say so.
 | task | worker | state | notes |
 |------|--------|-------|-------|
 | selfhost-seed | claude | done | Merged 2026-10-24. Codex review and verify clean |
-| scoreboard-run | codex | round 2 | Verify passed, review found 1 blocker (`// runtime-define:` fixtures built without their `-D`) and 11 smaller fixes, incl. splitting out a generic board so the errors/stdlib boards reuse it. Codex fixing. Codex's sandbox has no network, so Claude reruns the full suite |
+| scoreboard-run | codex | round 2 | Verify passed, review found 1 blocker (`// runtime-define:` fixtures built without their `-D`) and 11 smaller fixes, incl. a generic board for the errors/stdlib boards. First round-2 run died with the session restart; resumed from its uncommitted changes |
 | scoreboard-errors | claude | todo | errors/ and errors_tc/: rejected on the marked line. Extends scoreboard-run's section; start after it merges |
 | scoreboard-stdlib | codex | todo | `selfhost --check` per stdlib module. Extends scoreboard-run's section; start after it merges |
-| gap-param-defaults | claude | in flight | Parameter defaults (§7.1). `std.goose:1077` `parse_int(.., base: i64 = 10)` blocks 142 fixtures at parse. Branched off scoreboard-run's first commit; rebase onto round 2 before merging |
+| gap-param-defaults | claude | checking | 6 commits. Full suite passes (coordinator, with network): 20 pass, 19 mismatch, 599 rejected. Stdlib parse blocker gone; param_defaults fixtures now stop at enums and variable arrays. Codex verify and review running. Base is scoreboard-run's first commit |
+| gap-multi-return | codex | in flight | Multiple return values (§7.1). `std.goose:1036` `parse_uleb -> i64, i64` blocks 44 fixtures; 45 hit it first. Branched off gap-param-defaults |
 
-Next gaps, from scoreboard-run's first rejection clusters (counts are first
-errors only, so they hide what's behind the stdlib parse failure):
-variable and limited array storage (64), relative and optional references
-(53), custom formatting dispatch (29), enum type checking (27), nonfixed
-struct fields (18), missing gfx/ui/physics imports (28).
+Next gaps, first-error clusters on gap-param-defaults (2026-10-24):
+variable and limited array storage (83), relative and optional references
+(60), unknown functions (46, mostly builtins), multiple return values (45),
+nonfixed struct fields (33, incl. `stdlib/dictionary.goose:24`), custom
+formatting dispatch (33), enum type checking (32), conservative shrink
+rejection (18), missing gfx/ui/physics imports (28).
 
 ## Decisions
 
