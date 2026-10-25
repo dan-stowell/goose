@@ -141,6 +141,19 @@ selfhost bootstrap runs the same stages over `selfhost/main.goose`, which is
 described in [selfhost/README.md](../selfhost/README.md), and keeps its outputs
 in `build/gen/<profile>/selfhost/O<level>/`.
 
+After the selfhost bootstrap, the full suite runs its stage-2 compiler over
+the same positive execution fixtures, builds their C with the native toolchain
+at `-O0`, and checks the usual `.out`, `.aborts` and `.stderr` expectations.
+`--selfhost-score-only` runs this scoreboard and its bootstrap alone. Each
+fixture has a 30-second emit/build/run budget; the summary counts `pass`,
+`mismatch`, `rejected`, `cc-error`, `crash` and `timeout`, and the full report is
+`build/gen/<profile>/selfhost/scoreboard/run.tsv`. Passing fixture names in
+`selfhost/scoreboard/run.txt` must keep passing; additional passes are reported
+as newly passing. `--bless-selfhost` records those additions in the sorted
+baseline, but refuses to rewrite it if any existing entry fails or disappears.
+Like other native execution checks, the scoreboard is skipped with `--nocgen`
+or without a C compiler.
+
 The sanitizer job builds Goose with
 `-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all`,
 then runs `python test/run_tests.py --exe <instrumented-goose> --profile sanitize --cc clang`.

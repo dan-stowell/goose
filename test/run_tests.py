@@ -48,7 +48,12 @@ native generations, require identical stage-2/stage-3 C, and run a self-check
 of the stage-2 compiler, which stands for both, beside stage 3's build.
 TinyCC also emits the same C when available. The self-hosted compiler in
 selfhost/, grown from the same sources, goes through the same bootstrap as a
-section of its own.
+section of its own. Its stage-2 compiler then scores the positive execution
+fixtures against their usual output, with native C at O0 and a 30-second
+deadline per fixture. selfhost/scoreboard/run.txt holds the passing baseline;
+--bless-selfhost adds passes but refuses regressions. --selfhost-score-only
+runs just that scoreboard and its bootstrap. The full report goes to
+build/gen/<profile>/selfhost/scoreboard/run.tsv.
 
 The work runs on --jobs threads, each waiting on the processes it starts, and
 the log comes out in the same order whatever the number of jobs: each piece of
@@ -75,10 +80,12 @@ to a process.
 """
 
 import argparse
+import csv
 import json
 import concurrent.futures
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -137,6 +144,31 @@ def runtime_defines(source):
     if source.suffix != ".goose" or not source.is_file():
         return []
     return re.findall(r"^// runtime-define: (\w+=\w+)$", first_line(source))
+
+
+def positive_fixtures():
+    """One level of categories, excluding the bootstraps' modules, syntax
+    helpers and LSP fixtures. Native-module rejection fixtures stay beside
+    their positive fixtures, so return those separately for error checks."""
+    tests = [f for f in sorted(HERE.glob("*/*.goose"))
+             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose", "lsp") and
+             f.name != "lexer_tokens.goose"]
+    native_errors = [f for f in tests if f.parent.name in tc.NATIVE_MODULES and error_markers(f)]
+    return [f for f in tests if f not in native_errors], native_errors
+
+
+def compiler_stack_prefix():
+    """Give generated compilers the host's stack budget without changing the
+    runner's limit or using a preexec_fn in its threaded process."""
+    if sys.platform.startswith("linux"):
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        target = 64 * 1024 * 1024
+        if hard != resource.RLIM_INFINITY:
+            target = min(target, hard)
+        if soft != resource.RLIM_INFINITY and soft < target:
+            return ["sh", "-c", f'ulimit -S -s {target // 1024} && exec "$@"', "sh"]
+    return []
 
 
 # What `goose --multi-test` ends each file's part of stdout and of stderr
@@ -1137,6 +1169,139 @@ class Runner:
 
     # --- the Goose-written compilers --------------------------------------
 
+    def score_fixture(self, compiler, f, cc, directory, extra=(), timeout=30):
+        """One selfhost emit/build/run, with one deadline across all three
+        processes. Unsupported language features are data, not suite failures;
+        scoreboard() enforces only the checked-in passing baseline."""
+        work = directory / f.parent.name / f.stem
+        work.mkdir(parents=True, exist_ok=True)
+        cfile, executable = work / "out.c", work / f"out{tc.EXE_SUFFIX}"
+        cfile.unlink(missing_ok=True)
+        executable.unlink(missing_ok=True)
+        deadline = time.monotonic() + timeout
+
+        def run(argv, phase):
+            # Kill the C driver's children too, so a timeout cannot leave
+            # compilers accumulating behind the rest of the scoreboard.
+            with subprocess.Popen([str(a) for a in argv], cwd=tc.REPO_ROOT,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  start_new_session=not tc.IS_WINDOWS) as process:
+                try:
+                    out, err = process.communicate(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    if tc.IS_WINDOWS:
+                        process.kill()
+                    else:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    out, err = process.communicate()
+                    tc.write_text(work / f"{phase}.log", tc.decode(out) + tc.decode(err))
+                    raise TimeoutError(f"{phase}: {timeout}s fixture timeout")
+            out, err = tc.decode(out), tc.decode(err)
+            tc.write_text(work / f"{phase}.log", f"exit {process.returncode}\n{out}{err}")
+            return process.returncode, out, err
+
+        def diagnostic(err, fallback):
+            return next((line.strip() for line in err.splitlines() if line.strip()), fallback)
+
+        def crashed(code):
+            return code < 0 or (tc.IS_WINDOWS and code >= 0x80000000)
+
+        def crash_detail(code, err, phase):
+            try:
+                reason = signal.Signals(-code).name if code < 0 else f"exception 0x{code:08x}"
+            except ValueError:
+                reason = f"signal {-code}"
+            return f"{phase}: {reason}" + (f": {diagnostic(err, '')}" if err.strip() else "")
+
+        phase = "emit"
+        try:
+            code, out, err = run([*compiler_stack_prefix(), compiler, "-o", cfile, f], phase)
+            if crashed(code):
+                return "crash", crash_detail(code, err, "selfhost")
+            if code:
+                return "rejected", diagnostic(err or out, f"selfhost exited {code}")
+
+            phase = "cc"
+            # Use CC.compile's native O0 flags, strict declarations and
+            # system libraries. Selfhost's C includes its own runtime, as
+            # bootstrap stages 2 and 3 do, so it links no host runtime object.
+            argv = [cc.cc, *cc._flags(0, (), False, "default", True), *extra, cfile]
+            if cc.style == "msvc":
+                argv += [f"/Fe:{executable}", f"/Fo:{executable.with_suffix('.obj')}"]
+            else:
+                argv += ["-o", executable]
+                if not tc.IS_WINDOWS:
+                    argv += ["-pthread", "-lm"] + (["-ldl"] if sys.platform.startswith("linux") else [])
+            code, out, err = run(argv, phase)
+            if code:
+                lines = (err or out).splitlines()
+                error = next((line.strip() for line in lines if re.search(r"\berror\b", line)), None)
+                return "cc-error", error or diagnostic(err or out, f"C compiler exited {code}")
+
+            phase = "run"
+            code, out, err = run([executable], phase)
+            checked = Out()
+            with self.into(checked):
+                actual = self.check_run(f.stem, f.name, code, out, err)
+                passed = actual is not None and self.check_stdout(f.stem, f.name, actual)
+            if passed:
+                return "pass", ""
+            if crashed(code):
+                return "crash", crash_detail(code, err, "program")
+            reason = next((line.removeprefix("FAIL ").strip() for line in checked.text
+                           if line.startswith("FAIL ")), "output differs")
+            return "mismatch", diagnostic(err, reason)
+        except TimeoutError as exc:
+            return "timeout", str(exc)
+        except OSError as exc:
+            return {"emit": "rejected", "cc": "cc-error", "run": "crash"}[phase], str(exc)
+
+    def scoreboard(self, stage2, tests, cc, profile, extra, bless=False):
+        """Write all results before checking regressions, including when a
+        baseline fixture disappeared from discovery. Blessing only adds ground."""
+        if not cc:
+            self.say("skip selfhost scoreboard (no C compiler found or --nocgen)")
+            return
+        directory = tc.REPO_ROOT / "build" / "gen" / profile / "selfhost" / "scoreboard"
+        directory.mkdir(parents=True, exist_ok=True)
+        compiler = stage2()
+        files = [f for f in tests if "parse-only" not in first_line(f)]
+        futures = {f: self.submit(self.score_fixture, compiler, f, cc, directory, extra)
+                   for f in files} if compiler else {}
+        results = {f.name: (f.parent.name, *futures[f].result()) if compiler else
+                   (f.parent.name, "rejected", "selfhost stage-2 bootstrap failed") for f in files}
+        with (directory / "run.tsv").open("w", encoding="utf-8", newline="") as report:
+            writer = csv.writer(report, delimiter="\t", lineterminator="\n")
+            writer.writerow(("fixture", "category", "status", "stderr"))
+            for name, (category, status, err) in sorted(results.items()):
+                writer.writerow((name, category, status, err.replace("\t", " ").split("\n")[0]))
+        statuses = ("pass", "mismatch", "rejected", "cc-error", "crash", "timeout")
+        self.say("selfhost scoreboard: " + ", ".join(
+            f"{sum(status == s for _, status, _ in results.values())} {s}" for s in statuses))
+
+        baseline = tc.REPO_ROOT / "selfhost" / "scoreboard" / "run.txt"
+        if not baseline.exists() and not bless:
+            self.fail(f"missing selfhost scoreboard baseline {baseline}")
+        previous = set(baseline.read_text(encoding="utf-8").splitlines()) if baseline.exists() else set()
+        passes = {name for name, (_, status, _) in results.items() if status == "pass"}
+        regressions = previous - passes
+        for name in sorted(regressions):
+            _, status, err = results.get(name, ("", "missing", "fixture no longer discovered"))
+            self.fail(f"selfhost scoreboard {name}: {status}", err)
+        for name in sorted(passes - previous):
+            self.say(f"newly passing selfhost: {name}")
+        if not compiler:
+            self.fail("selfhost scoreboard requires a successful stage-2 bootstrap")
+        if bless:
+            if regressions or not compiler:
+                self.fail("refusing --bless-selfhost: would drop failing baseline entries or bootstrap failed")
+            else:
+                baseline.parent.mkdir(parents=True, exist_ok=True)
+                tc.write_text(baseline, "".join(name + "\n" for name in sorted(passes)))
+                self.ok(f"selfhost scoreboard baseline ({len(passes)} fixtures)")
+        elif baseline.exists() and not regressions and compiler:
+            self.ok(f"selfhost scoreboard baseline ({len(previous)} fixtures)")
+
     def bootstrap(self, name, root, cc, profile, extra, jit):
         """Exercise a Goose-written compiler as a large program, then execute
         its output.
@@ -1152,24 +1317,13 @@ class Runner:
         sanitizer flags. These modules are not standalone output fixtures.
 
         The chain of stages at each level, and the JIT self-compile at each,
-        are jobs of their own, started here; what this returns adds their
-        slots, and those of the comparisons between them, to the log."""
+        are jobs of their own, started here. Return a callable that adds
+        their slots to the log and one that waits for the first chain and
+        hands its stage-2 executable to the scoreboard."""
         source = root / "main.goose"
         directory = tc.REPO_ROOT / "build" / "gen" / profile / name
 
-        # Generated compilers need the same stack budget as the host. Only
-        # the child's soft limit is raised, by the shell that starts it: the
-        # suite process keeps its own, and a preexec_fn is not safe with the
-        # suite's threads.
-        stack_prefix = []
-        if sys.platform.startswith("linux"):
-            import resource
-            soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
-            target = 64 * 1024 * 1024
-            if hard != resource.RLIM_INFINITY:
-                target = min(target, hard)
-            if soft != resource.RLIM_INFINITY and soft < target:
-                stack_prefix = ["sh", "-c", f'ulimit -S -s {target // 1024} && exec "$@"', "sh"]
+        stack_prefix = compiler_stack_prefix()
 
         def run(argv, label, log):
             try:
@@ -1317,7 +1471,12 @@ class Runner:
                     self.show(jits[ol])
                     self.show_later(compare_jit, ol)
             self.show_later(compare_levels)
-        return show
+        def stage2():
+            if chains[levels[0]].result().value is not None:
+                return directory / f"O{levels[0]}" / f"stage2{tc.EXE_SUFFIX}"
+            return None
+
+        return show, stage2
 
 
 def default_jobs():
@@ -1346,6 +1505,11 @@ def main():
     ap.add_argument("--selfhost-only", action="store_true",
                     help="run only the multi-stage bootstrap of the self-hosted compiler "
                          "in selfhost/")
+    ap.add_argument("--selfhost-score-only", action="store_true",
+                    help="run only the selfhost positive-fixture scoreboard and its bootstrap")
+    ap.add_argument("--bless-selfhost", action="store_true",
+                    help="add current scoreboard passes to selfhost/scoreboard/run.txt; "
+                         "refuse to drop any failing baseline fixture")
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs(),
                     help=f"how many jobs run at once (default {default_jobs()}); "
                          "1 runs everything in order on one thread")
@@ -1367,8 +1531,12 @@ def main():
     if args.profile == "sanitize" and (not sys.platform.startswith("linux") or
                                         args.cc not in (None, "clang")):
         ap.error("the sanitize profile requires Linux and Clang")
-    if args.goose_in_goose_only and args.selfhost_only:
-        ap.error("--goose-in-goose-only and --selfhost-only cannot be combined")
+    if sum((args.goose_in_goose_only, args.selfhost_only, args.selfhost_score_only)) > 1:
+        ap.error("--goose-in-goose-only, --selfhost-only and --selfhost-score-only are exclusive")
+    if args.bless_selfhost and (args.nocgen or args.goose_in_goose_only or args.selfhost_only):
+        ap.error("--bless-selfhost requires the scoreboard and a C compiler")
+    if args.selfhost_score_only and args.nocgen:
+        ap.error("--selfhost-score-only requires a C compiler")
     if args.jobs < 1 or args.gpu_jobs < 0 or args.batch < 0:
         ap.error("--jobs must be at least 1, and --gpu-jobs and --batch at least 0")
 
@@ -1394,20 +1562,31 @@ def main():
     r = Runner(exe, args.jobs, args.verbose)
     r.gpulock = threading.BoundedSemaphore(args.gpu_jobs) if args.gpu_jobs else None
     r.batch = args.batch
+    tests, native_errors = positive_fixtures()
+    if len({f.stem for f in tests}) != len(tests):
+        ap.error("fixture names must be unique across categories (shared expected/ and build outputs)")
+    if (args.selfhost_score_only or args.bless_selfhost) and not cc:
+        ap.error("the selfhost scoreboard requires a C compiler")
 
     # The bootstraps are the longest chains of work in the suite, so they
     # start first, and the samples' runner, a process of its own, next. Each
     # --*-only flag starts only its own bootstrap.
     show_goose_in_goose = show_selfhost = None
-    if not args.selfhost_only:
-        show_goose_in_goose = r.bootstrap("goose_in_goose", HERE / "goose_in_goose",
-                                          cc, args.profile, extra, jit)
+    if not (args.selfhost_only or args.selfhost_score_only):
+        show_goose_in_goose, _ = r.bootstrap("goose_in_goose", HERE / "goose_in_goose",
+                                             cc, args.profile, extra, jit)
     if not args.goose_in_goose_only:
-        show_selfhost = r.bootstrap("selfhost", tc.REPO_ROOT / "selfhost",
-                                    cc, args.profile, extra, jit)
-    if args.goose_in_goose_only or args.selfhost_only:
+        show_selfhost, selfhost_stage2 = r.bootstrap("selfhost", tc.REPO_ROOT / "selfhost",
+                                                    cc, args.profile, extra, jit)
+    if args.goose_in_goose_only or args.selfhost_only or args.selfhost_score_only:
         (show_goose_in_goose or show_selfhost)()
+        if args.selfhost_score_only:
+            r.section("selfhost scoreboard")
+            r.show_later(r.scoreboard, selfhost_stage2, tests, cc, args.profile, extra,
+                         args.bless_selfhost)
         r.flush()
+        if r.pool:
+            r.pool.shutdown()
         return r.finish()
 
     # The samples: compiled, built, run and compared with their expected output
@@ -1480,19 +1659,6 @@ def main():
             r.say("\n".join(lines) if lines else "the checker printed nothing")
             r.local.out.failures += max(1, sum(line.startswith("FAIL ") for line in lines))
     doc_examples_future = r.task(doc_examples, alone=True)
-
-    # One level of category directories; nested syntax helpers and the modules
-    # of the goose_in_goose bootstrap are exercised through their entry points.
-    # The lsp/ fixtures are the language server's, driven by lsp_protocol.py.
-    tests = [f for f in sorted(HERE.glob("*/*.goose"))
-             if f.parent.name not in ("errors", "errors_tc", "goose_in_goose", "lsp") and
-             f.name != "lexer_tokens.goose"]
-    if len({f.stem for f in tests}) != len(tests):
-        ap.error("fixture names must be unique across categories (shared expected/ and build outputs)")
-    # A gfx, physics or ui fixture with error markers is a rejection test,
-    # kept beside what it rejects (for gfx, shaders).
-    native_errors = [f for f in tests if f.parent.name in native and error_markers(f)]
-    tests = [f for f in tests if f not in native_errors]
 
     # The generated programs below take long to check; they start before the
     # fixtures. Their files are written here, before any job reads them.
@@ -2266,6 +2432,9 @@ def main():
 
     show_goose_in_goose()
     show_selfhost()
+    r.section("selfhost scoreboard")
+    r.show_later(r.scoreboard, selfhost_stage2, tests, cc, args.profile, extra,
+                 args.bless_selfhost)
 
     # --- JIT: the same programs, compiled and run inside the compiler --------
     # No C file, no external toolchain: what this checks is that the generated
