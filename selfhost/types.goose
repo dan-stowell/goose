@@ -328,6 +328,7 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
         ty = varmode_type(ctx, base);
     } else if syntax.tag == N_TYPE_ARRAY {
         let element = resolve_type(ctx, syntax.a, scope);
+        no_fieldless_element(ctx, element, syntax.token);
         var count = -1;
         // A frozen array's count records its stored length width in bytes;
         // 0 is a LEB128 varint length.
@@ -346,6 +347,7 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
         if ty < 0 { error_at(ctx, syntax.token, "array element size class is not permitted"); }
     } else if syntax.tag == N_TYPE_SLICE {
         ty = slice_type(ctx, resolve_type_at(ctx, syntax.a, scope, true), syntax.flags & 16 != 0);
+        no_fieldless_element(ctx, ctx.types[ty].element, syntax.token);
     } else if syntax.tag == N_TYPE_REF || syntax.tag == N_TYPE_OPTIONAL {
         var element = resolve_type_at(ctx, syntax.a, scope, true);
         var readonly = syntax.flags & 16 != 0;
@@ -523,6 +525,30 @@ fn find_variant(ctx: Compiler&, ty: i64, token: i64) -> i64 {
 }
 fn is_variant(ctx: Compiler&, ty: i64) -> bool { ctx.types[ty].kind == T_STRUCT && ctx.types[ty].element >= 0 }
 fn has_payload(ctx: Compiler&, ty: i64) -> bool { ctx.nodes[ctx.types[ty].decl].flags & 1 != 0 }
+// A variant type with no fields is a value of its own, but never a field or
+// an element: it would take no bytes (§3.4).
+// Nor is a zero-length array (or limited array of capacity 0).
+fn zero_size(ctx: Compiler&, ty: i64) -> const u8[:] {
+    let t = ctx.types[ty];
+    if t.state == 1 { return ""; }
+    if is_variant(ctx, ty) && t.first < 0 { return "a variant type with no fields"; }
+    if t.kind == T_ARRAY && (t.flags == 0 || t.flags == 2) && t.count == 0 { return "a zero-length array"; }
+    return "";
+}
+fn no_fieldless_element(ctx: Compiler&, ty: i64, token: i64) {
+    let what = zero_size(ctx, ty);
+    if what.len == 0 { return; }
+    var text: u8[>..] = []; format(text, "an element cannot be ", what, ": "); type_text(ctx, ty, text);
+    error_at(ctx, token, text);
+}
+fn no_zero_size_field(ctx: Compiler&, owner: i64, ty: i64, token: i64) {
+    let what = zero_size(ctx, ty);
+    if what.len == 0 { return; }
+    var text: u8[>..] = [];
+    format(text, "field ", ctx.tokens[token].text, " of ", if is_variant(ctx, owner) { "variant " } else { "struct " }); type_text(ctx, owner, text);
+    format(text, " cannot be ", what, ": "); type_text(ctx, ty, text);
+    error_at(ctx, token, text);
+}
 // Bytes behind the tag in variable mode: an empty payload `V {}` takes none.
 fn stored_payload(ctx: Compiler&, ty: i64) -> bool { ctx.types[ty].first >= 0 }
 recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
@@ -537,6 +563,7 @@ recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
         let n = ctx.edges[e].value;
         if ctx.nodes[n].tag == N_PAD { error_at(ctx, ctx.nodes[n].token, "not implemented yet: explicit padding"); }
         let ft = resolve_type(ctx, ctx.nodes[n].a, scope);
+        no_zero_size_field(ctx, id, ft, ctx.nodes[n].token);
         if is_relative(ctx, ft) { plain_reference(ctx, ft); }
         if size_class == 2 && !root { error_at(ctx, ctx.nodes[n].token, "resizable field must be the final field"); }
         if ctx.types[ft].size_class > size_class { size_class = ctx.types[ft].size_class; }
@@ -563,7 +590,9 @@ recursive fn type_text(ctx: Compiler&, ty: i64, out: u8[>..]&) {
     else if t.kind == T_VARINT { out.append("varint"); }
     else if t.kind == T_INTEGER { format(out, if t.flags & 2 != 0 { "u" } else { "i" }, t.bytes * 8); }
     else if t.kind == T_FLOAT { format(out, "f", t.bytes * 8); }
-    else if t.kind == T_STRUCT {
+    else if t.kind == T_ENUM && t.flags & 1 != 0 { type_text(ctx, t.element, out); out.append(".."); }
+    else if is_variant(ctx, ty) { format(out, ctx.tokens[ctx.nodes[ctx.types[t.element].decl].token].text, ".", ctx.tokens[ctx.nodes[t.decl].token].text); }
+    else if t.kind == T_STRUCT || t.kind == T_ENUM {
         out.append(ctx.tokens[ctx.nodes[t.decl].token].text);
         if t.arguments >= 0 {
             out.push('<'); var e = t.arguments; var comma = false;

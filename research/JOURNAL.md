@@ -48,3 +48,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 feat-storage: check_length, range_index, index_of; runtime flushes stdout before an abort; run 87 -> 98.
 - 2026-11-17 feat-storage: globals with only a type start as their default; .= assigns in generic code; run 98 -> 101.
 - 2026-11-17 feat-storage: relative references (self- and pool-relative, u8..u64), built in place when pushed, rendered from their slot; run 101 -> 110.
+- 2026-11-17 feat-enums: checks with the features: break type fixed by the first break, implicit copies and dead roots out of match arms and breaks, zero-size variant/zero-length array fields and elements, negated literal range, pattern names (nested fn, type parameter); reject 39->61.

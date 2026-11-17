@@ -376,6 +376,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             else if op == "!" { if v.ty != boolean_type(ctx) { error_at(ctx, x.token, "boolean operand required"); } if v.known { v.bits = 0; if operand.bits == 0 { v.bits = 1; } } }
             else if op == "-" || op == "~" {
                 if !numeric(ctx, v.ty) { error_at(ctx, x.token, "numeric operand required"); }
+                if op == "-" && ctx.nodes[x.a].tag == N_INT && ctx.tokens[ctx.nodes[x.a].token].integer > 9223372036854775808 { error_at(ctx, x.token, "negated literal too large for i64"); }
                 if op == "-" && ctx.types[v.ty].kind == T_INTEGER && ctx.types[v.ty].flags & 2 != 0 && v.bits != 9223372036854775808 { error_at(ctx, x.token, "cannot negate an unsigned value"); }
                 if v.known && ctx.types[v.ty].kind == T_INTEGER {
                     if op == "-" { v.bits = 0 - v.bits; v.alt = 0 - v.alt; v.ty = default_integer(ctx); }
@@ -528,8 +529,14 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             let value = first_child(ctx, n);
             let previous = ctx.nodes[target].b;
             let b = check_expression(ctx, value, scope, ctx.nodes[target].c);
+            check_branch_value(ctx, target, b, value, ctx.nodes[ctx.nodes[target].a].symbol, if ctx.nodes[target].tag == N_LOOP { "loop" } else { "block" }, ctx.nodes[target].c);
             if previous < 0 { var first = b; first.place = -1; first.known = false; annotate(ctx, target, first); }
-            else { annotate(ctx, target, join_branch(ctx, value_of(ctx, target), b, previous, value, x.token)); }
+            else {
+                // The first break fixes the type; later ones adapt to it.
+                let first = value_of(ctx, target);
+                if ctx.types[first.ty].kind != T_BOTTOM && ctx.types[b.ty].kind != T_BOTTOM && !fits(ctx, b, first.ty) { type_mismatch(ctx, ctx.nodes[value].token, first.ty, b.ty); }
+                annotate(ctx, target, join_branch(ctx, first, b, previous, value, x.token));
+            }
             ctx.nodes[target].b = value;
         }
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
@@ -567,6 +574,26 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     return annotate(ctx, n, v);
 }
 
+fn type_mismatch(ctx: Compiler&, token: i64, want: i64, got: i64) {
+    var text: u8[>..] = [];
+    text.append("expected a value of type "); type_text(ctx, want, text); text.append(", got "); type_text(ctx, got, text);
+    error_at(ctx, token, text);
+}
+// A control expression's value leaves its branch: a nonfixed one names
+// storage that is not copied implicitly, and a view may not outlive the
+// scope the branch opened (a binder, a block's locals).
+fn check_branch_value(ctx: Compiler&, construct: i64, v: Value, node: i64, inner: i64, what: const u8[:], expected: i64) {
+    let d = decay(ctx, v);
+    let referenced = expected >= 0 && ctx.types[expected].kind == T_REFERENCE;
+    let tail = ctx.checking_function >= 0 && ctx.nodes[ctx.specializations[ctx.checking_function].body].a == construct;
+    if !referenced && !tail && d.place >= 0 && ctx.types[d.ty].size_class > 0 && ctx.nodes[node].tag == N_NAME {
+        error_at(ctx, ctx.nodes[node].token, str(ctx.tokens[ctx.nodes[node].token].text, " is not fixed-size and is not copied implicitly"));
+    }
+    let root = content_root(ctx, received(ctx, v, d.ty));
+    if inner >= 0 && contains_view(ctx, d.ty) && root >= 0 && scope_contains(ctx, inner, ctx.symbols[root].scope) {
+        error_at(ctx, ctx.nodes[node].token, str("the ", what, "'s value is ", if ctx.types[d.ty].kind == T_SLICE { "a slice" } else { "a reference" }, " rooted at ", ctx.tokens[ctx.symbols[root].token].text, ", which does not outlive it"));
+    }
+}
 // Two branches of an if or match agree on a type, adapting a literal or a
 // variant either way; the joined value is bounded by the shorter-lived root.
 fn join_branch(ctx: Compiler&, a: Value, b: Value, anode: i64, bnode: i64, token: i64) -> Value {
@@ -630,11 +657,16 @@ fn pattern_value(ctx: Compiler&, n: i64, scope: i64, ty: i64) -> u64 {
     var inner = n; if ctx.nodes[n].tag == N_UNARY { inner = ctx.nodes[n].a; }
     let spelled = ctx.tokens[ctx.nodes[inner].token].text;
     if ctx.nodes[inner].tag == N_NAME {
+        let f = lookup(ctx, inner, scope, 3);
+        if f >= 0 && ctx.symbols[f].scope != 0 { error_at(ctx, ctx.nodes[n].token, str("match pattern ", spelled, " names a nested function, not a constant")); }
+        let tp = lookup(ctx, inner, scope, 1);
+        if tp >= 0 && ctx.symbols[tp].decl < 0 { error_at(ctx, ctx.nodes[n].token, str("match pattern ", spelled, " names a type parameter, not a constant")); }
         let s = lookup(ctx, inner, scope, 2);
         if s < 0 { error_at(ctx, ctx.nodes[n].token, str("unknown constant ", spelled, " in an integer match")); }
         if ctx.symbols[s].scope != 0 { error_at(ctx, ctx.nodes[n].token, str("match pattern ", spelled, " names a local variable, not a constant")); }
         if ctx.symbols[s].flags & 1 != 0 { error_at(ctx, ctx.nodes[n].token, str("match pattern ", spelled, " names a var global, not a constant")); }
     }
+    if ctx.nodes[n].tag == N_UNARY && ctx.nodes[inner].tag == N_INT && ctx.tokens[ctx.nodes[inner].token].integer > 9223372036854775808 { error_at(ctx, ctx.nodes[n].token, "negated literal too large for i64"); }
     let bits = constant_integer(ctx, n);
     let t = ctx.types[ty];
     var fit = integer_fits(ctx, bits, ty);
@@ -755,6 +787,7 @@ recursive fn check_match(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
         }
         let body = ctx.nodes[arm].c;
         let a = check_expression(ctx, body, inner, expected);
+        check_branch_value(ctx, n, a, body, inner, "match arm", expected);
         if previous < 0 { result = a; result.place = -1; result.known = false; }
         else { result = join_branch(ctx, result, a, previous, body, x.token); }
         previous = body;
@@ -859,6 +892,7 @@ recursive fn check_array(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
         }
     }
     if element < 0 { error_at(ctx, x.token, "empty array needs an element type"); }
+    no_fieldless_element(ctx, element, x.token);
     var ty = array_type(ctx, element, 0, count);
     if ctx.types[element].size_class > 0 { ty = array_type(ctx, element, 1, 4); }
     if ty < 0 { error_at(ctx, x.token, "invalid array element type"); }
