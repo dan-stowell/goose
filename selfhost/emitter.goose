@@ -211,6 +211,7 @@ fn c_adapt(ctx: Compiler&, v: CValue, target: i64) -> const u8[:] {
     if ctx.types[target].kind == T_SLICE { return c_view(ctx, a); }
     if ctx.types[target].kind == T_ENUM && ctx.types[target].flags & 1 == 0 && is_variant(ctx, a.ty) { return save_text(ctx, str("gg_wrap_", a.ty, "(", a.code, ")")); }
     if ctx.types[target].kind == T_ENUM && ctx.types[target].flags & 1 == 0 && ctx.types[a.ty].kind == T_ENUM && a.ty != target { return save_text(ctx, str("gg_fix_", a.ty, "(", a.code, ")")); }
+    if numeric(ctx, target) && a.ty == target { return a.code; }
     if numeric(ctx, target) { return save_text(ctx, str("((", c_type(ctx, target), ")(", a.code, "))")); }
     if limited_fixed(ctx, target) && a.ty != target { return save_text(ctx, str("gg_limit_", target, "(", c_view(ctx, a), ")")); }
     return a.code;
@@ -454,6 +455,8 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
     if tag == N_RESULT { return c_result_field(ctx, c_multi(ctx, x.a), x.ty, x.flags); }
     if tag == N_NULL { return CValue { code: "0", ty: x.ty, address: "", stack: "" }; }
     if tag == N_INT || tag == N_BOOL {
+        // A value that fits a C int needs no suffix; larger ones keep UINT64_C.
+        if x.bits < 2147483648 { return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")", x.bits, ")")), ty: x.ty, address: "", stack: "" }; }
         return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")UINT64_C(", x.bits, "))")), ty: x.ty, address: "", stack: "" };
     }
     // Keep the validated spelling and let the C library round it exactly.
@@ -473,7 +476,11 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         let op = ctx.tokens[x.token].text;
         if op == "&&" || op == "||" {
             let a = c_condition(ctx, x.a);
-            let result = temporary(ctx, x.ty); emit(ctx, str("  ", result, " = ", a.code, ";\n  if (", if op == "||" { "!" } else { "" }, result, ") {\n"));
+            // A nested condition's temporary is used by nothing else: reuse it.
+            let reuse = is_temporary(a.code) && a.ty == x.ty;
+            let result = if reuse { a.code } else { temporary(ctx, x.ty) };
+            if !reuse { emit(ctx, str("  ", result, " = ", a.code, ";\n")); }
+            emit(ctx, str("  if (", if op == "||" { "!" } else { "" }, result, ") {\n"));
             let b = c_condition(ctx, x.b); emit(ctx, str("  ", result, " = ", b.code, ";\n  }\n"));
             return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
         }
