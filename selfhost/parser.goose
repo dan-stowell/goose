@@ -306,6 +306,7 @@ recursive fn primary(ctx: Compiler&, constructs: bool) -> i64 {
         }
         expect(ctx, "]"); return n;
     }
+    if at(ctx, "defer") { error_at(ctx, t, "defer is a statement: it runs its body when the block it is in ends"); }
     if take(ctx, "true") || take(ctx, "false") { return node(ctx, N_BOOL, t); }
     if take(ctx, "null") { return node(ctx, N_NULL, t); }
     if take(ctx, "self") { return node(ctx, N_SELF, t); }
@@ -406,25 +407,40 @@ recursive fn block_contents(ctx: Compiler&, t: i64) -> i64 {
         if at(ctx, "let") || at(ctx, "var") || at(ctx, "const") || at(ctx, "reusable") { child(ctx, n, binding(ctx)); continue; }
         if at(ctx, "fn") || at(ctx, "recursive") || at(ctx, "simd") || at_inline(ctx) || at_checkfree(ctx) { child(ctx, n, function_decl(ctx, true)); continue; }
         if at(ctx, "guard") { guard_statement(ctx, n); return n; }
-        let e = expression(ctx, 0, true, true);
-        if take(ctx, ",") {
-            let targets = node(ctx, N_ASSIGN, ctx.cursor);
-            child(ctx, targets, e);
-            loop { child(ctx, targets, expression(ctx, 0, true, false)); if !take(ctx, ",") { break; } }
-            ctx.nodes[targets].token = expect(ctx, "=");
-            ctx.nodes[targets].b = expression(ctx, 0, true, false);
-            ctx.nodes[ctx.nodes[targets].b].standalone = true;
-            expect(ctx, ";"); child(ctx, n, targets);
-        } else if assignment_op(ctx, ctx.tokens[ctx.cursor].text) {
-            let a = node(ctx, N_ASSIGN, ctx.cursor); ctx.cursor++; ctx.nodes[a].a = e;
-            if ctx.tokens[ctx.nodes[a].token].text != "++" && ctx.tokens[ctx.nodes[a].token].text != "--" { ctx.nodes[a].b = expression(ctx, 0, true, false); ctx.nodes[ctx.nodes[a].b].standalone = true; }
-            expect(ctx, ";"); child(ctx, n, a);
-        } else if take(ctx, ";") { let s = node(ctx, N_EXPR_STMT, ctx.nodes[e].token); ctx.nodes[s].a = e; ctx.nodes[e].standalone = true; child(ctx, n, s); }
-        else if at(ctx, "}") { ctx.nodes[n].a = e; break; }
-        else if ended(ctx, e) { child(ctx, n, e); }
-        else { error_at(ctx, ctx.cursor, "expected ';' after statement"); }
+        if at(ctx, "defer") {
+            let d = node(ctx, N_DEFER, ctx.cursor); ctx.cursor++;
+            if at(ctx, "let") || at(ctx, "var") || at(ctx, "const") || at(ctx, "reusable") { error_at(ctx, ctx.cursor, str("defer takes a statement or a block, not `", ctx.tokens[ctx.cursor].text, "`")); }
+            if at(ctx, "{") { ctx.nodes[d].a = parse_block(ctx); }
+            else { let body = node(ctx, N_BLOCK, ctx.cursor); expression_statement(ctx, body, false); ctx.nodes[d].a = body; }
+            child(ctx, n, d); continue;
+        }
+        if expression_statement(ctx, n, true) { break; }
     }
     expect(ctx, "}"); return n;
+}
+// A statement that starts with an expression, added to block n: a (multi-
+// target) assignment, an expression statement, or one ended by a block.
+// Where tail allows it, an expression before '}' is the block's value.
+recursive fn expression_statement(ctx: Compiler&, n: i64, tail: bool) -> bool {
+    let e = expression(ctx, 0, true, true);
+    if take(ctx, ",") {
+        let targets = node(ctx, N_ASSIGN, ctx.cursor);
+        child(ctx, targets, e);
+        loop { child(ctx, targets, expression(ctx, 0, true, false)); if !take(ctx, ",") { break; } }
+        ctx.nodes[targets].token = expect(ctx, "=");
+        ctx.nodes[targets].b = expression(ctx, 0, true, false);
+        ctx.nodes[ctx.nodes[targets].b].standalone = true;
+        expect(ctx, ";"); child(ctx, n, targets);
+    } else if assignment_op(ctx, ctx.tokens[ctx.cursor].text) {
+        let a = node(ctx, N_ASSIGN, ctx.cursor); ctx.cursor++; ctx.nodes[a].a = e;
+        if ctx.tokens[ctx.nodes[a].token].text != "++" && ctx.tokens[ctx.nodes[a].token].text != "--" { ctx.nodes[a].b = expression(ctx, 0, true, false); ctx.nodes[ctx.nodes[a].b].standalone = true; }
+        expect(ctx, ";"); child(ctx, n, a);
+    } else if take(ctx, ";") { let s = node(ctx, N_EXPR_STMT, ctx.nodes[e].token); ctx.nodes[s].a = e; ctx.nodes[e].standalone = true; child(ctx, n, s); }
+    else if tail && at(ctx, "}") { ctx.nodes[n].a = e; return true; }
+    else if ended(ctx, e) { child(ctx, n, e); }
+    else if !tail { error_at(ctx, ctx.cursor, str("';' expected after expression, found '", ctx.tokens[ctx.cursor].text, "'")); }
+    else { error_at(ctx, ctx.cursor, "expected ';' after statement"); }
+    return false;
 }
 recursive fn parse_block(ctx: Compiler&) -> i64 { let t = expect(ctx, "{"); return block_contents(ctx, t); }
 // `guard c; rest` is `if c { rest }` and `guard c else { s } rest` is

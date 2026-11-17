@@ -489,9 +489,12 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
     if x.tag == N_MATCH { c_match(ctx, n, dest); return; }
     if x.tag == N_LOOP || x.tag == N_EARLY { c_loop(ctx, n, dest); return; }
     if x.tag == N_BLOCK {
+        let defers = ctx.c_defers; let defer_mark = defers.len;
         emit(ctx, "  {\n"); var e = x.first;
         while e >= 0 { c_statement(ctx, ctx.edges[e].value); e = ctx.edges[e].next; }
         if x.a >= 0 { c_into(ctx, x.a, dest); }
+        c_run_defers(ctx, defer_mark);
+        defers.resize(defer_mark);
         emit(ctx, "  }\n"); return;
     }
     if x.tag == N_CALL && dest.ty != 0 && ctx.types[dest.ty].size_class == 1 && x.ty == dest.ty && x.symbol >= 0 { c_call(ctx, n, dest); return; }
@@ -1000,9 +1003,16 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     return CValue { code: ret, ty: spec.result, address: save_text(ctx, str("&", ret)), stack: "" };
 }
 
+// The bodies of the defers from index mark up, latest first. A body cannot
+// leave, so emitting one never runs the defers again.
+recursive fn c_run_defers(ctx: Compiler&, mark: i64) {
+    var i = ctx.c_defers.len;
+    while i > mark { i--; let body = ctx.c_defers[i].again; c_statement(ctx, body); }
+}
 recursive fn c_statement(ctx: Compiler&, n: i64) {
     let x = ctx.nodes[n];
     if x.tag == N_FUNCTION { return; }
+    if x.tag == N_DEFER { ctx.c_defers.push(Control { again: x.a, done: ctx.c_controls.len }); return; }
     if x.tag == N_RECEIVE {
         c_expression(ctx, x.a);
         var e = x.first;
@@ -1027,6 +1037,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
             let dest = if child_count(ctx, ctx.specializations[ctx.c_function].results) > 1 { c_return_value(ctx, index) } else { ctx.c_result };
             c_into(ctx, ctx.edges[e].value, dest); e = ctx.edges[e].next; index++;
         }
+        c_run_defers(ctx, 0);
         emit(ctx, "  goto gg_done;\n"); return;
     }
     if x.tag == N_BREAK || x.tag == N_CONTINUE {
@@ -1035,6 +1046,9 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         if control < 0 { abort("internal error: no loop target"); }
         let label = if x.tag == N_CONTINUE { ctx.c_controls[control].again } else { ctx.c_controls[control].done };
         if x.first >= 0 { c_into(ctx, first_child(ctx, n), control_destination(ctx, control)); }
+        var first = ctx.c_defers.len;
+        while first > 0 && ctx.c_defers[first - 1].done > control { first--; }
+        c_run_defers(ctx, first);
         emit(ctx, str("  goto label", label, ";\n")); return;
     }
     if x.tag == N_ASSIGN {

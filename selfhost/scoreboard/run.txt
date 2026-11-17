@@ -36,6 +36,7 @@ extern_symbol_deprecated
 fat_held
 fat_optional
 fieldless_variant_values
+defer_forms
 fixed_array_bulk_fill
 float_conversions_unchecked
 float_equality

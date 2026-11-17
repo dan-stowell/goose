@@ -33,6 +33,9 @@ struct Compiler {
     // Breaks seen in the innermost loop or block being checked.
     loop_breaks: i64 = 0,
     break_target: i64 = -1,
+    // While a defer body is checked, the loop depth around it: no exit in
+    // the body may leave it (6.6).
+    defer_loops: i64 = -1,
     global_order: i64[>..]&,
     c_output: u8[>..]&,
     c_declarations: u8[>..]&,
@@ -52,6 +55,9 @@ struct Compiler {
     first_local: i64[>..]&,
     next_local: i64[>..]&,
     c_controls: Control[>..<]&,
+    // Defers in scope while emitting: again is the defer node, done the
+    // count of controls around it, so a break knows which it leaves.
+    c_defers: Control[>..<]&,
     c_arguments: (const u8[:])[>..<]&,
     // (call node, number) for this function's multiple-result calls.
     c_multis: i64[>..<]&,
@@ -106,6 +112,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
     var owned_first_local: i64[>..] = [];
     var owned_next_local: i64[>..] = [];
     var owned_c_controls: Control[>..<] = [];
+    var owned_c_defers: Control[>..<] = [];
     var owned_c_arguments: (const u8[:])[>..<] = [];
     var owned_c_multis: i64[>..<] = [];
     var owned_text_storage: u8[>..] = [];
@@ -143,6 +150,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
         first_local: owned_first_local,
         next_local: owned_next_local,
         c_controls: owned_c_controls,
+        c_defers: owned_c_defers,
         c_arguments: owned_c_arguments,
         c_multis: owned_c_multis,
         default_stack: owned_default_stack,

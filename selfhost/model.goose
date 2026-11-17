@@ -76,6 +76,7 @@ const N_SELF = 53;
 // Receivers evaluate their call once before the projected results are used.
 const N_RECEIVE = 54;
 const N_RESULT = 55;
+const N_DEFER = 56;
 
 struct Node {
     tag: i64,

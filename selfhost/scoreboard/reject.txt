@@ -1,4 +1,7 @@
 errors/checkfree_extern
+errors/defer_declaration
+errors/defer_expression
+errors/defer_tail
 errors/double_optional
 errors/extern_simd
 errors/inline_export
@@ -22,6 +25,11 @@ errors_tc/break_mismatch
 errors_tc/check_length_variable
 errors_tc/const_name_pattern_default
 errors_tc/constant_division_overflow
+errors_tc/defer_break
+errors_tc/defer_continue
+errors_tc/defer_global
+errors_tc/defer_return
+errors_tc/defer_return_from
 errors_tc/diverging_initializer
 errors_tc/field_default_mutual
 errors_tc/field_default_param_default

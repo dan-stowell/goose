@@ -558,11 +558,13 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     else if tag == N_WHILE || tag == N_FOR || tag == N_LOOP || tag == N_EARLY { v = check_loop(ctx, n, scope, expected); }
     else if tag == N_RETURN {
         if ctx.checking_function < 0 { error_at(ctx, x.token, "return outside a function"); }
+        if ctx.defer_loops >= 0 { error_at(ctx, x.token, "return cannot leave a defer body (§6.6)"); }
         if x.a >= 0 { error_at(ctx, x.token, "not implemented yet: long-distance returns"); }
         check_returns(ctx, n, scope);
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
     } else if tag == N_BREAK || tag == N_CONTINUE {
         if ctx.loop_depth == 0 { error_at(ctx, x.token, "loop exit outside a loop or block"); }
+        if ctx.defer_loops >= 0 && ctx.loop_depth <= ctx.defer_loops { error_at(ctx, x.token, str(ctx.tokens[x.token].text, " cannot leave a defer body (§6.6)")); }
         if tag == N_BREAK { ctx.loop_breaks++; }
         if x.first >= 0 {
             // The breaks of one loop or block agree on a type, joined on the
@@ -585,6 +587,13 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         }
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
     } else if tag == N_EXPR_STMT { let inner = check_expression(ctx, x.a, scope, -1); if ctx.types[inner.ty].kind == T_BOTTOM { v = inner; } }
+    else if tag == N_DEFER {
+        if ctx.checking_function < 0 { error_at(ctx, x.token, "defer outside of a function: a global initializer has no scope exit (§6.6)"); }
+        let outer = ctx.defer_loops; ctx.defer_loops = ctx.loop_depth;
+        let body = check_expression(ctx, x.a, scope, 0);
+        if ctx.types[body.ty].kind == T_BOTTOM { error_at(ctx, x.token, "a defer body cannot leave"); }
+        ctx.defer_loops = outer;
+    }
     else if tag == N_BIND { check_binding(ctx, n, scope); }
     else if tag == N_ASSIGN { check_assignment(ctx, n, scope); }
     else if tag == N_FUNCTION {
@@ -1993,6 +2002,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
     if ctx.nodes[decl].flags & 2 == 0 {
         let previous = ctx.checking_function; let previous_loop = ctx.loop_depth; let previous_breaks = ctx.loop_breaks; let previous_target = ctx.break_target;
         ctx.checking_function = id; ctx.loop_depth = 0; ctx.loop_breaks = 0; ctx.break_target = -1;
+        let previous_defer = ctx.defer_loops; ctx.defer_loops = -1;
         // A body declared outside a default may take that default again,
         // which makes it recursive rather than an endless default (§3.2).
         let defaults = ctx.default_stack; let default_mark = defaults.len; defaults.push(-1);
@@ -2003,6 +2013,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         if ctx.types[tail.ty].kind != T_BOTTOM { check_return(ctx, ctx.nodes[body].a, tail, id, ctx.nodes[decl].token); }
         defaults.resize(default_mark); ctx.default_site = outer_site;
         ctx.checking_function = previous; ctx.loop_depth = previous_loop; ctx.loop_breaks = previous_breaks; ctx.break_target = previous_target;
+        ctx.defer_loops = previous_defer;
     } else if result < 0 { ctx.specializations[id].result = 0; }
     if ctx.specializations[id].result < 0 { ctx.specializations[id].result = 0; }
     if ctx.nodes[first_child(ctx, results)].ty < 0 { ctx.nodes[first_child(ctx, results)].ty = ctx.specializations[id].result; }
