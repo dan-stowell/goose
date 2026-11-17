@@ -137,6 +137,43 @@ fn c_view(ctx: Compiler&, v: CValue) -> const u8[:] {
     if t.flags >= 3 { return save_text(ctx, str("gg_view((", a.code, ").base, (", a.code, ").len)")); }
     abort("unsupported C array view");
 }
+// The data pointer and length of an array or slice, read in place rather
+// than through a gg_view call: cheap for a compiler without an optimizer.
+struct ViewParts { data: const u8[:], len: const u8[:] }
+fn c_view_parts(ctx: Compiler&, v: CValue) -> ViewParts {
+    let a = c_decay(ctx, v); let t = ctx.types[a.ty];
+    if t.kind == T_SLICE { return ViewParts { data: save_text(ctx, str("(", a.code, ").data")), len: save_text(ctx, str("(", a.code, ").len")) }; }
+    if t.kind == T_ARRAY && t.flags == 0 { return ViewParts { data: save_text(ctx, str("(", a.code, ").data")), len: save_text(ctx, str("((int64_t)", t.count, ")")) }; }
+    if t.kind == T_ARRAY && t.flags == 2 && t.count >= 0 { return ViewParts { data: save_text(ctx, str("(", a.code, ").e")), len: save_text(ctx, str("(", a.code, ").len")) }; }
+    if t.kind == T_ARRAY && t.flags >= 3 { return ViewParts { data: save_text(ctx, str("(", a.code, ").base")), len: save_text(ctx, str("(", a.code, ").len")) }; }
+    let view = c_view(ctx, a);
+    return ViewParts { data: save_text(ctx, str("(", view, ").data")), len: save_text(ctx, str("(", view, ").len")) };
+}
+// An expression that writes nothing: evaluating it later, after other pure
+// expressions, cannot change any value they read.
+recursive fn pure_expression(ctx: Compiler&, n: i64) -> bool {
+    if n < 0 { return true; }
+    let x = ctx.nodes[n]; let tag = x.tag;
+    if tag == N_NAME || tag == N_INT || tag == N_BOOL || tag == N_FLOAT || tag == N_STRING || tag == N_RESULT { return true; }
+    if tag == N_MEMBER && x.flags & 1024 != 0 { return true; }
+    if tag == N_UNARY || tag == N_CAST || tag == N_MEMBER { return pure_expression(ctx, x.a); }
+    if tag == N_BINARY || tag == N_INDEX || tag == N_SLICE { return pure_expression(ctx, x.a) && pure_expression(ctx, x.b) && pure_expression(ctx, x.c); }
+    return false;
+}
+// Whether the C code of an expression (not its statements) can fail: such
+// code is sampled where Goose evaluates it, so failures keep their order.
+recursive fn code_may_fail(ctx: Compiler&, n: i64) -> bool {
+    if n < 0 { return false; }
+    let x = ctx.nodes[n]; let tag = x.tag;
+    if tag == N_SLICE { return true; }
+    if tag == N_BINARY {
+        let op = ctx.tokens[x.token].text;
+        if op == "/" || op == "%" || op == "&&" || op == "||" { return true; }
+        return code_may_fail(ctx, x.a) || code_may_fail(ctx, x.b);
+    }
+    if tag == N_UNARY || tag == N_CAST || (tag == N_MEMBER && x.flags & 1024 == 0) { return code_may_fail(ctx, x.a); }
+    return false;
+}
 fn c_reference(ctx: Compiler&, v: CValue) -> const u8[:] {
     if ctx.types[v.ty].kind == T_REFERENCE { return v.code; }
     if ctx.types[v.ty].size_class == 2 { return save_text(ctx, str("gg_ref(", v.address, ", ", v.stack, ")")); }
@@ -436,7 +473,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
                 let parts = limited_parts(ctx, a);
                 return CValue { code: parts.cap, ty: x.ty, address: "", stack: "" };
             }
-            return CValue { code: save_text(ctx, str("((int64_t)(", c_view(ctx, a), ").len)")), ty: x.ty, address: "", stack: "" };
+            return CValue { code: save_text(ctx, str("((int64_t)", c_view_parts(ctx, a).len, ")")), ty: x.ty, address: "", stack: "" };
         }
         let field = c_field(ctx, a.ty, a.code, x.symbol);
         if is_relative(ctx, field.ty) { return CValue { code: c_relative_load(ctx, field.ty, field.address), ty: x.ty, address: field.address, stack: "" }; }
@@ -445,21 +482,30 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
     }
     if tag == N_INDEX || tag == N_SLICE {
         let a = c_expression(ctx, x.a);
-        let view = raw_temporary(ctx, "gg_slice"); emit(ctx, str("  ", view, " = ", c_view(ctx, a), ";\n"));
+        // When the bounds write nothing, the array is read in place after them.
+        var parts = ViewParts { data: "", len: "" };
+        if pure_expression(ctx, x.b) && pure_expression(ctx, x.c) && !code_may_fail(ctx, x.a) { parts = c_view_parts(ctx, a); }
+        else {
+            let view = raw_temporary(ctx, "gg_slice"); let p = c_view_parts(ctx, a);
+            emit(ctx, str("  ", view, ".data = ", p.data, "; ", view, ".len = ", p.len, ";\n"));
+            parts = ViewParts { data: save_text(ctx, str(view, ".data")), len: save_text(ctx, str(view, ".len")) };
+        }
         var lo = CValue { code: "0", ty: default_integer(ctx), address: "", stack: "" };
         if x.b >= 0 { lo = snapshot(ctx, c_decay(ctx, c_expression(ctx, x.b))); }
-        let lower = if x.flags & 1 != 0 { save_text(ctx, str(view, ".len - ", lo.code)) } else { lo.code };
+        let lower = if x.flags & 1 != 0 { save_text(ctx, str(parts.len, " - ", lo.code)) } else { lo.code };
         let elem = element_type(ctx, a.ty);
         if tag == N_INDEX {
-            let pointer = save_text(ctx, str("((", c_type(ctx, elem), " *)", view, ".data) + gg_index(", lower, ", ", view, ".len)"));
+            let pointer = save_text(ctx, str("((", c_type(ctx, elem), " *)", parts.data, ") + gg_index(", lower, ", ", parts.len, ")"));
             let sampled = raw_temporary(ctx, save_text(ctx, str(c_type(ctx, elem), " *"))); emit(ctx, str("  ", sampled, " = ", pointer, ";\n"));
             if is_relative(ctx, elem) { return CValue { code: c_relative_load(ctx, elem, sampled), ty: x.ty, address: sampled, stack: "" }; }
             return CValue { code: save_text(ctx, str("(*", sampled, ")")), ty: x.ty, address: sampled, stack: "" };
         }
-        var hi = CValue { code: save_text(ctx, str(view, ".len")), ty: default_integer(ctx), address: "", stack: "" };
+        var hi = CValue { code: parts.len, ty: default_integer(ctx), address: "", stack: "" };
         if x.c >= 0 { hi = snapshot(ctx, c_decay(ctx, c_expression(ctx, x.c))); }
-        let upper = if x.flags & 2 != 0 { save_text(ctx, str(view, ".len - ", hi.code)) } else { hi.code };
-        return CValue { code: save_text(ctx, str("gg_sub(", view, ", ", lower, ", ", upper, ", sizeof(", c_type(ctx, elem), "))")), ty: x.ty, address: "", stack: "" };
+        let upper = if x.flags & 2 != 0 { save_text(ctx, str(parts.len, " - ", hi.code)) } else { hi.code };
+        let whole = raw_temporary(ctx, "gg_slice");
+        emit(ctx, str("  ", whole, ".data = ", parts.data, "; ", whole, ".len = ", parts.len, ";\n"));
+        return CValue { code: save_text(ctx, str("gg_sub(", whole, ", ", lower, ", ", upper, ", sizeof(", c_type(ctx, elem), "))")), ty: x.ty, address: "", stack: "" };
     }
     if tag == N_CALL { return c_call(ctx, n, no_c_value(ctx)); }
     if tag == N_ARRAY || tag == N_FILL || tag == N_CONSTRUCT {
@@ -1097,12 +1143,12 @@ recursive fn c_loop(ctx: Compiler&, n: i64, dest: CValue) {
         if upper.ty != 0 {
             emit(ctx, str("  if (", index, " >= ", upper.code, ") goto label", done, ";\n  ", c_symbol(ctx, symbol), " = ", index, ";\n"));
         } else {
-            let view = c_view(ctx, iterable); let elem = element_type(ctx, iterable.ty);
-            emit(ctx, str("  if (", index, " >= (", view, ").len) goto label", done, ";\n  ", c_symbol(ctx, symbol), " = "));
+            let parts = c_view_parts(ctx, iterable); let elem = element_type(ctx, iterable.ty);
+            emit(ctx, str("  if (", index, " >= ", parts.len, ") goto label", done, ";\n  ", c_symbol(ctx, symbol), " = "));
             if cursor.len > 0 { emit(ctx, str(cursor, ";\n")); }
             else {
                 if x.flags & 1 != 0 || ctx.types[elem].size_class > 0 { emit(ctx, "&"); }
-                emit(ctx, str("((", c_type(ctx, elem), " *)(", view, ").data)[", index, "];\n"));
+                emit(ctx, str("((", c_type(ctx, elem), " *)", parts.data, ")[", index, "];\n"));
             }
         }
         if x.first >= 0 { emit(ctx, str("  ", c_symbol(ctx, ctx.nodes[ctx.edges[x.first].value].symbol), " = ", index, ";\n")); }
