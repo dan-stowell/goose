@@ -7,13 +7,23 @@ output was checked), runs what it built and checks it, then prints
 min/median/max per stage. Every measurement is also written to
 research/runs/<UTC timestamp>-<shortsha>.json (a list of records
 {workload, rung, stage, run, seconds, bytes_in, bytes_out, peak_rss_kb, check,
-ok}, plus `item` where a workload has several programs).
+ok, rev}, plus `item` where a workload has several programs or subsets, and
+`before: true` on the records of a --before tree; `rev` is the commit of the
+selfhost/ under test).
+
+Rungs: stock optimized (C++ front end, gcc -O2), stock fast (C++ front end,
+TinyCC in process), and three self-hosted ones, all with sh2 (selfhost/ built
+by gcc -O2) writing the C: self-hosted (gcc -O2), self-hosted gcc -O0, and
+self-hosted fast (TinyCC's CLI from the C++ compiler's build, `tcc -c` then a
+gcc link; research/notes/tcc-rung.md).
 
 Workloads:
   W1  selfhost/ compiling itself (stock optimized, stock fast, self-hosted;
       checked by the C fixed point)
   W2  positive fixtures with blessed output (every 10th by default, --full for
-      all); stock rungs timed, self-hosted rung counted
+      all) through the stock rungs and self-hosted (counted); then
+      W2/selfhost-pass, the fixtures self-hosted passes in run 1, through every
+      rung: the like-for-like speed number while coverage grows
   W3  samples 19_vm, 21_raytrace, 31_mini_doom (headless), checked against
       samples/expected/
 
@@ -61,6 +71,29 @@ def find_goose():
 
 GOOSE = find_goose()
 CC = shutil.which("gcc") or shutil.which("cc")
+# TinyCC as a CLI (research/notes/tcc-rung.md), from the build of the C++ compiler.
+TCCBUILD = Path(os.environ.get("GOOSE_TCC_BUILD") or Path(GOOSE).parent)
+TCC = TCCBUILD / "tcc" / "tcc"
+TCCLIB = TCCBUILD / "tcclib"
+HAVE_TCC = TCC.is_file() and (TCCLIB / "libtcc1.a").is_file()
+
+# The self-hosted rungs: sh2 (gcc -O2 built) writes the C, then one of these
+# back ends makes the executable.
+SELF_RUNGS = ["self-hosted", "self-hosted gcc -O0", "self-hosted fast"]
+STOCK_RUNGS = ["stock optimized", "stock fast"]
+
+
+def self_backend(rung, c, exe, defines=(), libs=("-lm",)):
+    """The back end's stages for a self-hosted rung: [(stage, argv, product)]."""
+    if rung == "self-hosted":
+        return [("C compiler (gcc -O2)", [CC, "-O2", *defines, c, "-o", exe, *libs], exe)]
+    if rung == "self-hosted gcc -O0":
+        return [("C compiler (gcc -O0)", [CC, "-O0", *defines, c, "-o", exe, *libs], exe)]
+    obj = Path(str(exe) + ".o")
+    return [("C compiler (tcc -c)", [TCC, "-B", TCCLIB, "-I/usr/include/x86_64-linux-gnu",
+                                     "-I/usr/include", *defines, "-c", c, "-o", obj], obj),
+            ("link (gcc)", [CC, "-Wl,--no-eh-frame-hdr", "-z", "noexecstack", obj,
+                            TCCLIB / "libtcc1.a", "-o", exe, *libs], exe)]
 
 
 # --- measuring one process --------------------------------------------------
@@ -137,6 +170,13 @@ def human(n):
 
 RECORDS = []
 W2_FAILURES = {}   # rung -> (passed, ran, fixtures, [(first failure, [fixtures])])
+# The tree whose stages are being recorded: its commit goes on every record
+# ("rev"; "before": true for a --before tree), and its rungs print as rung@rev.
+CUR = {"rev": None, "label": ""}
+
+
+def use(tree):
+    CUR["rev"], CUR["label"] = tree.rev, tree.label
 PRINT_LOCK = threading.Lock()
 
 
@@ -145,7 +185,9 @@ def record(workload, rung, stage, run, seconds, bytes_in, bytes_out, rss_kb, che
     rec = {"workload": workload, "rung": rung, "stage": stage, "run": run,
            "seconds": round(seconds, 6) if seconds is not None else None,
            "bytes_in": bytes_in, "bytes_out": bytes_out, "peak_rss_kb": rss_kb,
-           "check": check, "ok": ok}
+           "check": check, "ok": ok, "rev": CUR["rev"]}
+    if CUR["label"]:
+        rec["before"] = True
     if item:
         rec["item"] = item
     RECORDS.append(rec)
@@ -153,7 +195,8 @@ def record(workload, rung, stage, run, seconds, bytes_in, bytes_out, rss_kb, che
         what = f"{workload}{'/' + item if item else ''}"
         secs = f"{seconds:8.3f} s" if seconds is not None else "       - s"
         rss = f"{rss_kb / 1024:7.1f} MB" if rss_kb else "        -"
-        line = (f"{what:<16} {rung:<26} {stage:<26} run {run}  {secs}  in {human(bytes_in):>9}"
+        shown = rung + CUR["label"]
+        line = (f"{what:<16} {shown:<30} {stage:<26} run {run}  {secs}  in {human(bytes_in):>9}"
                 f"  out {human(bytes_out):>9}  rss {rss}  {'ok  ' if ok else 'FAIL'} {check}")
         with PRINT_LOCK:
             print(line, flush=True)
@@ -224,7 +267,8 @@ def cc_argv(cmd, cfile, exe):
 # --- trees: the selfhost/ under test, now and --before ----------------------
 
 class Tree:
-    def __init__(self, label, root, src):
+    def __init__(self, label, root, src, rev):
+        self.rev = rev              # short sha of the selfhost/ under test
         self.label = label          # "" for now, "@sha" for --before
         self.root = Path(root)      # the cwd its compilers run in (stdlib/ is found there)
         self.src = Path(src)        # the directory with main.goose
@@ -235,7 +279,7 @@ class Tree:
         self.ok = False
 
     def rung(self, name):
-        return name + self.label
+        return name
 
 
 def bootstrap(tree):
@@ -243,7 +287,8 @@ def bootstrap(tree):
     sh2.c == sh3.c. Recorded as run 0."""
     d, main = tree.dir, tree.src / "main.goose"
     nbytes = tree_bytes(tree.src)
-    rung = tree.rung("bootstrap")
+    use(tree)
+    rung = "bootstrap"
     print(f"-- bootstrap {tree.src} --", flush=True)
     cmd, err = build_cc_command(main, d / "sh1", cwd=tree.root)
     if not cmd:
@@ -273,6 +318,7 @@ def bootstrap(tree):
 # --- W1 ----------------------------------------------------------------------
 
 def w1(tree, run, rungs):
+    use(tree)
     d, main, nbytes = tree.dir, tree.src / "main.goose", tree_bytes(tree.src)
     for rung in rungs:
         name = tree.rung(rung)
@@ -295,18 +341,27 @@ def w1(tree, run, rungs):
                     bytes_out=None).code:
                 continue
             check_cmp("W1", name, run, outc, tree.ref, "its C == sh3.c")
-        elif rung == "self-hosted":
-            c, exe, outc = d / "sh.c", d / "sh", d / "sh.out.c"
+        elif rung in SELF_RUNGS:
+            tag = re.sub(r"\W+", "_", rung)
+            c, exe, outc = d / f"{tag}.c", d / tag, d / f"{tag}.out.c"
             if step("W1", name, "front end (sh2)", run, [tree.sh2, "-o", c, main], nbytes, c,
                     cwd=tree.root).code:
                 continue
-            if step("W1", name, "C compiler (gcc -O2)", run, [CC, "-O2", c, "-o", exe, "-lm"],
-                    size(c), exe, cwd=tree.root).code:
+            if not backend_steps("W1", name, run, self_backend(rung, c, exe), size(c), tree.root):
                 continue
             if step("W1", name, "run (compile selfhost)", run, [exe, "-o", outc, main], nbytes, outc,
                     cwd=tree.root).code:
                 continue
             check_cmp("W1", name, run, outc, c, "stage n C == stage n+1 C")
+
+
+def backend_steps(workload, rung, run, steps, nin, cwd, item=None):
+    """The back end's stages, recorded one by one; False at the first failure."""
+    for stage, argv, product in steps:
+        if step(workload, rung, stage, run, argv, nin, product, item=item, cwd=cwd).code:
+            return False
+        nin = size(product)
+    return True
 
 
 # --- W3 ----------------------------------------------------------------------
@@ -329,6 +384,7 @@ class Sample:
 
 
 def w3(sample, tree, run, rungs):
+    use(tree)
     d = B / "w3"
     d.mkdir(parents=True, exist_ok=True)
     cwd = ROOT / "samples"
@@ -357,10 +413,11 @@ def w3(sample, tree, run, rungs):
                      item=it, cwd=cwd, stdin=sample.stdin)
             if r.code == 0:
                 check_out("W3", name, run, r.out, sample.expected, it)
-        elif rung == "self-hosted":
+        elif rung in SELF_RUNGS:
             if not tree.ok:
                 continue
-            c, exe = d / f"{it}.sh{tree.label}.c", d / f"{it}.sh{tree.label}"
+            tag = re.sub(r"\W+", "_", rung + tree.label)
+            c, exe = d / f"{it}.{tag}.c", d / f"{it}.{tag}"
             if tree.label in sample.unsupported:
                 continue   # said once, in run 1
             r = measure([tree.sh2, "-o", c, sample.src], cwd=tree.root)
@@ -371,8 +428,9 @@ def w3(sample, tree, run, rungs):
                 continue
             record("W3", name, "front end (sh2)", run, r.seconds, sample.nbytes, size(c), r.rss_kb,
                    "-", True, it)
-            if step("W3", name, "C compiler (gcc -O2)", run, [CC, "-O2", c, "-o", exe, "-lm"],
-                    size(c), exe, item=it).code:
+            if not backend_steps("W3", name, run,
+                                 self_backend(rung, c, exe, libs=("-lm", "-pthread")), size(c),
+                                 ROOT, it):
                 continue
             r = step("W3", name, "run", run, [exe, *sample.args], size(sample.stdin or ""), item=it,
                      cwd=cwd, stdin=sample.stdin)
@@ -432,27 +490,33 @@ def w2_one(rung, f, defines, nojit, tree, d):
         secs["front end (sh2)"], rss = r.seconds, r.rss_kb
         if r.code:
             return secs, rss, "front end: " + re.sub(r"^\S+:\d+:\d+: ", "", first_error(r))[:70]
-        r = measure([CC, "-O2", *defines, c, "-o", exe, "-lm", "-pthread"])
-        secs["C compiler (gcc -O2)"], rss = r.seconds, max(rss, r.rss_kb)
-        if r.code:
-            return secs, rss, "C compiler failed"
+        for stage, argv, _ in self_backend(rung, c, exe, defines, ("-lm", "-pthread")):
+            r = measure(argv)
+            secs[stage], rss = secs.get(stage, 0) + r.seconds, max(rss, r.rss_kb)
+            if r.code:
+                return secs, rss, f"{stage} failed: {first_error(r)[:60]}"
     r = measure([exe])
     secs["run"], rss = r.seconds, max(rss, r.rss_kb)
     ok, why = fixture_ok(f, r)
     return secs, rss, "pass" if ok else f"run: {why}"
 
 
-def w2(fs, tree, run, rungs, jobs, show_failures):
+def w2(fs, tree, run, rungs, jobs, show_failures, item=None):
+    """The fixtures `fs` through each rung, -j jobs at a time. Returns, by
+    rung, the fixtures that passed."""
+    use(tree)
     nbytes = sum(size(f) for f, _, _ in fs)
+    passes = {}
     for rung in rungs:
         name = tree.rung(rung)
-        d = B / "w2" / re.sub(r"\W+", "_", name)
+        d = B / "w2" / re.sub(r"\W+", "_", name + tree.label)
         d.mkdir(parents=True, exist_ok=True)
         t0 = time.perf_counter()
         with ThreadPoolExecutor(jobs) as pool:
             res = list(pool.map(lambda x: w2_one(rung, *x, tree, d), fs))
         wall = time.perf_counter() - t0
         outcomes = [o for _, _, o in res]
+        passes[rung] = [x for x, o in zip(fs, outcomes) if o == "pass"]
         ran = [o for o in outcomes if not o.startswith("skip")]
         passed = outcomes.count("pass")
         rss = max((r for _, r, _ in res), default=0)
@@ -462,9 +526,9 @@ def w2(fs, tree, run, rungs, jobs, show_failures):
                 stages[k] = stages.get(k, 0) + v
         check = f"blessed output match: {passed}/{len(ran)} pass"
         for k, v in stages.items():
-            record("W2", name, f"{k} (sum)", run, v, nbytes, 0, rss, check, passed == len(ran))
+            record("W2", name, f"{k} (sum)", run, v, nbytes, 0, rss, check, passed == len(ran), item)
         record("W2", name, f"wall, {len(fs)} fixtures -j{jobs}", run, wall, nbytes, 0, rss, check,
-               passed == len(ran))
+               passed == len(ran), item)
         if show_failures:
             clusters = {}
             for (f, _, _), o in zip(fs, outcomes):
@@ -473,17 +537,22 @@ def w2(fs, tree, run, rungs, jobs, show_failures):
             top = sorted(clusters.items(), key=lambda kv: -len(kv[1]))[:12]
             for o, names in top:
                 print(f"    {len(names):4}  {o}  (e.g. {names[0]})")
-            W2_FAILURES[name] = (passed, len(ran), len(fs), top)
+            W2_FAILURES[name + tree.label] = (passed, len(ran), len(fs), top)
+    return passes
 
 
 # --- the summary --------------------------------------------------------------
+
+def shown(r):
+    return r["rung"] + ("@" + r["rev"] if r.get("before") else "")
+
 
 def summary_rows():
     groups = {}
     for r in RECORDS:
         if r["run"] == 0 or r["seconds"] is None:
             continue
-        key = (r["workload"], r.get("item", ""), r["rung"], r["stage"])
+        key = (r["workload"], r.get("item", ""), shown(r), r["stage"])
         groups.setdefault(key, []).append(r)
     rows = []
     for key, rs in groups.items():
@@ -499,7 +568,7 @@ def summary_rows():
     for r in RECORDS:
         if r["run"] == 0 or r["workload"] == "W2":
             continue
-        key = (r["workload"], r.get("item", ""), r["rung"])
+        key = (r["workload"], r.get("item", ""), shown(r))
         totals.setdefault(key, {}).setdefault(r["run"], 0.0)
         if not r["ok"] or r["seconds"] is None:
             bad.add((key, r["run"]))
@@ -543,16 +612,16 @@ def print_summary(rows, totals):
     print("\n== summary: min / median / max seconds ==", flush=True)
     for (w, item, rung, stage, mn, md, mx, n, bi, bo, rss, ok, check) in rows:
         what = f"{w}{'/' + item if item else ''}"
-        print(f"{what:<16} {rung:<26} {stage:<34} {mn:8.3f} {md:8.3f} {mx:8.3f}  n={n}  "
+        print(f"{what:<16} {rung:<30} {stage:<34} {mn:8.3f} {md:8.3f} {mx:8.3f}  n={n}  "
               f"{'ok  ' if ok else 'FAIL'} {check}")
     print("\n== source to running program (sum of stages before check) ==")
     for (w, item, rung), per in totals.items():
         v = sorted(per.values())
         what = f"{w}{'/' + item if item else ''}"
         if not v:
-            print(f"{what:<16} {rung:<26} does not run (see its FAIL line)")
+            print(f"{what:<16} {rung:<30} does not run (see its FAIL line)")
             continue
-        print(f"{what:<16} {rung:<26} {v[0]:8.3f} {statistics.median(v):8.3f} {v[-1]:8.3f}")
+        print(f"{what:<16} {rung:<30} {v[0]:8.3f} {statistics.median(v):8.3f} {v[-1]:8.3f}")
 
 
 # --- main ---------------------------------------------------------------------
@@ -571,7 +640,7 @@ def make_before(rev):
     src = wt / "selfhost"
     if not (src / "main.goose").exists():
         src = wt / "test" / "goose_in_goose"   # before selfhost/ was seeded from it
-    return Tree("@" + sha, wt, src), sha
+    return Tree("@" + sha, wt, src, sha), sha
 
 
 def main():
@@ -615,7 +684,10 @@ def main():
     print(f"  uptime: {up}")
     print(f"  goose {GOOSE}; cc {CC}; runs {runs} (W2 {w2runs}), W2 jobs {args.jobs}", flush=True)
 
-    trees = [Tree("", ROOT, ROOT / "selfhost")]
+    trees = [Tree("", ROOT, ROOT / "selfhost", sha)]
+    if not HAVE_TCC:
+        print(f"  no TinyCC CLI at {TCC} (GOOSE_TCC_BUILD): the self-hosted fast rung is skipped")
+        SELF_RUNGS.remove("self-hosted fast")
     before_wt = None
     try:
         if args.before:
@@ -629,24 +701,34 @@ def main():
 
         samples = [Sample(s) for s in SAMPLES] if "W3" in only else []
         fs = fixtures(args.full) if "W2" in only else []
+        passset = []
 
         for run in range(1, runs + 1):
             print(f"\n== run {run}/{runs} ==", flush=True)
             if "W1" in only:
                 for t in trees:
                     if t.ok:
-                        w1(t, run, ["stock optimized", "stock fast", "self-hosted"])
+                        w1(t, run, STOCK_RUNGS + SELF_RUNGS)
             for s in samples:
                 for i, t in enumerate(trees):
-                    w3(s, t, run, ["stock optimized", "stock fast", "self-hosted"] if i == 0
-                       else ["self-hosted"])
+                    w3(s, t, run, (STOCK_RUNGS if i == 0 else []) + SELF_RUNGS)
             if fs and run <= w2runs:
                 print(f"-- W2: {len(fs)} positive fixtures{' (every 10th)' if not args.full else ''}"
                       f", -j{args.jobs} --", flush=True)
                 for i, t in enumerate(trees):
-                    rungs = (["stock optimized", "stock fast"] if i == 0 else []) + \
-                            (["self-hosted"] if t.ok else [])
-                    w2(fs, t, run, rungs, args.jobs, show_failures=(run == 1))
+                    rungs = (STOCK_RUNGS if i == 0 else []) + (["self-hosted"] if t.ok else [])
+                    passes = w2(fs, t, run, rungs, args.jobs, show_failures=(run == 1))
+                    if i == 0 and run == 1 and t.ok:
+                        # Like for like: the fixtures the self-hosted rung passes (and the
+                        # JIT can run), fixed after run 1, through every rung.
+                        passset = [x for x in passes["self-hosted"] if not x[2]]
+                if passset:
+                    print(f"-- W2/selfhost-pass: the {len(passset)} fixtures self-hosted passes, "
+                          f"through every rung --", flush=True)
+                    for i, t in enumerate(trees):
+                        if t.ok:
+                            w2(passset, t, run, (STOCK_RUNGS if i == 0 else []) + SELF_RUNGS,
+                               args.jobs, show_failures=(run == 1), item="selfhost-pass")
     finally:
         if before_wt:
             subprocess.run(["git", "worktree", "remove", "--force",
@@ -669,14 +751,17 @@ def main():
         meta = {"command": cmdline, "commit": sha, "dirty": dirty, "utc": started.isoformat(),
                 "uptime": up, "host": platform.node(), "cpus": os.cpu_count(), "goose": GOOSE,
                 "cc": CC, "runs": runs, "w2_runs": w2runs, "w2_fixtures": len(fs),
-                "w2_full": args.full, "before": args.before}
+                "w2_full": args.full, "before": args.before,
+                "revs": [t.rev for t in trees], "w2_selfhost_pass": [x[0].stem for x in passset],
+                "rungs": STOCK_RUNGS + SELF_RUNGS, "tcc": str(TCC) if HAVE_TCC else None}
         out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1) + "\n")
         print(f"\nrecord: {out.relative_to(ROOT)}")
     if args.ladder:
-        write_ladder(rows, totals, cmdline, up, started, sha, unsupported, len(fs), args.full)
+        write_ladder(rows, totals, cmdline, up, started, sha, unsupported, len(fs), args.full,
+                     len(passset))
 
 
-def write_ladder(rows, totals, cmdline, up, started, sha, unsupported, nfix, full):
+def write_ladder(rows, totals, cmdline, up, started, sha, unsupported, nfix, full, npass):
     text = ["# LADDER", "",
             "Source to running program, per workload and rung (research/CHARTER.md). Written by "
             "`research/demo --ladder` from a real run; do not edit by hand.", "",
@@ -685,6 +770,11 @@ def write_ladder(rows, totals, cmdline, up, started, sha, unsupported, nfix, ful
             f"- uptime: `{up}`",
             f"- W2: {nfix} positive fixtures{' (all)' if full else ' (every 10th)'}; "
             "the wall rows are the felt numbers, the (sum) rows add each process's wall time.",
+            f"- W2/selfhost-pass: the {npass} of them the self-hosted rung passes (and the JIT can "
+            "run), through every rung: the like-for-like speed comparison while coverage grows.",
+            "- self-hosted rungs: sh2 (built by gcc -O2) writes the C; `self-hosted` compiles it "
+            "with gcc -O2, `self-hosted gcc -O0` with gcc -O0, `self-hosted fast` with TinyCC "
+            "(`tcc -c`, then a gcc link; research/notes/tcc-rung.md).",
             ""]
     if unsupported:
         text.append("What does not run on the self-hosted rung today:\n")
