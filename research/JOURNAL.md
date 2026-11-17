@@ -51,3 +51,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 feat-enums: checks with the features: break type fixed by the first break, implicit copies and dead roots out of match arms and breaks, zero-size variant/zero-length array fields and elements, negated literal range, pattern names (nested fn, type parameter); reject 39->61.
 - 2026-11-17 scoreboard ratchet 2: error fixtures wrongly accepted may not grow (selfhost/scoreboard/accepted.txt, 435). Boards after storage+enums: run 133/776, reject 65/2036, stdlib 8/17.
 - 2026-11-17 feat-storage: relative-link checks (pool and same-root targets, no copies of values holding self-relative links); reject 43 -> 53.
+- 2026-11-17 feat-storage: scope-aware constant sizes (locals and type parameters hide constants), src/'s wording for outliving stores and operator misuse; reject 75 -> 136, accepted 425 -> 383.
