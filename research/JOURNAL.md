@@ -23,3 +23,16 @@ Append-only: one line per commit, a paragraph at each milestone.
 - 2026-11-17 viz: bytemove, a Valgrind tool that replays every data access through a Zen 4 cache model (L1 32K/L2 1M/L3 32M victim), with stage marks and region dumps.
 - 2026-11-17 viz: first picture (address-space strips by cache level, per-stage bytes for both front ends, counters) and METHOD.md; self-hosted moves 19.7 GB into L1 vs 0.77 GB for C++, 97% of its misses in the checker rescanning symbols/scopes.
 - 2026-11-17 merged emit-dedup, feat-storage, viz; lead re-check of emit-dedup on one input: 5.24 -> 1.91 MB of C, gcc -O2 14.2-15.0 -> 6.1-6.6 s. Boards run 63/776, reject 39/2036, stdlib 6/17.
+
+**M0 (2026-11-17 01:50 UTC).** The ladder runs on this VM for W1, W2 and three W3 samples, and `research/demo`
+prints it stage by stage. Bytes are seen two ways: perf's Zen 4 fill counters for totals, and a Valgrind tool
+with a model of this CPU's caches for per-access attribution (50x slowdown; matches cachegrind's L1 misses to
+0.03%); the first picture shows the self-hosted front end pulling 25x the C++ front end's bytes into L1, 97% of
+it the checker re-reading symbol and scope tables. Before M0 closed, three byte-saving changes landed:
+the symbol hash index and the overload chain walk (front end 0.30-0.33 -> 0.09-0.14 s on the old W1) and
+emit-dedup (one input: 5.24 -> 1.91 MB of C, gcc -O2 14.2-15.0 -> 6.1-6.6 s). The self-hosted compiler's C for
+W1 is now smaller than the C++ compiler's (2.10 vs 2.19 MB), but gcc still takes longer on it (7.28 vs 6.10 s):
+its C is harder to compile per byte (emit-lean is on that). **What did the oracle number do since the last
+milestone?** This is the first: run 23 -> 63/776, reject 3 -> 39/2036, stdlib 0 -> 6/17, fixed point held
+throughout. Self-hosted W1 is still 1.2x stock optimized, and W2 can't be compared until more fixtures pass;
+demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, through every rung).

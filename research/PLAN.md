@@ -41,6 +41,12 @@ M4. Positive fixtures pass; `stdlib/` compiles; W2 runs entirely through `selfho
 
 Milestones log:
 
+- M0 (2026-11-17 01:50 UTC, commit 98bae32d): ladder measured on this VM (research/LADDER.md, `research/demo
+  --full --ladder`); demo prints it stage by stage; bytes method settled (perf counters + a Valgrind cache-model
+  tool, research/viz/METHOD.md); first picture live on :8000. Oracle: run 63/776, reject 39/2036, stdlib 6/17,
+  fixed point yes. W1 (selfhost, now 288 KB of source) self-hosted: front end 0.20 s + gcc -O2 7.28 s (median)
+  vs stock optimized 0.36 + 6.10 s, stock fast 0.97 s total. W2 stock optimized wall 27.0 s (771/771), stock
+  fast 3.75 s (733/733); self-hosted 73/771.
 Now: M0 + M1 in parallel (updated 2026-11-17 02:25 UTC). Merged: demo, feat-stdlib (interim), feat-enums
 (interim), scan-index. Boards run 40/776, reject 39/2036, stdlib 6/17; fixed point holds. Running: builders
 `viz`, `feat-stdlib`, `feat-storage` (must rebase: conflicts in checker/emitter), `feat-enums`, `emit-dedup`;
