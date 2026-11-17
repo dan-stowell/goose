@@ -1,0 +1,16 @@
+{
+ "command": "research/demo --full --ladder",
+ "commit": "de28e5b6",
+ "dirty": false,
+ "utc": "2026-11-17T01:32:06.795335+00:00",
+ "uptime": "01:32:06 up 24 min,  0 user,  load average: 5.06, 4.19, 2.43",
+ "host": "ggoossee",
+ "cpus": 8,
+ "goose": "/home/exedev/goose/build/goose",
+ "cc": "/usr/bin/gcc",
+ "runs": 5,
+ "w2_runs": 5,
+ "w2_fixtures": 771,
+ "w2_full": true,
+ "before": null
+}
