@@ -35,3 +35,15 @@ compiled by the emitter before and after).** C 5,236,874 -> 1,906,276 bytes; gcc
 SHAPES.md killed this idea for Go at 8% duplicate code; here it was 52-64%.
 **Goose.** Forced: the scratch buffer can't shrink while ctx holds slices into other arrays, so it stays
 as big as all functions' text.
+
+## 4. The C leaned on gcc for everything (2026-11-17, emit-lean)
+**Before.** Every subexpression in a temporary, every local in the frame struct, every index through a
+gg_view helper call: TinyCC compiled it in 0.07 s but the result ran W1 18x slower than gcc -O2's.
+**Fix.** Five emitter changes (research/notes/emit-lean.md): read array data/length in place; a temporary only
+when a later operand could change the value, bounds checked inline; locals as C locals unless a nested function
+reaches them; no redundant casts; && / || in conditions as jumps. **Number (lead's re-check, same input: current
+selfhost source through the emitter before and after; 5 interleaved runs, load 5-6).** C 2,673,873 -> 1,712,616
+bytes; tcc-built stage 2 on W1 1.73/1.92/2.02 s (one 5.4 s outlier) -> 0.92/1.11/1.26 s; gcc -O0 2.61/3.05/3.06
+-> 1.94/2.08/2.12 s; gcc -O2 ranges overlap (builder's counters: 63.8 G -> 58.6 G instructions). The C++
+compiler's 2.19 MB for the same program costs gcc 44.5 G instructions: per byte our C is still harder.
+**Goose.** Forced: views can't be kept in containers inside a recursive cycle, so emission keeps arena offsets.
