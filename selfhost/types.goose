@@ -55,6 +55,8 @@ struct Symbol {
     root: i64 = -1,
     known: bool = false,
     bits: u64 = 0,
+    alt: u64 = 0,
+    vague: i64 = 0,
     held: i64 = -1,
     fields: i64 = -1,
     length_root: i64 = -1,

@@ -8,11 +8,14 @@ struct Value {
     growshrink: bool = false,
     inexact: bool = false,
     known: bool = false,
-    // A known integer stands for bits, and for alt where several constants
-    // join (6.4): every value it stands for lies between the two. A single
-    // constant keeps alt 0, which fits every integer type.
+    // A known integer is exactly bits where vague is 0. Where several
+    // constants join (6.4, vague 1), every value it stands for lies between
+    // bits and alt. Where its value is unknown but it adapts as a constant
+    // does (1 << k, ~c, a literal parameter: vague 2), bits and alt bound
+    // the constants it adapts with; it fits where they do.
     bits: u64 = 0,
     alt: u64 = 0,
+    vague: i64 = 0,
     held: i64 = -1,
     fields: i64 = -1,
 }
@@ -53,11 +56,11 @@ fn root_component(ctx: Compiler&, owner: i64, f: i64) -> i64 {
 }
 fn value_of(ctx: Compiler&, n: i64) -> Value {
     let x = ctx.nodes[n];
-    return Value { ty: x.ty, root: x.root, place: x.place, readonly: x.readonly, growshrink: x.growshrink, inexact: x.inexact, known: x.known, bits: x.bits, alt: x.alt, held: x.held, fields: x.fields };
+    return Value { ty: x.ty, root: x.root, place: x.place, readonly: x.readonly, growshrink: x.growshrink, inexact: x.inexact, known: x.known, bits: x.bits, alt: x.alt, vague: x.vague, held: x.held, fields: x.fields };
 }
 fn annotate(ctx: Compiler&, n: i64, v: Value) -> Value {
     ctx.nodes[n].ty = v.ty; ctx.nodes[n].root = v.root; ctx.nodes[n].place = v.place;
-    ctx.nodes[n].readonly = v.readonly; ctx.nodes[n].known = v.known; ctx.nodes[n].bits = v.bits; ctx.nodes[n].alt = v.alt;
+    ctx.nodes[n].readonly = v.readonly; ctx.nodes[n].known = v.known; ctx.nodes[n].bits = v.bits; ctx.nodes[n].alt = v.alt; ctx.nodes[n].vague = v.vague;
     ctx.nodes[n].held = v.held;
     ctx.nodes[n].fields = v.fields;
     ctx.nodes[n].growshrink = v.growshrink;
@@ -291,7 +294,7 @@ fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
     if adapts_enum(ctx, v.ty, target) { return true; }
     if literal_parameter(ctx, v) && a.kind == T_INTEGER && b.kind == T_INTEGER { record_adaptation(ctx, v.place, target, ctx.symbols[v.place].token); }
     if a.kind == T_INTEGER && b.kind == T_INTEGER {
-        if v.known { return constant_fits(ctx, a, v.bits, b, target) && constant_fits(ctx, a, v.alt, b, target); }
+        if v.known { return constant_fits(ctx, a, v.bits, b, target) && (v.vague == 0 || constant_fits(ctx, a, v.alt, b, target)); }
         return (a.flags & 2 == b.flags & 2 && a.bytes <= b.bytes) || (a.flags & 2 != 0 && b.flags & 2 == 0 && a.bytes < b.bytes);
     }
     if a.kind == T_FLOAT && b.kind == T_FLOAT { return a.bytes <= b.bytes || v.known; }
@@ -324,31 +327,38 @@ fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
         text.append(" -> "); type_text(ctx, target, text);
         error_at(ctx, ctx.nodes[n].token, text);
     }
-    if v.known && ctx.types[v.ty].kind == T_FLOAT && ctx.types[target].kind == T_FLOAT && v.ty != target { retype_float(ctx, n, target); }
+    if v.known && v.ty != target && ctx.types[v.ty].kind == ctx.types[target].kind && (ctx.types[v.ty].kind == T_FLOAT || ctx.types[v.ty].kind == T_INTEGER) { retype_constant(ctx, n, target); }
     ctx.nodes[n].target = target;
 }
-// A float of literals and the integers they meet is computed at the type it
-// adapts to, throughout (6.3): its operations take that type, and its
-// integer operands convert to it. A float let it names is that let's f64,
-// rounded once at the use.
-recursive fn retype_float(ctx: Compiler&, n: i64, ty: i64) {
+// An adapting expression is computed at the type it adapts to, throughout
+// (6.1, 6.3): a float of literals and the integers they meet, an integer
+// operation over constants and shifted constants. Its operations take that
+// type and its other operands convert to it; a constant whose value is
+// known is emitted as that value of the type. A float let it names is that
+// let's f64, rounded once at the use.
+recursive fn retype_constant(ctx: Compiler&, n: i64, ty: i64) {
     if n < 0 { return; }
     let x = ctx.nodes[n];
-    if !x.known || x.ty < 0 || ctx.types[x.ty].kind != T_FLOAT { return; }
-    if x.tag == N_FLOAT { ctx.nodes[n].ty = ty; }
-    else if x.tag == N_UNARY { ctx.nodes[n].ty = ty; retype_float(ctx, x.a, ty); ctx.nodes[x.a].target = ty; }
+    if !x.known || x.ty < 0 || ctx.types[x.ty].kind != ctx.types[ty].kind { return; }
+    if ctx.types[ty].kind == T_INTEGER && x.vague == 0 && (x.tag == N_BINARY || x.tag == N_UNARY || x.tag == N_INT) {
+        ctx.nodes[n].tag = N_INT; ctx.nodes[n].ty = ty; return;
+    }
+    if x.tag == N_FLOAT || x.tag == N_INT { ctx.nodes[n].ty = ty; }
+    else if x.tag == N_UNARY { ctx.nodes[n].ty = ty; retype_constant(ctx, x.a, ty); ctx.nodes[x.a].target = ty; }
     else if x.tag == N_BINARY {
         ctx.nodes[n].ty = ty;
+        let op = ctx.tokens[x.token].text;
         for side in [x.a, x.b] {
-            if ctx.nodes[side].known && ctx.types[ctx.nodes[side].ty].kind == T_FLOAT { retype_float(ctx, side, ty); }
+            if side == x.b && (op == "<<" || op == ">>") { continue; }
+            if ctx.nodes[side].known { retype_constant(ctx, side, ty); }
             ctx.nodes[side].target = ty;
         }
     } else if x.tag == N_IF {
         ctx.nodes[n].ty = ty;
-        retype_float(ctx, x.b, ty); if x.b >= 0 { ctx.nodes[x.b].target = ty; }
-        retype_float(ctx, x.c, ty); if x.c >= 0 { ctx.nodes[x.c].target = ty; }
+        retype_constant(ctx, x.b, ty); if x.b >= 0 { ctx.nodes[x.b].target = ty; }
+        retype_constant(ctx, x.c, ty); if x.c >= 0 { ctx.nodes[x.c].target = ty; }
     } else if x.tag == N_BLOCK && x.a >= 0 {
-        ctx.nodes[n].ty = ty; retype_float(ctx, x.a, ty); ctx.nodes[x.a].target = ty;
+        ctx.nodes[n].ty = ty; retype_constant(ctx, x.a, ty); ctx.nodes[x.a].target = ty;
     }
 }
 fn merge_numeric(ctx: Compiler&, a: Value, b: Value, token: i64) -> i64 {
@@ -444,7 +454,8 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         v.readonly = ctx.symbols[s].readonly || ctx.symbols[s].flags & 2 != 0 || (ctx.types[v.ty].kind == T_SLICE && ctx.types[v.ty].flags & 1 != 0) || (ctx.types[v.ty].kind == T_REFERENCE && ctx.types[v.ty].flags & 1 != 0);
         v.growshrink = ctx.symbols[s].growshrink;
         v.inexact = ctx.symbols[s].inexact;
-        v.known = adapts_as_constant(ctx, s); v.bits = ctx.symbols[s].bits;
+        v.known = adapts_as_constant(ctx, s); v.bits = ctx.symbols[s].bits; v.alt = ctx.symbols[s].alt; v.vague = ctx.symbols[s].vague;
+        if ctx.symbols[s].flags & 64 != 0 { v.vague = 2; v.bits = 0; v.alt = 0; }
     } else if tag == N_UNARY {
         let operand = check_expression(ctx, x.a, scope, -1);
         let op = ctx.tokens[x.token].text;
@@ -460,8 +471,14 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
                 if op == "-" && ctx.nodes[x.a].tag == N_INT && ctx.tokens[ctx.nodes[x.a].token].integer > 9223372036854775808 { error_at(ctx, x.token, "negated literal too large for i64"); }
                 if op == "-" && ctx.types[v.ty].kind == T_INTEGER && ctx.types[v.ty].flags & 2 != 0 && v.bits != 9223372036854775808 { error_at(ctx, x.token, "cannot negate an unsigned value"); }
                 if v.known && ctx.types[v.ty].kind == T_INTEGER {
-                    if op == "-" { v.bits = 0 - v.bits; v.alt = 0 - v.alt; v.ty = default_integer(ctx); }
-                    else { v.bits = ~v.bits; if v.alt != 0 { v.alt = ~v.alt; } }
+                    if op == "-" {
+                        // Unary - gives an adapting operation a type of its own.
+                        if v.vague == 2 { v.known = false; }
+                        else { v.bits = 0 - v.bits; v.alt = 0 - v.alt; v.ty = default_integer(ctx); }
+                    } else if v.vague == 0 && (v.bits as! i64) < 0 { v.bits = ~v.bits; }
+                    // ~c of a constant c >= 0 depends on the width it is
+                    // computed at, and adapts where c fits (6.1).
+                    else { v.vague = 2; }
                 }
                 v.place = -1;
             }
@@ -499,12 +516,23 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             require_fit(ctx, x.a, a, common);
             if op != "<<" && op != ">>" { require_fit(ctx, x.b, b, common); }
             v.ty = common;
-            if a.known && b.known && ctx.types[common].kind == T_INTEGER && op != "<" && op != "<=" && op != ">" && op != ">=" {
+            let literal = literal_parameter(ctx, a) || literal_parameter(ctx, b);
+            if !literal && a.known && !b.known && (op == "<<" || op == ">>") && ctx.types[common].kind == T_INTEGER {
+                // A constant shifted by a count that is not one keeps the
+                // constant's freedom to adapt (6.1).
+                v.known = true; v.vague = 2; v.bits = a.bits; v.alt = if a.vague == 0 { a.bits } else { a.alt };
+            }
+            if !literal && a.known && b.known && (a.vague == 2 || b.vague == 2) && ctx.types[common].kind == T_INTEGER {
+                v.known = true; v.vague = 2;
+                let from = if a.vague == 2 { b } else { a };
+                v.bits = from.bits; v.alt = if from.vague == 0 { from.bits } else { from.alt };
+                if a.vague == 2 && b.vague == 2 { v.bits = 0; v.alt = 0; }
+            } else if !literal && a.known && b.known && ctx.types[common].kind == T_INTEGER && op != "<" && op != "<=" && op != ">" && op != ">=" {
                 let signed = ctx.types[common].flags & 2 == 0;
                 v.known = true; v.bits = fold_integer(ctx, op, a.bits, b.bits, signed, x.token);
-                if a.alt != 0 || b.alt != 0 {
-                    // A single constant's alt is 0 by convention: it stands for bits alone.
-                    let aa = if a.alt == 0 { a.bits } else { a.alt }; let ba = if b.alt == 0 { b.bits } else { b.alt };
+                if a.vague == 1 || b.vague == 1 {
+                    v.vague = 1;
+                    let aa = if a.vague == 0 { a.bits } else { a.alt }; let ba = if b.vague == 0 { b.bits } else { b.alt };
                     let p = fold_integer(ctx, op, aa, b.bits, signed, x.token); let q = fold_integer(ctx, op, a.bits, ba, signed, x.token); let r = fold_integer(ctx, op, aa, ba, signed, x.token);
                     let low = constant_low(ctx, common, constant_low(ctx, common, v.bits, p), constant_low(ctx, common, q, r));
                     let high = constant_high(ctx, common, constant_high(ctx, common, v.bits, p), constant_high(ctx, common, q, r));
@@ -513,7 +541,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             }
             if ctx.types[common].kind == T_FLOAT && (ctx.types[a.ty].kind != T_FLOAT || a.known) && (ctx.types[b.ty].kind != T_FLOAT || b.known) { v.known = true; }
             if op == "<" || op == "<=" || op == ">" || op == ">=" { v.ty = boolean_type(ctx); v.known = false; }
-            if literal_parameter(ctx, a) || literal_parameter(ctx, b) { v.known = false; v.alt = 0; }
+            if literal { v.known = false; v.alt = 0; v.vague = 0; }
         }
     } else if tag == N_CAST {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1)); v.ty = resolve_type(ctx, x.b, scope);
@@ -708,9 +736,11 @@ fn join_branch(ctx: Compiler&, a: Value, b: Value, anode: i64, bnode: i64, token
     if a.known && b.known && ctx.types[a.ty].kind == ctx.types[b.ty].kind && (ctx.types[a.ty].kind == T_FLOAT || ctx.types[a.ty].kind == T_INTEGER) {
         v.known = true;
         if ctx.types[v.ty].kind == T_INTEGER {
-            let low = constant_low(ctx, v.ty, constant_low(ctx, v.ty, a.bits, a.alt), constant_low(ctx, v.ty, b.bits, b.alt));
-            let high = constant_high(ctx, v.ty, constant_high(ctx, v.ty, a.bits, a.alt), constant_high(ctx, v.ty, b.bits, b.alt));
-            v.bits = high; v.alt = low;
+            let aa = if a.vague == 0 { a.bits } else { a.alt }; let ba = if b.vague == 0 { b.bits } else { b.alt };
+            let low = constant_low(ctx, v.ty, constant_low(ctx, v.ty, a.bits, aa), constant_low(ctx, v.ty, b.bits, ba));
+            let high = constant_high(ctx, v.ty, constant_high(ctx, v.ty, a.bits, aa), constant_high(ctx, v.ty, b.bits, ba));
+            v.bits = high; v.alt = low; v.vague = 1;
+            if a.vague == 2 || b.vague == 2 { v.vague = 2; }
         }
     }
     return v;
@@ -1299,7 +1329,7 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
         let owner = decay(ctx, value_of(ctx, receiver));
         if owner.root >= 0 && ctx.types[owner.ty].kind == T_ARRAY && ctx.types[owner.ty].flags == 4 && stable_array_path(ctx, receiver) { ctx.symbols[s].length_root = owner.root; }
     }
-    if ctx.nodes[n].flags & 1 == 0 && v.known { ctx.symbols[s].known = true; ctx.symbols[s].bits = v.bits; }
+    if ctx.nodes[n].flags & 1 == 0 && v.known { ctx.symbols[s].known = true; ctx.symbols[s].bits = v.bits; ctx.symbols[s].alt = v.alt; ctx.symbols[s].vague = v.vague; }
     store_lifetime(ctx, Value { ty: declared, root: v.root, held: v.held }, s, ctx.nodes[n].token);
     if is_optional(ctx, declared) && non_null(ctx, raw) { ctx.flow = fact_add(ctx, ctx.flow, name); }
 }

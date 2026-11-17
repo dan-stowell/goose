@@ -8,6 +8,7 @@ bce_function_state
 bce_place_flood
 branch_roots
 byte_run_equality
+bitnot_constants
 byteview_global_lists
 byteview_global_stores
 byteview_global_tables

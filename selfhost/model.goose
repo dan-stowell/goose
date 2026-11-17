@@ -99,6 +99,7 @@ struct Node {
     known: bool = false,
     bits: u64 = 0,
     alt: u64 = 0,
+    vague: i64 = 0,
     held: i64 = -1,
     fields: i64 = -1,
     standalone: bool = false,
