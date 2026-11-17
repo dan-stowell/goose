@@ -8,3 +8,8 @@ Append-only: one line per commit, a paragraph at each milestone.
 - 2026-11-17 tcc rung: tcc compiles sh2.c in 0.07 s and holds the fixed point, but the tcc-built compiler runs W1 18x slower (5.9 s vs 0.32 s); research/notes/tcc-rung.md.
 - 2026-11-17 scan-index: find_symbol hashed by (scope, name), recursive-cycle test by SCC over a CSR call graph: W1 front end 0.30-0.33 -> 0.11-0.14 s; outcomes identical; selfhost/tests/ joins the reject board (4/2036).
 - 2026-11-17 overloads walk their (scope, name) chain: W1 front end 1,019 M -> 647 M instructions, 0.13-0.18 -> 0.09-0.14 s; outcomes identical.
+- 2026-11-17 selfhost --check accepts a module that declares no main, as a library (stdlib 0 -> 2/17)
+- 2026-11-17 selfhost parameter defaults, mined from the October gap-param-defaults branch (run 23->24, reject 3->7)
+- 2026-11-17 selfhost fixed multiple results and multi-target receivers, mined from gap-multi-return (run 24->26)
+- 2026-11-17 selfhost function modifiers (simd, inline, checkfree, export), adapting named constants and float lets, int-to-float, as! float, loops without break as bottom (stdlib 2->6/17, reject 7->14)
+- 2026-11-17 selfhost constant folding and joined constant branches, constness-generic parameters, struct literal '..', bytes_of, src_file/src_line, unreached view params rooted globally, field-default cycles and the 16-deep instantiation bound, Goose-spelled types in diagnostics (run 26->30, reject 14->18)

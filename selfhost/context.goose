@@ -17,7 +17,18 @@ struct Compiler {
     visit: i64 = 0,
     specializations: Specialization[>..]&,
     checking_function: i64 = -1,
+    // While a parameter default is checked, lookups that reach its call-site
+    // scope continue in the declaration's scope instead (§7.1).
+    default_floor: i64 = -1,
+    default_scope: i64 = -1,
+    default_limit: i64 = -1,
+    default_decl: i64 = -1,
+    default_param: i64 = -1,
+    // The token of the call whose default is being checked, for src_line.
+    default_site: i64 = -1,
     loop_depth: i64 = 0,
+    // Breaks seen in the innermost loop or block being checked.
+    loop_breaks: i64 = 0,
     global_order: i64[>..]&,
     c_output: u8[>..]&,
     c_declarations: u8[>..]&,
@@ -32,6 +43,9 @@ struct Compiler {
     c_final: u8[>..]&,
     c_controls: Control[>..<]&,
     c_arguments: (const u8[:])[>..<]&,
+    // Parameter tokens of the defaults being checked, innermost last. A -1
+    // separates those of a function body being checked from its callers'.
+    default_stack: i64[>..<]&,
     c_label: i64 = 0,
     c_result: CValue = CValue { code: "", ty: 0 },
     text_storage: u8[>..]&,
@@ -70,6 +84,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
     var owned_function_slots: i64[>..] = [];
     var owned_return_locals: i64[>..] = [];
     var owned_c_final: u8[>..] = [];
+    var owned_default_stack: i64[>..<] = [];
     var owned_c_controls: Control[>..<] = [];
     var owned_c_arguments: (const u8[:])[>..<] = [];
     var owned_text_storage: u8[>..] = [];
@@ -102,6 +117,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
         c_final: owned_c_final,
         c_controls: owned_c_controls,
         c_arguments: owned_c_arguments,
+        default_stack: owned_default_stack,
         text_storage: owned_text_storage,
         sources: owned_sources,
         tokens: owned_tokens,

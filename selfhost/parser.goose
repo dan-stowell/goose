@@ -13,7 +13,7 @@ fn expect(ctx: Compiler&, s: const u8[:]) -> i64 {
     return t;
 }
 fn reserved(ctx: Compiler&, s: const u8[:]) -> bool {
-    for word in ["fn", "thread_fn", "recursive", "extern", "struct", "enum", "type", "import", "namespace", "let", "var", "const", "reusable", "if", "else", "while", "for", "in", "loop", "block", "guard", "match", "return", "break", "continue", "true", "false", "null", "self", "as", "pad"] {
+    for word in ["fn", "thread_fn", "recursive", "extern", "struct", "enum", "type", "import", "namespace", "let", "var", "const", "reusable", "if", "else", "while", "for", "in", "loop", "block", "guard", "match", "return", "break", "continue", "true", "false", "null", "self", "as", "pad", "export", "simd", "defer"] {
         if s == word { return true; }
     }
     return false;
@@ -213,6 +213,7 @@ recursive fn expression(ctx: Compiler&, minimum: i64, constructs: bool, statemen
             var style = 0;
             if !at(ctx, "}") {
                 loop {
+                    if take(ctx, "..") { ctx.nodes[n].flags |= 1; break; }
                     let item = node(ctx, N_INIT, ctx.cursor);
                     if ctx.tokens[ctx.cursor].kind == TK_NAME && ahead(ctx, ":") {
                         if style == 2 { error_at(ctx, ctx.cursor, "cannot mix named and positional fields"); }
@@ -369,10 +370,18 @@ recursive fn block_contents(ctx: Compiler&, t: i64) -> i64 {
     while !at(ctx, "}") {
         if take(ctx, ";") { continue; }
         if at(ctx, "let") || at(ctx, "var") || at(ctx, "const") || at(ctx, "reusable") { child(ctx, n, binding(ctx)); continue; }
-        if at(ctx, "fn") || at(ctx, "recursive") { child(ctx, n, function_decl(ctx, true)); continue; }
+        if at(ctx, "fn") || at(ctx, "recursive") || at(ctx, "simd") || at_inline(ctx) || at_checkfree(ctx) { child(ctx, n, function_decl(ctx, true)); continue; }
         if at(ctx, "guard") { guard_statement(ctx, n); return n; }
         let e = expression(ctx, 0, true, true);
-        if assignment_op(ctx, ctx.tokens[ctx.cursor].text) {
+        if take(ctx, ",") {
+            let targets = node(ctx, N_ASSIGN, ctx.cursor);
+            child(ctx, targets, e);
+            loop { child(ctx, targets, expression(ctx, 0, true, false)); if !take(ctx, ",") { break; } }
+            ctx.nodes[targets].token = expect(ctx, "=");
+            ctx.nodes[targets].b = expression(ctx, 0, true, false);
+            ctx.nodes[ctx.nodes[targets].b].standalone = true;
+            expect(ctx, ";"); child(ctx, n, targets);
+        } else if assignment_op(ctx, ctx.tokens[ctx.cursor].text) {
             let a = node(ctx, N_ASSIGN, ctx.cursor); ctx.cursor++; ctx.nodes[a].a = e;
             if ctx.tokens[ctx.nodes[a].token].text != "++" && ctx.tokens[ctx.nodes[a].token].text != "--" { ctx.nodes[a].b = expression(ctx, 0, true, false); ctx.nodes[ctx.nodes[a].b].standalone = true; }
             expect(ctx, ";"); child(ctx, n, a);
@@ -406,11 +415,47 @@ recursive fn generics(ctx: Compiler&, n: i64) {
     }
     close_angle(ctx);
 }
+// inline and checkfree are keywords only before a function's other
+// modifiers, so both stay usable as names.
+fn at_inline(ctx: Compiler&) -> bool { return at(ctx, "inline") && (ahead(ctx, "fn") || ahead(ctx, "recursive") || ahead(ctx, "thread_fn")); }
+fn at_checkfree(ctx: Compiler&) -> bool {
+    if !at(ctx, "checkfree") { return false; }
+    return ahead(ctx, "fn") || ahead(ctx, "recursive") || ahead(ctx, "thread_fn") || ahead(ctx, "simd") || ahead(ctx, "extern") || (ctx.cursor + 1 < ctx.parse_limit && ctx.tokens[ctx.cursor + 1].kind == TK_NAME && !reserved(ctx, ctx.tokens[ctx.cursor + 1].text));
+}
+fn at_function(ctx: Compiler&) -> bool {
+    return at(ctx, "fn") || at(ctx, "recursive") || at(ctx, "thread_fn") || at(ctx, "extern") || at(ctx, "export") || at(ctx, "simd") || at_inline(ctx) || at_checkfree(ctx);
+}
 recursive fn function_decl(ctx: Compiler&, nested: bool) -> i64 {
     var flags = 0;
     var symbol = -1;
-    if take(ctx, "extern") { flags |= 2; if ctx.tokens[ctx.cursor].kind == TK_STRING { symbol = ctx.cursor; ctx.cursor++; } }
-    if take(ctx, "recursive") { flags |= 1; }
+    // Modifiers in the spec's order (7.10-7.14): checkfree, export or extern,
+    // checkfree, simd, inline, recursive. simd, inline and checkfree change
+    // nothing a program computes, so they are kept as flags and checked for
+    // the combinations the language forbids, and otherwise ignored.
+    if at_checkfree(ctx) { flags |= 64; ctx.cursor++; }
+    if take(ctx, "export") {
+        if nested { error_at(ctx, ctx.cursor - 1, "export fn must be declared at top level"); }
+        flags |= 32; if ctx.tokens[ctx.cursor].kind == TK_STRING { symbol = ctx.cursor; ctx.cursor++; }
+    }
+    if take(ctx, "extern") {
+        if flags & 32 != 0 { error_at(ctx, ctx.cursor - 1, "export fn cannot be extern"); }
+        if nested { error_at(ctx, ctx.cursor - 1, "extern fn must be declared at top level"); }
+        flags |= 2; if ctx.tokens[ctx.cursor].kind == TK_STRING { symbol = ctx.cursor; ctx.cursor++; }
+    }
+    if flags & 64 == 0 && at_checkfree(ctx) { flags |= 64; ctx.cursor++; }
+    if flags & 64 != 0 && flags & 2 != 0 { error_at(ctx, ctx.cursor, "extern fn cannot be checkfree: it has no body to check"); }
+    if take(ctx, "simd") {
+        if flags & 2 != 0 { error_at(ctx, ctx.cursor - 1, "extern fn cannot be simd: it has no body to compile"); }
+        flags |= 8;
+    }
+    if at_inline(ctx) {
+        if flags & 2 != 0 { error_at(ctx, ctx.cursor, "extern fn cannot be inline: it has no body to copy"); }
+        if flags & 32 != 0 { error_at(ctx, ctx.cursor, "export fn cannot be inline: its C wrapper calls it"); }
+        if flags & 8 != 0 { error_at(ctx, ctx.cursor, "simd fn cannot be inline: its callers would run the baseline only"); }
+        flags |= 16; ctx.cursor++;
+    }
+    if take(ctx, "recursive") { flags |= 1; if flags & 16 != 0 { error_at(ctx, ctx.cursor - 1, "recursive fn cannot be inline"); } }
+    if flags & 16 != 0 && at(ctx, "thread_fn") { error_at(ctx, ctx.cursor, "thread_fn cannot be inline"); }
     if take(ctx, "thread_fn") { flags |= 4; } else { expect(ctx, "fn"); }
     let n = name_node(ctx, N_FUNCTION);
     if nested && ctx.nodes[n].flags & 1 != 0 { error_at(ctx, ctx.nodes[n].token, "a nested function cannot name a namespace"); }
@@ -418,12 +463,21 @@ recursive fn function_decl(ctx: Compiler&, nested: bool) -> i64 {
     let old_namespace = ctx.current_namespace; ctx.current_namespace = ctx.nodes[n].ns;
     generics(ctx, n);
     let params = node(ctx, N_BLOCK, expect(ctx, "(")); ctx.nodes[n].a = params;
+    var defaulted = false;
     if !at(ctx, ")") {
         loop {
             var mutable = false; if take(ctx, "var") { mutable = true; }
             let p = node(ctx, N_PARAM, identifier(ctx));
             if mutable { ctx.nodes[p].flags = 1; }
             if take(ctx, ":") { ctx.nodes[p].a = parse_type(ctx); }
+            // A default stays syntax on the parameter. Each call leaving it
+            // out checks and evaluates its own clone (§7.1).
+            if at(ctx, "=") {
+                if ctx.nodes[p].a < 0 { error_at(ctx, ctx.cursor, str("parameter ", ctx.tokens[ctx.nodes[p].token].text, " has a default but no type")); }
+                if flags & 4 != 0 { error_at(ctx, ctx.cursor, "a thread_fn's parameters have no defaults"); }
+                ctx.cursor++;
+                ctx.nodes[p].b = expression(ctx, 0, true, false); defaulted = true;
+            } else if defaulted { error_at(ctx, ctx.nodes[p].token, str("parameter ", ctx.tokens[ctx.nodes[p].token].text, " needs a default: only trailing parameters have defaults")); }
             child(ctx, params, p);
             if !take(ctx, ",") || at(ctx, ")") { break; }
         }
@@ -476,7 +530,7 @@ fn parse(ctx: Compiler&, file: i64) {
             expect(ctx, ";"); ctx.declarations.push(n); continue;
         }
         had_declaration = true;
-        if at(ctx, "fn") || at(ctx, "recursive") || at(ctx, "thread_fn") || at(ctx, "extern") { ctx.declarations.push(function_decl(ctx, false)); }
+        if at_function(ctx) { ctx.declarations.push(function_decl(ctx, false)); }
         else if take(ctx, "struct") || take(ctx, "enum") {
             var tag = N_STRUCT; if ctx.tokens[ctx.cursor - 1].text == "enum" { tag = N_ENUM; }
             let n = name_node(ctx, tag);

@@ -153,9 +153,23 @@ fn find_symbol(ctx: Compiler&, token: i64, ns: i64, scope: i64, kind: i64) -> i6
 fn lookup(ctx: Compiler&, n: i64, scope: i64, kind: i64) -> i64 {
     if ctx.nodes[n].flags & 1 == 0 {
         var s = scope;
+        var outside = false;
         while s > 0 {
+            // A default names what its declaration sees, never the caller's
+            // locals: the walk leaves the call site for the declaration.
+            if s == ctx.default_floor && !outside {
+                outside = true;
+                if kind == 2 { default_names_parameter(ctx, n); }
+                s = ctx.default_scope; continue;
+            }
             let id = find_symbol(ctx, ctx.nodes[n].token, -1, s, kind);
-            if id >= 0 {
+            if id >= 0 && outside && (ctx.symbols[id].kind == 2 || ctx.symbols[id].kind == 3) && ctx.scopes[s].function >= 0 {
+                // A local declared after a nested function is not around its
+                // declaration, so the walk goes on past it toward the global.
+                if ctx.symbols[id].kind == 3 || ctx.default_limit < 0 || id < ctx.default_limit {
+                    error_at(ctx, ctx.nodes[n].token, str("the default of parameter ", ctx.tokens[ctx.nodes[ctx.default_param].token].text, " of ", ctx.tokens[ctx.nodes[ctx.default_decl].token].text, " names ", ctx.tokens[ctx.nodes[n].token].text, ", a local where ", ctx.tokens[ctx.nodes[ctx.default_decl].token].text, " is declared, which a default cannot"));
+                }
+            } else if id >= 0 {
                 let owner = ctx.scopes[scope].function;
                 var visible = true;
                 if kind == 2 && owner >= 0 && ctx.scopes[ctx.symbols[id].scope].function != owner {
@@ -171,6 +185,16 @@ fn lookup(ctx: Compiler&, n: i64, scope: i64, kind: i64) -> i64 {
     if id >= 0 { return id; }
     if ctx.nodes[n].flags & 1 == 0 && ctx.nodes[n].ns >= 0 { return find_symbol(ctx, ctx.nodes[n].token, -1, 0, kind); }
     return -1;
+}
+fn default_names_parameter(ctx: Compiler&, n: i64) {
+    var e = ctx.nodes[ctx.nodes[ctx.default_decl].a].first;
+    while e >= 0 {
+        let p = ctx.edges[e].value;
+        if same_name(ctx, ctx.nodes[p].token, ctx.nodes[n].token) {
+            error_at(ctx, ctx.nodes[n].token, str("the default of parameter ", ctx.tokens[ctx.nodes[ctx.default_param].token].text, " of ", ctx.tokens[ctx.nodes[ctx.default_decl].token].text, " names parameter ", ctx.tokens[ctx.nodes[n].token].text, ", which a default cannot"));
+        }
+        e = ctx.edges[e].next;
+    }
 }
 fn register_symbol(ctx: Compiler&, token: i64, ns: i64, kind: i64, decl: i64, scope: i64, flags: i64) -> i64 {
     let previous = find_symbol(ctx, token, ns, scope, kind);
@@ -252,6 +276,7 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
     let syntax = ctx.nodes[n];
     var ty = -1;
     if syntax.tag == N_TYPE {
+        if ctx.tokens[syntax.token].text == "fn" && syntax.b >= 0 && child_count(ctx, syntax.b) > 1 { error_at(ctx, syntax.token, "not implemented yet: function types with multiple results"); }
         ty = builtin_type(ctx, ctx.tokens[syntax.token].text);
         if ty < 0 {
             let s = lookup(ctx, n, scope, 1);
@@ -375,6 +400,34 @@ recursive fn struct_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
     if size_class > 0 { offset = -1; }
     ctx.types[id].bytes = offset; ctx.types[id].size_class = size_class; ctx.types[id].state = 2;
     return id;
+}
+// A type as Goose spells it, for diagnostics.
+recursive fn type_text(ctx: Compiler&, ty: i64, out: u8[>..]&) {
+    if ty < 0 { out.append("?"); return; }
+    let t = ctx.types[ty];
+    if t.kind == T_VOID { out.append("void"); }
+    else if t.kind == T_BOTTOM { out.append("never"); }
+    else if t.kind == T_BOOL { out.append("bool"); }
+    else if t.kind == T_VARINT { out.append("varint"); }
+    else if t.kind == T_INTEGER { format(out, if t.flags & 2 != 0 { "u" } else { "i" }, t.bytes * 8); }
+    else if t.kind == T_FLOAT { format(out, "f", t.bytes * 8); }
+    else if t.kind == T_STRUCT {
+        out.append(ctx.tokens[ctx.nodes[t.decl].token].text);
+        if t.arguments >= 0 {
+            out.push('<'); var e = t.arguments; var comma = false;
+            while e >= 0 { if comma { out.append(", "); } comma = true; type_text(ctx, ctx.edges[e].value, out); e = ctx.edges[e].next; }
+            out.push('>');
+        }
+    } else if t.kind == T_SLICE { if t.flags & 1 != 0 { out.append("const "); } type_text(ctx, t.element, out); out.append("[:]"); }
+    else if t.kind == T_REFERENCE { if t.flags & 1 != 0 { out.append("const "); } type_text(ctx, t.element, out); out.push('&'); }
+    else if t.kind == T_ARRAY {
+        type_text(ctx, t.element, out);
+        if t.flags == 0 { format(out, "[", t.count, "]"); }
+        else if t.flags == 1 { out.append("[]"); }
+        else if t.flags == 2 { if t.count >= 0 { format(out, "[..", t.count, "]"); } else { out.append("[..]"); } }
+        else if t.flags == 3 { out.append("[>..]"); }
+        else { out.append("[>..<]"); }
+    } else { format(out, "type#", ty); }
 }
 fn find_field(ctx: Compiler&, ty: i64, token: i64) -> i64 {
     var e = ctx.types[ty].first;

@@ -73,6 +73,9 @@ const N_EXPR_STMT = 50;
 const N_RANGE = 51;
 const N_PAD = 52;
 const N_SELF = 53;
+// Receivers evaluate their call once before the projected results are used.
+const N_RECEIVE = 54;
+const N_RESULT = 55;
 
 struct Node {
     tag: i64,
@@ -94,6 +97,7 @@ struct Node {
     inexact: bool = false,
     known: bool = false,
     bits: u64 = 0,
+    alt: u64 = 0,
     held: i64 = -1,
     fields: i64 = -1,
     standalone: bool = false,
