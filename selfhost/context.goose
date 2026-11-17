@@ -41,8 +41,16 @@ struct Compiler {
     function_slots: i64[>..]&,
     return_locals: i64[>..]&,
     c_final: u8[>..]&,
+    c_specs: u8[>..]&,
+    c_spec_start: i64[>..]&,
+    c_spec_split: i64[>..]&,
+    local_names: i64[>..]&,
+    first_local: i64[>..]&,
+    next_local: i64[>..]&,
     c_controls: Control[>..<]&,
     c_arguments: (const u8[:])[>..<]&,
+    // (call node, number) for this function's multiple-result calls.
+    c_multis: i64[>..<]&,
     // Parameter tokens of the defaults being checked, innermost last. A -1
     // separates those of a function body being checked from its callers'.
     default_stack: i64[>..<]&,
@@ -86,8 +94,15 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
     var owned_return_locals: i64[>..] = [];
     var owned_c_final: u8[>..] = [];
     var owned_default_stack: i64[>..<] = [];
+    var owned_c_specs: u8[>..] = [];
+    var owned_c_spec_start: i64[>..] = [];
+    var owned_c_spec_split: i64[>..] = [];
+    var owned_local_names: i64[>..] = [];
+    var owned_first_local: i64[>..] = [];
+    var owned_next_local: i64[>..] = [];
     var owned_c_controls: Control[>..<] = [];
     var owned_c_arguments: (const u8[:])[>..<] = [];
+    var owned_c_multis: i64[>..<] = [];
     var owned_text_storage: u8[>..] = [];
     var owned_sources: Source[>..] = [];
     var owned_tokens: Token[>..] = [];
@@ -116,8 +131,15 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
         function_slots: owned_function_slots,
         return_locals: owned_return_locals,
         c_final: owned_c_final,
+        c_specs: owned_c_specs,
+        c_spec_start: owned_c_spec_start,
+        c_spec_split: owned_c_spec_split,
+        local_names: owned_local_names,
+        first_local: owned_first_local,
+        next_local: owned_next_local,
         c_controls: owned_c_controls,
         c_arguments: owned_c_arguments,
+        c_multis: owned_c_multis,
         default_stack: owned_default_stack,
         text_storage: owned_text_storage,
         sources: owned_sources,
