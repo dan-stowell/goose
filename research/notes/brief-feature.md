@@ -20,3 +20,5 @@ Feature-builder rules (selfhost/, M1 of research/PLAN.md):
 - Keep going through your cluster list until it is done or you are blocked by another cluster;
   then take the next biggest cluster that is in your area. Report in five lines: board numbers
   before/after, branch, what is blocked.
+- (2026-11-17 02:40) --enforce also fails when an error fixture becomes newly accepted (wrongly
+  compiles) versus selfhost/scoreboard/accepted.txt (435 today). A feature lands with its checks.

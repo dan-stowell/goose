@@ -14,8 +14,9 @@ fixed point (stage 2 and stage 3 C identical), then scores the stage-2 compiler 
 
 Writes selfhost/scoreboard/<board>.txt (the passing names, sorted) unless --check-only, and
 build/scoreboard/<board>.tsv (every fixture with its status and first reason line). With
---enforce, exits nonzero when a name in a committed board no longer passes or the fixed point
-breaks: the scoreboard never goes down. Usage:
+--enforce, exits nonzero when a name in a committed board no longer passes, an error fixture is
+newly accepted (selfhost/scoreboard/accepted.txt), or the fixed point breaks: the scoreboard never
+goes down. Usage:
 
   python3 selfhost/scoreboard.py [--goose build/goose] [-j N] [--enforce] [--update] [--only board]
 """
@@ -221,6 +222,17 @@ def main():
             gained = len(set(passing) - before)
             if gained:
                 print(f"  gained {gained} (run with --update to record)")
+        if board == "reject":
+            # The other ratchet: an error fixture the selfhost wrongly accepts must not appear anew.
+            accepted = sorted(n for n, s, _ in results if s == "accepted")
+            ledger = BOARDS / "accepted.txt"
+            if ledger.exists():
+                new = sorted(set(accepted) - set(ledger.read_text().split()))
+                if new:
+                    print(f"  NEWLY ACCEPTED ({len(new)}): {' '.join(new[:20])}")
+                    failed = True
+            if args.update:
+                ledger.write_text("".join(f"{n}\n" for n in accepted))
         if args.update:
             BOARDS.mkdir(exist_ok=True)
             committed.write_text("".join(f"{n}\n" for n in passing))
