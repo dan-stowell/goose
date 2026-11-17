@@ -48,7 +48,13 @@ errors_tc/param_default_names_local
 errors_tc/param_default_names_param
 errors_tc/polymorphic_recursion_param
 errors_tc/polymorphic_recursion_type_args
+errors_tc/pool_ref_rebind_global
+errors_tc/pool_ref_rebind_kind
+errors_tc/pool_ref_rebind_nested
+errors_tc/pool_ref_rebind_param
+errors_tc/pool_ref_rebind_plain
 errors_tc/range_index_variable
+errors_tc/root_owner_foreign_index
 errors_tc/slice_pool_const
 errors_tc/slot_pool_const
 errors_tc/zero_length_capacity

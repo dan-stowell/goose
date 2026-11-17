@@ -63,6 +63,7 @@ struct Symbol {
     inexact: bool = false,
     capture_limit: i64 = -1,
     byteviewed: bool = false,
+    pool_kind: i64 = 0,
 }
 
 

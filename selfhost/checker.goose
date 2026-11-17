@@ -50,7 +50,9 @@ struct Specialization {
     rebinds: i64 = -1,
 }
 struct CheckedCall { node: i64, scope: i64, callee: i64 }
-struct Shrink { root: i64, balanced: bool }
+// The root can own an aggregate, so its type cannot recover the element
+// type of the particular array a propagated effect shrinks.
+struct Shrink { root: i64, element: i64, balanced: bool }
 
 // The pseudo-symbol naming one field's storage of a root owner (kind 6).
 fn root_component(ctx: Compiler&, owner: i64, f: i64) -> i64 {
@@ -196,13 +198,13 @@ fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64,
         var e = ctx.specializations[ctx.checking_function].shrinks;
         while e >= 0 {
             let effect = ctx.edges[e].value;
-            if ctx.shrinks[effect].root == root {
+            if ctx.shrinks[effect].root == root && ctx.shrinks[effect].element == element {
                 if !balanced && ctx.shrinks[effect].balanced { ctx.shrinks[effect].balanced = false; ctx.effect_revision++; }
                 return;
             }
             e = ctx.edges[e].next;
         }
-        let effect = ctx.shrinks.len; ctx.shrinks.push(Shrink { root: root, balanced: balanced });
+        let effect = ctx.shrinks.len; ctx.shrinks.push(Shrink { root: root, element: element, balanced: balanced });
         let id = ctx.edges.len; ctx.edges.push(Edge { value: effect, next: ctx.specializations[ctx.checking_function].shrinks });
         ctx.specializations[ctx.checking_function].shrinks = id;
         ctx.effect_revision++;
@@ -1205,6 +1207,7 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     require_fit(ctx, init, v, declared);
     if ctx.nodes[n].flags & 4 != 0 && (ctx.types[declared].kind != T_ARRAY || ctx.types[declared].flags != 3 || ctx.types[ctx.types[declared].element].size_class != 0) { error_at(ctx, ctx.nodes[n].token, "reusable needs a grow-only array of fixed-size elements"); }
     ctx.symbols[s].ty = declared; ctx.symbols[s].state = 2; ctx.symbols[s].root = v.root;
+    if ctx.types[declared].kind == T_REFERENCE && !is_optional(ctx, declared) { ctx.symbols[s].pool_kind = builtin_pool_kind(ctx, raw); }
     ctx.symbols[s].held = v.held;
     ctx.symbols[s].fields = raw.fields;
     ctx.symbols[s].growshrink = raw.growshrink;
@@ -1396,6 +1399,12 @@ recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
     require_fit(ctx, x.b, rhs, slot);
     let stored = Value { ty: slot, root: rhs.root, growshrink: rhs.growshrink, held: rhs.held };
     if target.tag == N_NAME {
+        let pool_kind = ctx.symbols[target.symbol].pool_kind;
+        let incoming = builtin_pool_kind(ctx, rhs);
+        if pool_kind > 0 && incoming != pool_kind {
+            let description = if incoming == 0 { "that is not a pool reference" } else if incoming == 12 { "to a reusable[] pool" } else { "to a reusable pool" };
+            error_at(ctx, x.token, str("re-binding ", ctx.tokens[target.token].text, " to a reference ", description, ", where it was bound to a ", if pool_kind == 12 { "reusable[]" } else { "reusable" }, " pool"));
+        }
         store_lifetime(ctx, stored, target.symbol, x.token);
         if ctx.types[rhs.ty].kind != T_NULL { ctx.symbols[target.symbol].root = rhs.root; }
         ctx.symbols[target.symbol].growshrink = ctx.symbols[target.symbol].growshrink || rhs.growshrink;
@@ -1561,6 +1570,19 @@ fn check_result(ctx: Compiler&, n: i64, raw: Value, spec: i64, result: i64, toke
 
 // The current C backend gives empty structs/arrays a padding byte. Do not
 // expose that placeholder as a serialized language value.
+recursive fn builtin_image_safe(ctx: Compiler&, ty: i64) -> bool {
+    let t = ctx.types[ty];
+    if t.kind == T_SLICE || t.size_class == 3 { return false; }
+    if t.kind == T_REFERENCE { return t.flags & 8 != 0; }
+    if t.kind == T_ARRAY { return builtin_image_safe(ctx, t.element); }
+    if t.kind == T_STRUCT {
+        var e = t.first; while e >= 0 { if !builtin_image_safe(ctx, ctx.fielddefs[ctx.edges[e].value].ty) { return false; } e = ctx.edges[e].next; }
+    }
+    if t.kind == T_ENUM {
+        var e = t.first; while e >= 0 { if !builtin_image_safe(ctx, ctx.edges[e].value) { return false; } e = ctx.edges[e].next; }
+    }
+    return true;
+}
 recursive fn image_layout_supported(ctx: Compiler&, ty: i64) -> bool {
     let t = ctx.types[ty];
     if t.kind == T_ARRAY { return t.count != 0 && image_layout_supported(ctx, t.element); }
@@ -1580,7 +1602,7 @@ recursive fn image_layout_supported(ctx: Compiler&, ty: i64) -> bool {
 // slice element, so field defaults with side effects keep their semantics.
 recursive fn pool_default_expression(ctx: Compiler&, ty: i64, token: i64, scope: i64) -> i64 {
     let t = ctx.types[ty];
-    if t.kind == T_REFERENCE { error_at(ctx, token, "slice pool element has no default: reference"); }
+    if t.kind == T_REFERENCE && !is_optional(ctx, ty) { error_at(ctx, token, "slice pool element has no default: reference"); }
     if t.kind == T_ENUM {
         if t.first < 0 { error_at(ctx, token, "slice pool element has no default: empty enum"); }
         return pool_default_expression(ctx, ctx.edges[t.first].value, token, scope);
@@ -1610,6 +1632,47 @@ recursive fn pool_default_expression(ctx: Compiler&, ty: i64, token: i64, scope:
     }
     annotate(ctx, n, Value { ty: ty, held: root, fields: ctx.nodes[n].first }); return n;
 }
+recursive fn builtin_array_count(ctx: Compiler&, ty: i64, element: i64) -> i64 {
+    if ty == element { return 2; } // A matching scalar outside the array makes the root ambiguous.
+    let t = ctx.types[ty];
+    if t.kind == T_ARRAY {
+        if t.element == element { return 1; }
+        let nested = builtin_array_count(ctx, t.element, element);
+        if nested == 0 { return 0; }
+        if t.flags == 0 && t.count == 1 { return nested; }
+        return 2;
+    }
+    var count = 0;
+    if t.kind == T_STRUCT {
+        var e = t.first; while e >= 0 { count += builtin_array_count(ctx, ctx.fielddefs[ctx.edges[e].value].ty, element); e = ctx.edges[e].next; }
+    }
+    return count;
+}
+recursive fn builtin_owns_element(ctx: Compiler&, ty: i64, element: i64) -> bool {
+    if ty == element { return true; }
+    let t = ctx.types[ty];
+    if t.kind == T_ARRAY { return builtin_owns_element(ctx, t.element, element); }
+    if t.kind == T_STRUCT {
+        var e = t.first; while e >= 0 { if builtin_owns_element(ctx, ctx.fielddefs[ctx.edges[e].value].ty, element) { return true; } e = ctx.edges[e].next; }
+    }
+    if t.kind == T_ENUM {
+        var e = t.first; while e >= 0 { if builtin_owns_element(ctx, ctx.edges[e].value, element) { return true; } e = ctx.edges[e].next; }
+    }
+    return false;
+}
+fn builtin_unique_global(ctx: Compiler&, array: Value, value: Value, element: i64) -> bool {
+    if value.readonly || array.root < 0 || ctx.symbols[array.root].scope != 0 || value.root != array.root { return false; }
+    for s, i in ctx.symbols {
+        if i != array.root && s.kind == 2 && s.scope == 0 && s.ty >= 0 && builtin_owns_element(ctx, s.ty, element) { return false; }
+    }
+    return true;
+}
+fn builtin_pool_kind(ctx: Compiler&, v: Value) -> i64 {
+    if is_optional(ctx, v.ty) || v.inexact { return 0; }
+    if v.place >= 0 && ctx.types[ctx.symbols[v.place].ty].kind == T_REFERENCE { return ctx.symbols[v.place].pool_kind; }
+    if v.root >= 0 { return ctx.symbols[v.root].flags & 12; }
+    return 0;
+}
 recursive fn check_builtin_argument(ctx: Compiler&, call: i64, arg: i64, scope: i64, expected: i64) -> Value {
     if ctx.nodes[call].flags & 512 != 0 || (arg == first_child(ctx, call) && ctx.nodes[call].flags & 256 != 0) { return value_of(ctx, arg); }
     return check_expression(ctx, arg, scope, expected);
@@ -1634,26 +1697,6 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     // Builtin arguments are checked with their construction destination.
     if member && element_type(ctx, receiver.ty) >= 0 {
         let array = decay(ctx, receiver); let element = element_type(ctx, array.ty);
-        if name == "check_length" || name == "index_of" || name == "range_index" {
-            if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[callee].token, str(".", name, " needs fixed-size elements")); }
-            if name == "check_length" && (ctx.types[array.ty].kind != T_ARRAY || ctx.types[array.ty].flags < 3) { error_at(ctx, ctx.nodes[callee].token, ".check_length needs a grow-only or grow-shrink array"); }
-            let count = child_count(ctx, n);
-            if count < 1 || count > 2 || (name == "index_of" && count != 1) { error_at(ctx, ctx.nodes[n].token, str(".", name, " argument count mismatch")); }
-            let arg = first_child(ctx, n);
-            if name == "check_length" { require_fit(ctx, arg, decay(ctx, check_expression(ctx, arg, scope, -1)), default_integer(ctx)); ctx.nodes[n].symbol = -16; }
-            else if name == "range_index" { require_fit(ctx, arg, check_expression(ctx, arg, scope, -1), slice_type(ctx, element, true)); ctx.nodes[n].symbol = -17; }
-            else {
-                let r = check_expression(ctx, arg, scope, -1);
-                if r.place < 0 && ctx.types[r.ty].kind != T_REFERENCE { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference into the array"); }
-                if decay(ctx, r).ty != element { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference to an element"); }
-                ctx.nodes[n].symbol = -18;
-            }
-            if count == 2 {
-                let message = ctx.edges[ctx.edges[ctx.nodes[n].first].next].value;
-                if ctx.nodes[message].tag != N_STRING { error_at(ctx, ctx.nodes[message].token, "the message must be a string literal"); }
-            }
-            return Value { ty: default_integer(ctx) };
-        }
         if name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" {
             let shrinking = name == "resize" || name == "clear" || name == "pop" || name == "pop_n";
             // References into a limited array stay valid across shrinks.
@@ -1755,7 +1798,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let pool = decay(ctx, check_builtin_argument(ctx, n, recv, scope, -1));
         let element = element_type(ctx, pool.ty);
         if element < 0 || ctx.types[pool.ty].kind != T_ARRAY || ctx.types[pool.ty].flags != 3 || pool.root < 0 || pool.inexact { error_at(ctx, ctx.nodes[recv].token, "operation requires an exact reusable[] pool"); }
-        if ctx.symbols[pool.root].flags & 12 != 12 { error_at(ctx, ctx.nodes[recv].token, "operation exists on reusable[] slice pools only"); }
+        if builtin_pool_kind(ctx, value_of(ctx, recv)) != 12 { error_at(ctx, ctx.nodes[recv].token, "operation exists on reusable[] slice pools only"); }
         if pool.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only pool"); }
         if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[recv].token, "pool requires fixed-size elements"); }
         reference_type(ctx, pool.ty, false); e = ctx.edges[e].next;
@@ -1772,6 +1815,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if name == "free_slice" { ctx.nodes[n].symbol = BI_FREE_SLICE; return Value {}; }
         let count_node = ctx.edges[e].value; let length = decay(ctx, check_builtin_argument(ctx, n, count_node, scope, -1));
         if ctx.types[length.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[count_node].token, "slice pool length must be an integer"); }
+        if name == "realloc_slice" && holds_self_relative(ctx, element) { error_at(ctx, ctx.nodes[n].token, "realloc_slice cannot move elements containing self-relative references"); }
         let init = pool_default_expression(ctx, element, ctx.nodes[n].token, scope);
         ctx.nodes[n].b = init;
         store_in_array(ctx, received(ctx, value_of(ctx, init), element), pool, scope, ctx.nodes[n].token);
@@ -1785,7 +1829,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let pool = decay(ctx, check_builtin_argument(ctx, n, recv, scope, -1));
         let element = element_type(ctx, pool.ty);
         if element < 0 || ctx.types[pool.ty].kind != T_ARRAY || ctx.types[pool.ty].flags != 3 || pool.root < 0 || pool.inexact { error_at(ctx, ctx.nodes[recv].token, "operation requires an exact reusable pool"); }
-        if ctx.symbols[pool.root].flags & 12 != 4 { error_at(ctx, ctx.nodes[recv].token, "operation exists on reusable slot pools only"); }
+        if builtin_pool_kind(ctx, value_of(ctx, recv)) != 4 { error_at(ctx, ctx.nodes[recv].token, "operation exists on reusable slot pools only"); }
         if pool.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only pool"); }
         if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[recv].token, "pool requires fixed-size elements"); }
         reference_type(ctx, pool.ty, false);
@@ -1798,7 +1842,9 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let value = check_builtin_argument(ctx, n, arg, scope, element); require_fit(ctx, arg, value, element);
         store_in_array(ctx, received(ctx, value, element), pool, scope, ctx.nodes[n].token);
         if name == "alloc_index" { ctx.nodes[n].symbol = BI_ALLOC_INDEX; return Value { ty: default_integer(ctx) }; }
-        ctx.nodes[n].symbol = BI_ALLOC_REF; return Value { ty: reference_type(ctx, element, false), root: pool.root, place: pool.place };
+        ctx.nodes[n].symbol = BI_ALLOC_REF;
+        if ctx.types[element].kind == T_REFERENCE { let stored = received(ctx, value, element); return Value { ty: plain_reference(ctx, element), root: stored.root, readonly: stored.readonly, held: stored.held }; }
+        return Value { ty: reference_type(ctx, element, false), root: pool.root, place: pool.place };
     }
     if preferred < 0 && (name == "move_from" || name == "index_of" || name == "bytes_of") {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
@@ -1810,7 +1856,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if element < 0 { error_at(ctx, ctx.nodes[recv].token, "operation requires an array or slice"); }
         if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[recv].token, "operation requires fixed-size elements"); }
         if name == "bytes_of" {
-            if contains_view(ctx, element) { error_at(ctx, ctx.nodes[recv].token, "bytes_of cannot expose elements containing references or slices"); }
+            if !builtin_image_safe(ctx, element) { error_at(ctx, ctx.nodes[recv].token, "bytes_of cannot expose elements containing addresses or external pool references"); }
             if !image_layout_supported(ctx, element) { error_at(ctx, ctx.nodes[recv].token, "not implemented yet: byte images containing zero-size storage"); }
             if array.root >= 0 && ctx.symbols[array.root].kind == 4 { error_at(ctx, ctx.nodes[recv].token, "bytes_of requires persistent storage"); }
             if array.root >= 0 { ctx.symbols[array.root].byteviewed = true; }
@@ -1825,6 +1871,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let arg = ctx.edges[ctx.edges[e].next].value;
         let raw = check_builtin_argument(ctx, n, arg, scope, -1); let value = decay(ctx, raw);
         if name == "move_from" {
+            if holds_self_relative(ctx, element) { error_at(ctx, ctx.nodes[n].token, "move_from cannot copy elements containing self-relative references"); }
             if ctx.types[array.ty].kind != T_SLICE { error_at(ctx, ctx.nodes[recv].token, "move_from requires a destination slice"); }
             if array.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only slice"); }
             if ctx.types[value.ty].kind != T_SLICE || element_type(ctx, value.ty) != element { error_at(ctx, ctx.nodes[arg].token, "move_from requires a slice of the same element type"); }
@@ -1833,9 +1880,14 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         }
         if ctx.types[array.ty].kind != T_ARRAY || ctx.types[array.ty].flags == 1 { error_at(ctx, ctx.nodes[recv].token, "index_of requires an indexable array"); }
         if value.ty != element || (raw.place < 0 && ctx.types[raw.ty].kind != T_REFERENCE) { error_at(ctx, ctx.nodes[arg].token, "index_of requires a reference to an array element"); }
-        if array.root < 0 || array.root != value.root || array.inexact || value.inexact { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference rooted at the array itself"); }
+        var origin = value;
+        if ctx.types[element].kind == T_SLICE && ctx.nodes[arg].tag == N_INDEX {
+            let holder = decay(ctx, value_of(ctx, ctx.nodes[arg].a));
+            origin.root = holder.root; origin.inexact = holder.inexact;
+        }
+        if array.root < 0 || array.root != origin.root || array.inexact || (origin.inexact && !builtin_unique_global(ctx, array, origin, element)) { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference rooted at the array itself"); }
         let owner = decay(ctx, Value { ty: ctx.symbols[array.root].ty });
-        if ctx.types[owner.ty].kind != T_ARRAY || element_type(ctx, owner.ty) != element { error_at(ctx, ctx.nodes[arg].token, "index_of requires a root containing one array of this element type"); }
+        if builtin_array_count(ctx, owner.ty, element) != 1 { error_at(ctx, ctx.nodes[arg].token, "index_of requires a root containing one array of this element type"); }
         reference_type(ctx, array.ty, false); reference_type(ctx, element, false);
         ctx.nodes[n].symbol = BI_INDEX_OF; return Value { ty: default_integer(ctx) };
     }
@@ -1848,7 +1900,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let element = element_type(ctx, array.ty);
         reference_type(ctx, array.ty, false);
         if element < 0 || ctx.types[array.ty].kind != T_ARRAY { error_at(ctx, ctx.nodes[n].token, "operation requires an array"); }
-        if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[n].token, "operation requires fixed-size elements"); }
+        if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[n].token, str(".", name, " needs fixed-size elements")); }
         if name == "range_index" && ctx.types[array.ty].flags == 1 { error_at(ctx, ctx.nodes[n].token, "range_index requires an indexable array"); }
         if name != "range_index" && ctx.types[array.ty].flags < 3 { error_at(ctx, ctx.nodes[n].token, "operation requires a growable array"); }
         e = ctx.edges[e].next;
@@ -1883,7 +1935,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     while effect >= 0 {
         let shrink = ctx.shrinks[ctx.edges[effect].value];
         if !shrink.balanced && !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: call that shrinks within a larger expression"); }
-        check_shrink(ctx, shrink.root, element_type(ctx, ctx.symbols[shrink.root].ty), scope, ctx.nodes[n].token, shrink.balanced, true);
+        check_shrink(ctx, shrink.root, shrink.element, scope, ctx.nodes[n].token, shrink.balanced, true);
         effect = ctx.edges[effect].next;
     }
     ctx.nodes[n].symbol = spec;
@@ -2042,6 +2094,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
                 if ps.growshrink != av.growshrink && !(existing.state == 1 && !av.growshrink) { same = false; }
                 if ctx.types[ps.ty].kind == T_REFERENCE || ctx.types[ps.ty].kind == T_SLICE {
                     if ps.root != av.root { same = false; }
+                    if ctx.types[ps.ty].kind == T_REFERENCE && !is_optional(ctx, ps.ty) && ps.pool_kind != builtin_pool_kind(ctx, av) { same = false; }
                     if ctx.types[ps.ty].flags & 1 == 0 && ps.readonly != av.readonly { same = false; }
                 } else if contains_view(ctx, ps.ty) && ps.held != av.held {
                     // A holder passed by value can contain longer-lived views
@@ -2115,6 +2168,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         if actual >= 0 {
             let argument = ctx.nodes[ctx.edges[actual].value];
             ctx.symbols[s].root = argument.root; ctx.symbols[s].held = argument.held; ctx.symbols[s].fields = argument.fields;
+            if ctx.types[ty].kind == T_REFERENCE && !is_optional(ctx, ty) { ctx.symbols[s].pool_kind = builtin_pool_kind(ctx, value_of(ctx, ctx.edges[actual].value)); }
             // A by-value holder's fields may differ in another activation.
             if ctx.types[ty].kind != T_REFERENCE && ctx.types[ty].kind != T_SLICE && contains_view(ctx, ty) { ctx.symbols[s].fields = -1; }
             ctx.symbols[s].growshrink = argument.growshrink;
@@ -2190,7 +2244,7 @@ fn check_program(ctx: Compiler&, library: bool) {
             while effect >= 0 {
                 let shrink = ctx.shrinks[ctx.edges[effect].value];
                 if !shrink.balanced && !ctx.nodes[call.node].standalone { error_at(ctx, ctx.nodes[call.node].token, "not implemented yet: call that shrinks within a larger expression"); }
-                check_shrink(ctx, shrink.root, element_type(ctx, ctx.symbols[shrink.root].ty), call.scope, ctx.nodes[call.node].token, shrink.balanced, true);
+                check_shrink(ctx, shrink.root, shrink.element, call.scope, ctx.nodes[call.node].token, shrink.balanced, true);
                 effect = ctx.edges[effect].next;
             }
         }

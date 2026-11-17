@@ -31,17 +31,27 @@ rebases required consolidating dispatch and resolving runtime additions. The fin
 rebase also integrated case dispatch and loop-control work; new builtin IDs are
 now named constants in a separate range. Scalar iteration copies must not inherit
 a grow-shrink reference restriction from the sequence they were read from.
+A subsequent rebase added relative references, root storage and the accepted-error
+ratchet. Slot allocation now builds self-relative aggregates in place and encodes
+relative reference elements at their final slot; alloc_ref of a reference element
+returns its referent. Move/reallocation reject self-relative relocation. Byte images
+permit self-relative offsets but reject references measured from external pools.
+Pool references retain their original capability across narrowing, parameters and
+rebinding; slot/slice metadata cannot be interchanged. Shrink effects carry their
+element type across calls, including shrinks of a root owner's array fields.
 
 ## Measured boards
 
 | point | run | exact reject diagnostics | stdlib | W1 |
 |---|---:|---:|---:|---|
 | starting worktree | 23/776 | 4/2036 | 0/17 | fixed point |
-| rebased master 766fc7bf committed board | 79/776 | 39/2036 | 6/17 | — |
-| this branch | 100/776 | 39/2036 | 6/17 | fixed point |
+| rebased master c7c4e0a8 committed board | 133/776 | 65/2036 | 8/17 | — |
+| this branch | 150/776 | 71/2036 | 8/17 | fixed point |
 
-Thus the raw +77 positives include concurrent master work; this branch adds 21
-passing positives over that master board. The existing many-spans pool fixture,
+Thus the raw +127 positives include concurrent master work; this branch adds 17
+passing positives and 6 exact diagnostics over that master board. The accepted-error
+ratchet also passes: 395 erroneous fixtures remain accepted versus master's 435,
+with no newly accepted fixtures. The existing many-spans pool fixture,
 bounds failures, message failures, and slot-reuse fixture now pass.
 
 ## Reproduction
@@ -56,7 +66,7 @@ python3 selfhost/tests/check_slice_runtime.py --goose /home/exedev/goose/build/g
 ```
 
 The first command rebuilds both compiler stages, checks the C fixed point and
-scores all boards. The second compares five successful programs against the
+scores all boards. The second compares six successful programs against the
 reference and checks negative programs with both compilers. The third extracts
 the actual embedded C runtime, compares 500 seeded allocation/free/reallocation
 operations against the reference, and tests ten boundary cases under UBSan.
@@ -82,7 +92,9 @@ were audited, but no synchronous spawn or no-op queue stubs were added.
 
 Byte images currently require fixed-size elements and reject zero-size layouts
 whose C placeholder bytes differ from the language image. Index recovery and pool
-operations conservatively reject roots they cannot prove exact. This leaves the
+operations conservatively reject roots they cannot prove exact. Index recovery
+handles slice-slot addresses and writable references read back from the unique
+global owner of their element type. This leaves the
 slice-pool model fixture blocked at index_of and branch-pool fixtures blocked by
 merged pool provenance. Existing reference-rebinding and other compiler gaps also
 prevent some fixtures from reaching these builtins. Byte-view last-use handling

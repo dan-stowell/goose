@@ -138,19 +138,9 @@ fn runtime_source() -> const u8[:] {
         } else { a.stack->top = (size_t)(a.header->base-a.stack->base) + (size_t)n*element; }
         a.header->len=n;
     }
-    static int64_t gg_check_length(int64_t n, size_t element, const char *message) {
-        if (n < 0 || (uint64_t)n > GG_RESERVATION / (element ? element : 1)) gg_fail(message ? message : "invalid array length");
-        return n;
-    }
-    static int64_t gg_range_index(gg_slice a, gg_slice s, size_t element, const char *message) {
-        uintptr_t off;
-        if (!s.len) return 0;
-        off = (uintptr_t)s.data - (uintptr_t)a.data;
-        if ((uintptr_t)s.data < (uintptr_t)a.data || (element && off % element) || (element && (int64_t)(off / element) + s.len > a.len)) gg_fail(message ? message : "slice not within this array");
-        return element ? (int64_t)(off / element) : 0;
-    }
     static void *gg_push_slot(gg_reference a, size_t element) {
-        void *to = gg_allocate(a.stack, element); if (element) memset(to, 0, element); a.header->len++; return to;
+        void *to; if (gg_pool_busy[a.stack - gg_stacks]) gg_fail("pool growth during element construction");
+        to = gg_allocate(a.stack, element); if (element) memset(to, 0, element); a.header->len++; return to;
     }
     /* Relative links: a signed offset from the slot itself, or an offset
        from a pool's base plus one; 0 is null. */
