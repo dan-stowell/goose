@@ -52,3 +52,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 scoreboard ratchet 2: error fixtures wrongly accepted may not grow (selfhost/scoreboard/accepted.txt, 435). Boards after storage+enums: run 133/776, reject 65/2036, stdlib 8/17.
 - 2026-11-17 feat-storage: relative-link checks (pool and same-root targets, no copies of values holding self-relative links); reject 43 -> 53.
 - 2026-11-17 feat-storage: scope-aware constant sizes (locals and type parameters hide constants), src/'s wording for outliving stores and operator misuse; reject 75 -> 136, accepted 425 -> 383.
+- 2026-11-17 feat-storage: index_of provenance, root owner placement/copy/assign/operator checks, src/'s shrink wording; reject 136 -> 203, accepted 383 -> 365.

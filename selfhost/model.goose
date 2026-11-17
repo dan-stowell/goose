@@ -127,6 +127,12 @@ fn diagnostic(ctx: Compiler&, file: i64, line: i64, column: i64, message: const 
     write_stderr(str(ctx.sources[file].path, ":", line, ":", column, ": error: ", message, "\n"));
     exit(1);
 }
+// An error with a second line that explains it.
+fn error_note(ctx: Compiler&, t: i64, message: const u8[:], note: const u8[:]) {
+    let k = ctx.tokens[t];
+    write_stderr(str(ctx.sources[k.file].path, ":", k.line, ":", k.column, ": error: ", message, "\n"));
+    diagnostic(ctx, k.file, k.line, k.column, note);
+}
 fn error_at(ctx: Compiler&, t: i64, message: const u8[:]) {
     diagnostic(ctx, ctx.tokens[t].file, ctx.tokens[t].line, ctx.tokens[t].column, message);
 }

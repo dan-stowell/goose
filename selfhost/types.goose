@@ -357,6 +357,7 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
             if value > 281474976710656 { error_at(ctx, syntax.token, "array size is negative or exceeds the 48-bit limit"); }
             count = value as i64;
         }
+        if ctx.types[element].size_class == 3 { error_at(ctx, syntax.token, "nested root owners are not supported"); }
         ty = array_type(ctx, element, syntax.flags & 15, count);
         if ty < 0 { error_at(ctx, syntax.token, "array element size class is not permitted"); }
     } else if syntax.tag == N_TYPE_SLICE {
@@ -577,6 +578,8 @@ recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
         let n = ctx.edges[e].value;
         if ctx.nodes[n].tag == N_PAD { error_at(ctx, ctx.nodes[n].token, "not implemented yet: explicit padding"); }
         let ft = resolve_type(ctx, ctx.nodes[n].a, scope);
+        // A root owner is a local or global declaration only (spec 3.4).
+        if ctx.types[ft].size_class == 3 { error_at(ctx, ctx.nodes[n].token, "nested root owners are not supported"); }
         no_zero_size_field(ctx, id, ft, ctx.nodes[n].token);
         if is_relative(ctx, ft) { plain_reference(ctx, ft); }
         if size_class == 2 && !root { error_at(ctx, ctx.nodes[n].token, "resizable field must be the final field"); }

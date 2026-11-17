@@ -210,7 +210,12 @@ fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64,
         let shape = ctx.types[s.ty];
         let direct_view = (shape.kind == T_SLICE || shape.kind == T_REFERENCE) && shape.element == element;
         if (direct_view && s.root == root) || (s.held >= 0 && (!direct_view || contains_view(ctx, shape.element)) && holds_view_of(ctx, s.ty, element) && root_depth(ctx, s.held) >= root_depth(ctx, root)) {
-            error_at(ctx, token, str("shrink may invalidate '", ctx.tokens[s.token].text, "'; this checker conservatively keeps views live to scope exit"));
+            // src/'s wording: what shrinks which array, and what may view it.
+            let array = root_name(ctx, root); let name = ctx.tokens[s.token].text;
+            let verb = if ctx.shrink_callee { save_text(ctx, str("call ", ctx.tokens[ctx.shrink_verb].text, ", which shrinks")) } else { ctx.tokens[ctx.shrink_verb].text };
+            if s.scope == 0 && !direct_view { error_at(ctx, token, str("cannot ", verb, " ", array, ": global ", name, " may hold a reference into it")); }
+            if direct_view { error_at(ctx, token, str("cannot ", verb, " ", array, " while ", name, " is still used: it may refer into ", array)); }
+            error_at(ctx, token, str("cannot ", verb, " ", array, " while ", name, " is still used: a reference into it was stored there"));
         }
     }
     if ctx.checking_function >= 0 && ctx.scopes[ctx.symbols[root].scope].function != ctx.checking_function {
@@ -459,6 +464,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     } else if tag == N_BINARY {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1));
         let b = decay(ctx, check_expression(ctx, x.b, scope, -1));
+        if ctx.types[a.ty].size_class == 3 || ctx.types[b.ty].size_class == 3 { error_at(ctx, x.token, "root owners do not support value operators"); }
         let op = ctx.tokens[x.token].text;
         if op == "&&" || op == "||" { require_fit(ctx, x.a, a, boolean_type(ctx)); require_fit(ctx, x.b, b, boolean_type(ctx)); v.ty = boolean_type(ctx); }
         else if op == "==" || op == "!=" {
@@ -1001,6 +1007,7 @@ recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
         ty = resolve_type(ctx, type_syntax(ctx, name), scope);
     }
     if ctx.types[ty].kind != T_STRUCT { error_at(ctx, ctx.nodes[n].token, "constructor needs a struct type"); }
+    if ctx.types[ty].size_class == 3 && ctx.root_site != n { error_at(ctx, ctx.nodes[n].token, "a root owner must be constructed directly at its declaration"); }
     var f = ctx.types[ty].first; var e = ctx.nodes[n].first;
     ctx.nodes[n].first = -1; ctx.nodes[n].last = -1;
     var root = -1;
@@ -1238,7 +1245,10 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
         if declared < 0 { error_at(ctx, ctx.nodes[n].token, "uninitialized variable needs a type"); }
         ctx.symbols[s].ty = declared; return;
     }
+    let outer_site = ctx.root_site; ctx.root_site = init;
     let raw = if synthesized { value_of(ctx, init) } else { check_expression(ctx, init, scope, declared) };
+    ctx.root_site = outer_site;
+    if raw.ty >= 0 && ctx.types[decay(ctx, raw).ty].size_class == 3 && ctx.nodes[n].flags & 16 == 0 && (ctx.types[raw.ty].kind == T_REFERENCE || raw.place >= 0) && declared >= 0 && ctx.types[declared].kind != T_REFERENCE { error_at(ctx, ctx.nodes[init].token, "root owners cannot be copied"); }
     if ctx.types[raw.ty].kind == T_BOTTOM || raw.ty == 0 { error_at(ctx, ctx.nodes[init].token, "initializer has no value"); }
     var v = decay(ctx, raw);
     if declared < 0 {
@@ -1480,6 +1490,7 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     // elements into it. Other variable-size values are frozen.
     let dynamic = ctx.types[dest.ty].kind == T_ARRAY && ctx.types[dest.ty].flags == 2;
     if ctx.types[dest.ty].size_class == 1 && !dynamic { error_at(ctx, x.token, "cannot replace a variable-size value"); }
+    if ctx.types[dest.ty].size_class == 3 { error_at(ctx, x.token, "a root owner cannot be assigned as a whole"); }
     if ctx.types[dest.ty].size_class == 2 { error_at(ctx, x.token, "not implemented yet: whole resizable assignment analysis"); }
     if ctx.symbols[dest.place].flags & 32 != 0 { error_at(ctx, x.token, "cannot write a by-value iteration binding"); }
     if ctx.nodes[x.a].tag == N_MEMBER && ctx.nodes[x.a].symbol >= 0 && ctx.fielddefs[ctx.nodes[x.a].symbol].flags & 1 != 0 { error_at(ctx, x.token, "cannot reassign a let field"); }
@@ -1628,8 +1639,18 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             else if name == "range_index" { require_fit(ctx, arg, check_expression(ctx, arg, scope, -1), slice_type(ctx, element, true)); ctx.nodes[n].symbol = -17; }
             else {
                 let r = check_expression(ctx, arg, scope, -1);
-                if r.place < 0 && ctx.types[r.ty].kind != T_REFERENCE { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference into the array"); }
+                if r.place < 0 && ctx.types[r.ty].kind != T_REFERENCE { error_at(ctx, ctx.nodes[arg].token, ".index_of needs a reference rooted at the array itself"); }
                 if decay(ctx, r).ty != element { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference to an element"); }
+                // The index is meaningful only for a reference into this very
+                // array: rooted at it exactly, the array being all of its root.
+                let receiver = ctx.nodes[ctx.nodes[callee].a];
+                let whole = receiver.tag == N_NAME || (receiver.tag == N_MEMBER && array.root >= 0 && ctx.symbols[array.root].kind == 6);
+                let wrong = ".index_of needs a reference rooted at the array itself";
+                if r.root != array.root && !r.inexact { error_note(ctx, ctx.nodes[arg].token, wrong, str("this one is rooted at ", root_name(ctx, r.root))); }
+                if r.root == array.root && !whole {
+                    var text: u8[>..] = []; format(text, "this one is rooted at ", root_name(ctx, r.root), ", which may hold "); type_text(ctx, element, text); text.append(" values outside that array");
+                    error_note(ctx, ctx.nodes[arg].token, wrong, save_text(ctx, text));
+                }
                 ctx.nodes[n].symbol = -18;
             }
             if count == 2 {
@@ -1640,6 +1661,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         }
         if name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" {
             let shrinking = name == "resize" || name == "clear" || name == "pop" || name == "pop_n";
+            ctx.shrink_verb = ctx.nodes[callee].token; ctx.shrink_callee = false;
             // References into a limited array stay valid across shrinks.
             let limited = ctx.types[array.ty].kind == T_ARRAY && ctx.types[array.ty].flags == 2;
             if (name == "pop" || name == "pop_n" || name == "resize") && ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[callee].token, str(".", name, " needs fixed-size elements: the array is sequential")); }
@@ -1721,6 +1743,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "builtin takes one argument"); }
         let arg = first_child(ctx, n); let raw = check_expression(ctx, arg, scope, -1); let v = decay(ctx, raw);
         if name == "assert" { require_condition(ctx, arg, raw); ctx.flow = condition_facts(ctx, arg, true, ctx.flow); ctx.nodes[n].symbol = -23; return Value {}; }
+        if name == "copy" && ctx.types[v.ty].size_class == 3 { error_at(ctx, ctx.nodes[arg].token, "root owners cannot be copied"); }
         if name == "copy" { reject_self_link_copy(ctx, v.ty, ctx.nodes[arg].token, ""); if (v.place < 0 && ctx.types[raw.ty].kind != T_REFERENCE) || ctx.types[v.ty].kind == T_SLICE { error_at(ctx, ctx.nodes[arg].token, "copy requires an owned stored value or its reference"); } ctx.nodes[n].symbol = -26; var result = v; result.place = -1; result.readonly = false; return result; }
         if name == "exit" { require_fit(ctx, arg, v, default_integer(ctx)); ctx.nodes[n].symbol = -25; }
         else { if element_type(ctx, v.ty) != integer_type(ctx, 1, true) { error_at(ctx, ctx.nodes[n].token, "abort requires text"); } ctx.nodes[n].symbol = -24; }
@@ -1753,6 +1776,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     while effect >= 0 {
         let shrink = ctx.shrinks[ctx.edges[effect].value];
         if !shrink.balanced && !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: call that shrinks within a larger expression"); }
+        ctx.shrink_verb = ctx.symbols[ctx.specializations[spec].symbol].token; ctx.shrink_callee = true;
         check_shrink(ctx, shrink.root, element_type(ctx, ctx.symbols[shrink.root].ty), scope, ctx.nodes[n].token, shrink.balanced, true);
         effect = ctx.edges[effect].next;
     }
@@ -2061,6 +2085,7 @@ fn check_program(ctx: Compiler&, library: bool) {
             while effect >= 0 {
                 let shrink = ctx.shrinks[ctx.edges[effect].value];
                 if !shrink.balanced && !ctx.nodes[call.node].standalone { error_at(ctx, ctx.nodes[call.node].token, "not implemented yet: call that shrinks within a larger expression"); }
+                ctx.shrink_verb = ctx.symbols[ctx.specializations[call.callee].symbol].token; ctx.shrink_callee = true;
                 check_shrink(ctx, shrink.root, element_type(ctx, ctx.symbols[shrink.root].ty), call.scope, ctx.nodes[call.node].token, shrink.balanced, true);
                 effect = ctx.edges[effect].next;
             }
