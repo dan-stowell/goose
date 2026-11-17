@@ -38,6 +38,7 @@ struct Specialization {
 }
 struct CheckedCall { node: i64, scope: i64, callee: i64 }
 struct Shrink { root: i64, balanced: bool }
+struct ShrinkSite { root: i64, element: i64, scope: i64, token: i64, verb: i64 }
 
 // The pseudo-symbol naming one field's storage of a root owner (kind 6).
 fn root_component(ctx: Compiler&, owner: i64, f: i64) -> i64 {
@@ -120,12 +121,24 @@ fn holds_view_of(ctx: Compiler&, ty: i64, element: i64) -> bool {
     ctx.visit++;
     return holds_view_walk(ctx, ty, element, ctx.visit);
 }
+// Whether a value of type outer holds a value of type inner by value: a
+// view of inner may then point into storage of outer elements.
+recursive fn holds_by_value(ctx: Compiler&, outer: i64, inner: i64) -> bool {
+    if outer == inner { return true; }
+    let t = ctx.types[outer];
+    if t.kind == T_ARRAY && t.flags != 3 && t.flags != 4 { return holds_by_value(ctx, t.element, inner); }
+    if t.kind == T_STRUCT {
+        var e = t.first;
+        while e >= 0 { if holds_by_value(ctx, ctx.fielddefs[ctx.edges[e].value].ty, inner) { return true; } e = ctx.edges[e].next; }
+    }
+    return false;
+}
 recursive fn holds_view_walk(ctx: Compiler&, ty: i64, element: i64, visit: i64) -> bool {
     if ctx.types[ty].view_visit == visit { return false; }
     ctx.types[ty].view_visit = visit;
     let t = ctx.types[ty];
-    if t.kind == T_SLICE { return t.element == element; }
-    if t.kind == T_REFERENCE { return t.element == element || ((ctx.types[t.element].kind == T_STRUCT || ctx.types[t.element].kind == T_ENUM) && holds_view_walk(ctx, t.element, element, visit)); }
+    if t.kind == T_SLICE { return t.element == element || (ctx.view_reach && holds_by_value(ctx, element, t.element)); }
+    if t.kind == T_REFERENCE { return t.element == element || (ctx.view_reach && holds_by_value(ctx, element, t.element)) || ((ctx.types[t.element].kind == T_STRUCT || ctx.types[t.element].kind == T_ENUM) && holds_view_walk(ctx, t.element, element, visit)); }
     if t.kind == T_ARRAY { return holds_view_walk(ctx, t.element, element, visit); }
     if t.kind == T_STRUCT {
         var e = t.first;
@@ -207,6 +220,8 @@ fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64,
     for s in ctx.symbols {
         if balanced && at_call { continue; }
         if s.kind != 2 || s.state != 2 || s.ty < 0 || !scope_contains(ctx, s.scope, scope) { continue; }
+        // A global holder of a global array is reported at the shrink itself.
+        if at_call && s.scope == 0 && ctx.symbols[root].scope == 0 { continue; }
         let shape = ctx.types[s.ty];
         let direct_view = (shape.kind == T_SLICE || shape.kind == T_REFERENCE) && shape.element == element;
         if (direct_view && s.root == root) || (s.held >= 0 && (!direct_view || contains_view(ctx, shape.element)) && holds_view_of(ctx, s.ty, element) && root_depth(ctx, s.held) >= root_depth(ctx, root)) {
@@ -235,6 +250,7 @@ fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64,
     }
 }
 fn shrink_array(ctx: Compiler&, array: Value, scope: i64, token: i64, balanced: bool) {
+    if array.root >= 0 && !balanced { ctx.shrink_sites.push(ShrinkSite { root: array.root, element: element_type(ctx, array.ty), scope: scope, token: token, verb: ctx.shrink_verb }); }
     if ctx.types[array.ty].flags == 2 { return; }
     let element = element_type(ctx, array.ty);
     check_shrink(ctx, array.root, element, scope, token, balanced, false);
@@ -1503,7 +1519,13 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
         if shift { if ctx.types[dest.ty].kind != T_INTEGER || ctx.types[decay(ctx, rhs).ty].kind != T_INTEGER { error_at(ctx, x.token, "integer shift operands required"); } }
         else { require_fit(ctx, x.b, rhs, dest.ty); }
         if rhs.place >= 0 || ctx.types[rhs.ty].kind == T_REFERENCE { reject_self_link_copy(ctx, dest.ty, ctx.nodes[x.b].token, ""); }
-        store_lifetime(ctx, received(ctx, rhs, dest.ty), if direct { dest.place } else { dest.root }, x.token);
+        // A view stored in a field or element is held by the container.
+        var container = dest.root;
+        if (ctx.nodes[x.a].tag == N_MEMBER || ctx.nodes[x.a].tag == N_INDEX) && ctx.types[raw.ty].kind != T_REFERENCE {
+            let owner = decay(ctx, value_of(ctx, ctx.nodes[x.a].a)).root;
+            if owner >= 0 && ctx.symbols[owner].scope == 0 { container = owner; }
+        }
+        store_lifetime(ctx, received(ctx, rhs, dest.ty), if direct { dest.place } else { container }, x.token);
         if direct && ctx.types[dest.ty].kind == T_SLICE && root_depth(ctx, rhs.root) >= root_depth(ctx, ctx.symbols[dest.place].root) { ctx.symbols[dest.place].root = rhs.root; }
         if direct { ctx.symbols[dest.place].growshrink = ctx.symbols[dest.place].growshrink || rhs.growshrink; }
     } else if ctx.types[dest.ty].kind != T_INTEGER { error_at(ctx, x.token, "increment requires an integer"); }
@@ -2076,6 +2098,17 @@ fn check_program(ctx: Compiler&, library: bool) {
     }
     // Replay after bodies have closed, including recursive back edges whose
     // eventual shrink effects were not known on the first traversal.
+    // Globals are live everywhere, so a global holding a view of a shrunk
+    // array is an error at the shrink wherever the store is.
+    ctx.view_reach = true;
+    for site in ctx.shrink_sites {
+        for s in ctx.symbols {
+            if s.kind == 2 && s.scope == 0 && s.state == 2 && s.ty >= 0 && s.held >= 0 && holds_view_of(ctx, s.ty, site.element) && root_depth(ctx, s.held) >= root_depth(ctx, site.root) && s.held == site.root {
+                error_at(ctx, site.token, str("cannot ", ctx.tokens[site.verb].text, " ", root_name(ctx, site.root), ": global ", ctx.tokens[s.token].text, " may hold a reference into it"));
+            }
+        }
+    }
+    ctx.view_reach = false;
     var changed = true;
     while changed {
         let before = ctx.effect_revision;

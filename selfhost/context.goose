@@ -15,11 +15,13 @@ struct Compiler {
     function_instances: FunctionInstance[>..]&,
     checked_calls: CheckedCall[>..]&,
     shrinks: Shrink[>..]&,
+    shrink_sites: ShrinkSite[>..]&,
     effect_revision: i64 = 0,
     flow: i64 = -1,
     const_scope: i64 = 0,
     const_what: i64 = 0,
     root_site: i64 = -1,
+    view_reach: bool = false,
     shrink_verb: i64 = 0,
     shrink_callee: bool = false,
     visit: i64 = 0,
@@ -96,6 +98,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
     var owned_function_instances: FunctionInstance[>..] = [];
     var owned_checked_calls: CheckedCall[>..] = [];
     var owned_shrinks: Shrink[>..] = [];
+    var owned_shrink_sites: ShrinkSite[>..] = [];
     var owned_specializations: Specialization[>..] = [];
     var owned_global_order: i64[>..] = [];
     var owned_c_output: u8[>..] = [];
@@ -135,6 +138,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
         function_instances: owned_function_instances,
         checked_calls: owned_checked_calls,
         shrinks: owned_shrinks,
+        shrink_sites: owned_shrink_sites,
         specializations: owned_specializations,
         global_order: owned_global_order,
         c_output: owned_c_output,
