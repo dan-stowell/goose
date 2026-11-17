@@ -444,6 +444,12 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     else if tag == N_STRING { v.ty = slice_type(ctx, integer_type(ctx, 1, true), true); v.readonly = true; }
     else if tag == N_NAME {
         let s = lookup(ctx, n, scope, 2);
+        let nearest = nearest_declaration(ctx, n, scope);
+        if nearest >= 0 && ctx.symbols[nearest].kind == 1 && (s < 0 || ctx.scopes[ctx.symbols[s].scope].depth < ctx.scopes[ctx.symbols[nearest].scope].depth) {
+            var text: u8[>..] = [];
+            format(text, "type parameter ", ctx.tokens[x.token].text, " is bound to the type "); type_text(ctx, ctx.symbols[nearest].ty, text); text.append(", not a value");
+            error_at(ctx, x.token, text);
+        }
         if s < 0 { error_at(ctx, x.token, str("unknown variable '", ctx.tokens[x.token].text, "'")); }
         if ctx.symbols[s].state != 2 { error_at(ctx, x.token, "variable read before initialization"); }
         if ctx.symbols[s].flags & 128 != 0 { error_at(ctx, x.token, str("the element type of ", ctx.tokens[x.token].text, " is not fixed yet: push, append or format into it first")); }
@@ -1023,6 +1029,7 @@ recursive fn check_array(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
     if x.tag == N_FILL {
         let a = decay(ctx, check_expression(ctx, x.a, scope, element));
         if element < 0 { element = a.ty; } else { require_fit(ctx, x.a, a, element); }
+        check_constant_names(ctx, x.b, scope, "array fill count");
         count = constant_integer(ctx, x.b) as i64; root = a.root;
     } else {
         var e = x.first;
@@ -1101,9 +1108,11 @@ recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
             var i = defaults.len;
             while i > 0 && defaults[i - 1] != -1 {
                 i--;
-                if defaults[i] == -2 - field {
+                // Instantiations of one declaration share its field tokens: each round
+                // of a growing type takes the same default again.
+                if defaults[i] < -1 && ctx.fielddefs[-2 - defaults[i]].token == ctx.fielddefs[field].token {
                     var text: u8[>..] = [];
-                    format(text, "the default of field ", ctx.tokens[ctx.fielddefs[field].token].text, " of "); type_text(ctx, field_owner(ctx, field), text);
+                    format(text, "the default of field ", ctx.tokens[ctx.fielddefs[field].token].text, " of "); type_text(ctx, field_owner(ctx, -2 - defaults[i]), text);
                     text.append(" leads to this construction of "); type_text(ctx, ty, text); text.append(", which takes it again");
                     error_at(ctx, ctx.nodes[n].token, text);
                 }
@@ -1563,6 +1572,10 @@ fn in_generic_code(ctx: Compiler&) -> bool {
 recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.nodes[n].first >= 0 { check_receiving(ctx, n, scope, false); return; }
     let x = ctx.nodes[n];
+    if ctx.nodes[x.a].tag == N_NAME {
+        let nearest = nearest_declaration(ctx, x.a, scope);
+        if nearest >= 0 && ctx.symbols[nearest].kind != 2 { error_at(ctx, ctx.nodes[x.a].token, str(ctx.tokens[ctx.nodes[x.a].token].text, " names ", declaration_kind(ctx, nearest, scope), ", not a variable")); }
+    }
     if ctx.tokens[x.token].text == ".=" && ctx.nodes[n].flags & 1024 == 0 {
         // In generic code .= on a value slot assigns as = does (spec 3.8).
         let raw = check_expression(ctx, x.a, scope, -1);
@@ -1841,6 +1854,9 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         return Value { ty: intern_type(ctx, Type { kind: T_BOTTOM }) };
     }
     if member {
+        let named = node(ctx, N_NAME, ctx.nodes[callee].token);
+        let nearest = nearest_declaration(ctx, named, scope);
+        if nearest >= 0 && ctx.symbols[nearest].kind == 3 && ctx.symbols[nearest].decl == -2 { error_at(ctx, ctx.nodes[callee].token, str("type parameter ", name, " is bound to a function value, which is called as ", name, "(...), not as a member")); }
         // Lower UFCS once to a normal call. The receiver stays first, so both
         // type checking and generated evaluation keep source argument order.
         let function = node(ctx, N_NAME, ctx.nodes[callee].token);
@@ -1854,6 +1870,13 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         return check_call(ctx, n, scope);
     }
     split_function_values(ctx, n, scope);
+    let nearest = nearest_declaration(ctx, callee, scope);
+    if nearest >= 0 && ctx.symbols[nearest].kind == 1 {
+        let tp = ctx.tokens[ctx.nodes[callee].token].text;
+        var text: u8[>..] = [];
+        format(text, "type parameter ", tp, " is bound to the type "); type_text(ctx, ctx.symbols[nearest].ty, text); text.append(", not a function");
+        error_at(ctx, ctx.nodes[callee].token, text);
+    }
     var s = lookup(ctx, callee, scope, 3);
     if s < 0 { error_at(ctx, ctx.nodes[callee].token, str("unknown function '", name, "'")); }
     var is_block = false;
@@ -2184,6 +2207,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         }
         ctx.nodes[param].symbol = s; p = ctx.edges[p].next;
     }
+    if ctx.nodes[decl].b >= 0 { var re = ctx.nodes[ctx.nodes[decl].b].first; while re >= 0 { check_type_constants(ctx, ctx.edges[re].value, scope); re = ctx.edges[re].next; } }
     if ctx.nodes[decl].flags & 2 == 0 {
         let previous = ctx.checking_function; let previous_loop = ctx.loop_depth; let previous_breaks = ctx.loop_breaks; let previous_target = ctx.break_target;
         ctx.checking_function = id; ctx.loop_depth = 0; ctx.loop_breaks = 0; ctx.break_target = -1;

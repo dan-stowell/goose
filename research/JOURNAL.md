@@ -58,3 +58,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 selfhost prints floats shortest for their type (mined from gap-float-text 3837407b), computes literal-like floats at the f32 they adapt to, and builds array literals viewed as slices in a temporary (run 33->42)
 - 2026-11-17 selfhost tracks how exactly a constant is known (exact, joined range, or adapting with unknown value: 1 << k, ~c, literal params) and computes an adapting integer expression at the type it adapts to (run 42->43; 61 std fixtures pass against patched std)
 - 2026-11-17 feat-stdlib rebased onto master (storage, enums, emit-dedup): std checks; stdlib 12/17, run 131/776, reject 49
+- 2026-11-17 selfhost resolves names lexically for constant positions, values, calls and assignments (type parameters, nested functions, locals hide globals) and bounds a growing type's field-default cycle (reject 49->84, accepted 294->260)

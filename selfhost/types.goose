@@ -257,6 +257,54 @@ fn register_declarations(ctx: Compiler&) {
     }
 }
 
+// The innermost non-global declaration of n's name, of any kind, following a
+// default's redirect to its declaration's scope as lookup does; -1 if the
+// name is the globals' alone.
+fn nearest_declaration(ctx: Compiler&, n: i64, scope: i64) -> i64 {
+    if ctx.nodes[n].flags & 1 != 0 { return -1; }
+    var s = scope; var outside = false;
+    while s > 0 {
+        if s == ctx.default_floor && !outside { outside = true; s = ctx.default_scope; continue; }
+        for kind in [2, 3, 1] {
+            let id = find_symbol(ctx, ctx.nodes[n].token, -1, s, kind);
+            if id >= 0 && (kind != 1 || ctx.symbols[id].decl < 0) { return id; }
+        }
+        s = ctx.scopes[s].parent;
+    }
+    return -1;
+}
+// What a declaration is, as diagnostics name it.
+fn declaration_kind(ctx: Compiler&, id: i64, scope: i64) -> const u8[:] {
+    let s = ctx.symbols[id];
+    if s.kind == 1 { return "a type parameter"; }
+    if s.kind == 3 && s.decl == -2 { return "a function value"; }
+    if s.kind == 3 { return "a nested function"; }
+    // A parameter is one where its signature is resolved; in the body it is
+    // a local variable like any other.
+    if s.decl >= 0 && ctx.nodes[s.decl].tag == N_PARAM && s.scope == scope { return "a parameter"; }
+    return "a local variable";
+}
+// A name in a constant position must name a global constant (3.3, 11.1).
+recursive fn check_constant_names(ctx: Compiler&, n: i64, scope: i64, what: const u8[:]) {
+    if n < 0 { return; }
+    let x = ctx.nodes[n];
+    if x.tag == N_NAME {
+        let d = nearest_declaration(ctx, n, scope);
+        if d >= 0 { error_at(ctx, x.token, str(what, " ", ctx.tokens[x.token].text, " names ", declaration_kind(ctx, d, scope), ", not a constant")); }
+        return;
+    }
+    if x.tag == N_UNARY || x.tag == N_BINARY { check_constant_names(ctx, x.a, scope, what); check_constant_names(ctx, x.b, scope, what); }
+}
+// The constant names of a type written in a signature, once its
+// parameters are declared.
+recursive fn check_type_constants(ctx: Compiler&, n: i64, scope: i64) {
+    if n < 0 { return; }
+    let x = ctx.nodes[n];
+    if x.tag == N_TYPE_ARRAY && x.flags & 15 != 1 && x.b >= 0 && ctx.nodes[x.b].tag != N_TYPE { check_constant_names(ctx, x.b, scope, if x.flags & 15 == 2 { "array capacity" } else { "array size" }); }
+    if x.tag != N_NAME { check_type_constants(ctx, x.a, scope); }
+    var e = x.first;
+    while e >= 0 { check_type_constants(ctx, ctx.edges[e].value, scope); e = ctx.edges[e].next; }
+}
 recursive fn constant_integer(ctx: Compiler&, n: i64) -> u64 {
     let tag = ctx.nodes[n].tag;
     if tag == N_INT { return ctx.tokens[ctx.nodes[n].token].integer; }
@@ -347,6 +395,7 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
                 if width == "u8" { count = 1; } else if width == "u16" { count = 2; } else if width == "u64" { count = 8; } else if width == "varint" { count = 0; }
             }
         } else if syntax.b >= 0 && ctx.nodes[syntax.b].tag != N_TYPE {
+            check_constant_names(ctx, syntax.b, scope, if syntax.flags & 15 == 2 { "array capacity" } else { "array size" });
             let value = constant_integer(ctx, syntax.b);
             if value > 281474976710656 { error_at(ctx, syntax.token, "array size is negative or exceeds the 48-bit limit"); }
             count = value as i64;
