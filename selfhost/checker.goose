@@ -446,6 +446,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         let s = lookup(ctx, n, scope, 2);
         if s < 0 { error_at(ctx, x.token, str("unknown variable '", ctx.tokens[x.token].text, "'")); }
         if ctx.symbols[s].state != 2 { error_at(ctx, x.token, "variable read before initialization"); }
+        if ctx.symbols[s].flags & 128 != 0 { error_at(ctx, x.token, str("the element type of ", ctx.tokens[x.token].text, " is not fixed yet: push, append or format into it first")); }
         ctx.nodes[n].symbol = s;
         v.ty = ctx.symbols[s].ty; v.place = s; v.root = s;
         v.held = ctx.symbols[s].held;
@@ -1141,6 +1142,7 @@ fn type_default_value(ctx: Compiler&, ty: i64, token: i64) -> i64 {
 recursive fn check_block(ctx: Compiler&, n: i64, parent: i64, expected: i64) -> Value {
     let scope = scope_new(ctx, parent, ctx.checking_function);
     ctx.nodes[n].symbol = scope;
+    let first_symbol = ctx.symbols.len;
     var declaration = ctx.nodes[n].first;
     while declaration >= 0 {
         let d = ctx.edges[declaration].value;
@@ -1153,6 +1155,9 @@ recursive fn check_block(ctx: Compiler&, n: i64, parent: i64, expected: i64) -> 
     var result = Value {};
     if ctx.nodes[n].a >= 0 { result = check_expression(ctx, ctx.nodes[n].a, scope, expected); }
     else if terminated { result.ty = intern_type(ctx, Type { kind: T_BOTTOM }); }
+    for i in first_symbol..ctx.symbols.len {
+        if ctx.symbols[i].scope == scope && ctx.symbols[i].kind == 2 && ctx.symbols[i].flags & 128 != 0 { error_at(ctx, ctx.symbols[i].token, str("the element type of ", ctx.tokens[ctx.symbols[i].token].text, " is never fixed: push, append or format into it")); }
+    }
     if contains_view(ctx, result.ty) && content_root(ctx, result) >= 0 && scope_contains(ctx, scope, ctx.symbols[content_root(ctx, result)].scope) { error_at(ctx, ctx.nodes[n].token, "block result refers to a local or temporary that has ended"); }
     return result;
 }
@@ -1280,6 +1285,21 @@ recursive fn check_receiving(ctx: Compiler&, n: i64, scope: i64, binding: bool) 
     }
 }
 
+// The pending var array a receiver names, if any.
+fn pending_array(ctx: Compiler&, n: i64, scope: i64) -> i64 {
+    if ctx.nodes[n].tag != N_NAME { return -1; }
+    let s = lookup(ctx, n, scope, 2);
+    if s >= 0 && ctx.symbols[s].flags & 128 != 0 { return s; }
+    return -1;
+}
+// Fixes a pending array's element type: the [] initializer is annotated now.
+fn fix_pending(ctx: Compiler&, s: i64, element: i64, token: i64) {
+    let ty = array_type(ctx, element, 3, -1);
+    if ty < 0 { error_at(ctx, token, "array element size class is not permitted"); }
+    ctx.symbols[s].ty = ty; ctx.symbols[s].flags &= ~128;
+    let init = first_child(ctx, ctx.nodes[ctx.symbols[s].decl].b);
+    annotate(ctx, init, Value { ty: ty });
+}
 recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     if child_count(ctx, n) > 1 { check_receiving(ctx, n, scope, true); return; }
     if child_count(ctx, ctx.nodes[n].b) > 1 { error_at(ctx, ctx.nodes[n].token, "a binding needs one initializer"); }
@@ -1303,6 +1323,10 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     if init < 0 {
         if declared < 0 { error_at(ctx, ctx.nodes[n].token, "uninitialized variable needs a type"); }
         ctx.symbols[s].ty = declared; return;
+    }
+    if declared < 0 && ctx.nodes[n].flags & 1 != 0 && scope != 0 && ctx.nodes[init].tag == N_ARRAY && ctx.nodes[init].first < 0 {
+        ctx.symbols[s].flags |= 128; ctx.symbols[s].state = 2; ctx.symbols[s].root = -1;
+        return;
     }
     let raw = if synthesized { value_of(ctx, init) } else { check_expression(ctx, init, scope, declared) };
     if ctx.types[raw.ty].kind == T_BOTTOM || raw.ty == 0 { error_at(ctx, ctx.nodes[init].token, "initializer has no value"); }
@@ -1691,6 +1715,17 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let name = ctx.tokens[ctx.nodes[callee].token].text;
     var receiver = Value {};
     let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" || name == "check_length" || name == "index_of" || name == "range_index");
+    if array_method && (name == "push" || name == "append") && child_count(ctx, n) == 1 {
+        let pending = pending_array(ctx, ctx.nodes[callee].a, scope);
+        if pending >= 0 {
+            let arg = first_child(ctx, n); let v = decay(ctx, check_expression(ctx, arg, scope, -1));
+            var element = v.ty;
+            if name == "append" { element = element_type(ctx, v.ty); if element < 0 { error_at(ctx, ctx.nodes[arg].token, "append takes an array or slice"); } }
+            else if ctx.types[v.ty].size_class > 0 { error_at(ctx, ctx.nodes[arg].token, "not implemented yet: a variable-size first push into var x = []"); }
+            fix_pending(ctx, pending, element, ctx.nodes[n].token);
+            ctx.nodes[n].flags |= 8192;
+        }
+    }
     if array_method { receiver = check_expression(ctx, ctx.nodes[callee].a, scope, -1); }
     // Builtin arguments are checked with their construction destination.
     if member && element_type(ctx, receiver.ty) >= 0 {
@@ -1726,12 +1761,12 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             var e = ctx.nodes[n].first;
             if name == "push" {
                 if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "push takes one element"); }
-                let arg = ctx.edges[e].value; let v = check_expression(ctx, arg, scope, element); require_fit(ctx, arg, v, element); store_in_array(ctx, received(ctx, v, element), array, scope, ctx.nodes[n].token);
+                let arg = ctx.edges[e].value; let v = if ctx.nodes[n].flags & 8192 != 0 { value_of(ctx, arg) } else { check_expression(ctx, arg, scope, element) }; require_fit(ctx, arg, v, element); store_in_array(ctx, received(ctx, v, element), array, scope, ctx.nodes[n].token);
                 ctx.nodes[n].symbol = -10; return Value { ty: reference_type(ctx, element, false), root: array.root, place: array.place };
             }
             if name == "append" {
                 if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "append takes one array or slice"); }
-                let arg = ctx.edges[e].value; let v = decay(ctx, check_expression(ctx, arg, scope, array_type(ctx, element, 3, -1)));
+                let arg = ctx.edges[e].value; let v = decay(ctx, if ctx.nodes[n].flags & 8192 != 0 { value_of(ctx, arg) } else { check_expression(ctx, arg, scope, array_type(ctx, element, 3, -1)) });
                 if element_type(ctx, v.ty) != element { error_at(ctx, ctx.nodes[arg].token, "append element type mismatch"); }
                 if holds_self_link(ctx, element) {
                     var what: u8[>..] = []; what.append(".append copies the elements of "); what.append(source_text(ctx, arg)); what.append(": ");
@@ -1764,6 +1799,8 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         var e = ctx.nodes[n].first;
         if name == "format" {
             if e < 0 { error_at(ctx, ctx.nodes[n].token, "format needs a destination"); }
+            let pending = pending_array(ctx, ctx.edges[e].value, scope);
+            if pending >= 0 { fix_pending(ctx, pending, integer_type(ctx, 1, true), ctx.nodes[n].token); }
             let out = decay(ctx, check_expression(ctx, ctx.edges[e].value, scope, -1));
             if element_type(ctx, out.ty) != integer_type(ctx, 1, true) || out.readonly { error_at(ctx, ctx.nodes[n].token, "format needs a writable byte builder"); }
             e = ctx.edges[e].next;
