@@ -62,6 +62,9 @@ struct Symbol {
     growshrink: bool = false,
     inexact: bool = false,
     capture_limit: i64 = -1,
+    // A literal parameter's (flag 64) adaptations: edges whose value is a
+    // type id << 32 | the token where the parameter adapted to it.
+    adapted: i64 = -1,
 }
 
 

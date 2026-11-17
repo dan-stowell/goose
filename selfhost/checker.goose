@@ -274,11 +274,19 @@ fn fits(ctx: Compiler&, v: Value, target: i64) -> bool {
     if a.kind == T_REFERENCE { return fits_plain(ctx, decay(ctx, v), target); }
     return fits_plain(ctx, v, target);
 }
+fn literal_parameter(ctx: Compiler&, v: Value) -> bool { return v.known && v.place >= 0 && ctx.symbols[v.place].kind == 2 && ctx.symbols[v.place].flags & 64 != 0; }
+fn record_adaptation(ctx: Compiler&, s: i64, ty: i64, token: i64) {
+    var e = ctx.symbols[s].adapted;
+    while e >= 0 { if ctx.edges[e].value >> 32 == ty { return; } e = ctx.edges[e].next; }
+    let edge = ctx.edges.len; ctx.edges.push(Edge { value: ty << 32 | token, next: ctx.symbols[s].adapted });
+    ctx.symbols[s].adapted = edge;
+}
 fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
     let a = ctx.types[v.ty]; let b = ctx.types[target];
     if v.ty == target { return true; }
     // A variant value constructs its enum; the tag is static.
     if adapts_enum(ctx, v.ty, target) { return true; }
+    if literal_parameter(ctx, v) && a.kind == T_INTEGER && b.kind == T_INTEGER { record_adaptation(ctx, v.place, target, ctx.symbols[v.place].token); }
     if a.kind == T_INTEGER && b.kind == T_INTEGER {
         if v.known { return constant_fits(ctx, a, v.bits, b, target) && constant_fits(ctx, a, v.alt, b, target); }
         return (a.flags & 2 == b.flags & 2 && a.bytes <= b.bytes) || (a.flags & 2 != 0 && b.flags & 2 == 0 && a.bytes < b.bytes);
@@ -381,6 +389,7 @@ fn fold_integer(ctx: Compiler&, op: const u8[:], a: u64, b: u64, signed: bool, t
 // local or global (6.3), adapt at each use as their initializer would.
 fn adapts_as_constant(ctx: Compiler&, s: i64) -> bool {
     let symbol = ctx.symbols[s];
+    if symbol.kind == 2 && symbol.flags & 64 != 0 { return true; }
     if !symbol.known || symbol.kind != 2 || symbol.flags & 1 != 0 || symbol.decl < 0 { return false; }
     let decl = ctx.nodes[symbol.decl];
     if decl.tag != N_BIND || decl.a >= 0 { return false; }
@@ -476,6 +485,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             }
             if ctx.types[common].kind == T_FLOAT && (ctx.types[a.ty].kind != T_FLOAT || a.known) && (ctx.types[b.ty].kind != T_FLOAT || b.known) { v.known = true; }
             if op == "<" || op == "<=" || op == ">" || op == ">=" { v.ty = boolean_type(ctx); v.known = false; }
+            if literal_parameter(ctx, a) || literal_parameter(ctx, b) { v.known = false; v.alt = 0; }
         }
     } else if tag == N_CAST {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1)); v.ty = resolve_type(ctx, x.b, scope);
@@ -1456,6 +1466,17 @@ recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
     ctx.flow = fact_kill(ctx, ctx.flow, x.a, 0);
     if non_null(ctx, rhs) { ctx.flow = fact_add(ctx, ctx.flow, x.a); }
 }
+// The body of a function with type or untyped parameters, and the nested
+// functions written in one.
+fn in_generic_code(ctx: Compiler&) -> bool {
+    var f = ctx.checking_function;
+    while f >= 0 {
+        let s = ctx.specializations[f].symbol;
+        if ctx.symbols[s].kind == 5 { return true; }
+        f = ctx.scopes[ctx.symbols[s].scope].function;
+    }
+    return false;
+}
 recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.nodes[n].first >= 0 { check_receiving(ctx, n, scope, false); return; }
     let x = ctx.nodes[n];
@@ -1978,6 +1999,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
     while p >= 0 {
         let param = ctx.edges[p].value;
         let s = register_symbol(ctx, ctx.nodes[param].token, -1, 2, param, scope, ctx.nodes[param].flags);
+        if ctx.nodes[param].flags & 64 != 0 { ctx.symbols[s].known = true; }
         let ty = resolve_type(ctx, ctx.nodes[param].a, scope); ctx.symbols[s].ty = ty; ctx.symbols[s].state = 2;
         ctx.symbols[s].readonly = syntax_readonly(ctx, ctx.nodes[param].a, scope);
         if actual >= 0 {
@@ -2067,6 +2089,7 @@ fn check_program(ctx: Compiler&, library: bool) {
         changed = ctx.effect_revision != before;
     }
     ctx.checking_function = -1;
+    verify_literals(ctx);
     call_cycles(ctx);
     for call in ctx.checked_calls {
         let caller = ctx.scopes[call.scope].function;
@@ -2074,6 +2097,51 @@ fn check_program(ctx: Compiler&, library: bool) {
             for local in ctx.symbols {
                 if local.kind == 2 && local.ty >= 0 && ctx.scopes[local.scope].function == caller && ctx.types[local.ty].size_class > 0 && scope_contains(ctx, local.scope, call.scope) { error_at(ctx, ctx.nodes[call.node].token, "call into a recursive cycle while nonfixed local is in scope"); }
             }
+        }
+    }
+}
+fn verify_literals(ctx: Compiler&) {
+    var changed = true;
+    while changed {
+        changed = false;
+        for call in ctx.checked_calls {
+            var e = ctx.nodes[call.node].first; var p = ctx.nodes[ctx.specializations[call.callee].parameters].first;
+            while e >= 0 && p >= 0 {
+                let v = value_of(ctx, ctx.edges[e].value); let q = ctx.nodes[ctx.edges[p].value].symbol;
+                if literal_parameter(ctx, v) && ctx.symbols[q].flags & 64 != 0 {
+                    var r = ctx.symbols[q].adapted;
+                    while r >= 0 {
+                        let before = ctx.symbols[v.place].adapted;
+                        record_adaptation(ctx, v.place, ctx.edges[r].value >> 32, ctx.edges[r].value & 4294967295);
+                        if ctx.symbols[v.place].adapted != before { changed = true; }
+                        r = ctx.edges[r].next;
+                    }
+                }
+                e = ctx.edges[e].next; p = ctx.edges[p].next;
+            }
+        }
+    }
+    for call in ctx.checked_calls {
+        var e = ctx.nodes[call.node].first; var p = ctx.nodes[ctx.specializations[call.callee].parameters].first; var index = 1;
+        while e >= 0 && p >= 0 {
+            let arg = ctx.edges[e].value; let v = value_of(ctx, arg); let q = ctx.nodes[ctx.edges[p].value].symbol;
+            if v.known && !literal_parameter(ctx, v) && ctx.symbols[q].flags & 64 != 0 && ctx.types[v.ty].kind == T_INTEGER {
+                var r = ctx.symbols[q].adapted;
+                while r >= 0 {
+                    let target = ctx.edges[r].value >> 32; let at = ctx.edges[r].value & 4294967295;
+                    if !fits_plain(ctx, v, target) {
+                        let name = ctx.tokens[ctx.symbols[ctx.specializations[call.callee].symbol].token].text;
+                        var text: u8[>..] = [];
+                        format(text, "argument ", index, " of ", name, ": constant ");
+                        if ctx.types[v.ty].flags & 2 == 0 { format(text, v.bits as! i64); } else { format(text, v.bits); }
+                        text.append(" does not fit "); type_text(ctx, target, text);
+                        format(text, ", which parameter ", ctx.tokens[ctx.symbols[q].token].text, " takes at ", ctx.sources[ctx.tokens[at].file].path, ":", ctx.tokens[at].line, " (§7.7)");
+                        error_at(ctx, ctx.nodes[arg].token, text);
+                    }
+                    r = ctx.edges[r].next;
+                }
+            }
+            e = ctx.edges[e].next; p = ctx.edges[p].next; index++;
         }
     }
 }

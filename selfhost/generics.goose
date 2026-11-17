@@ -101,20 +101,35 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
     }
     ctx.nodes[call].flags |= 512;
     // Nonliteral values constrain a shared type before adaptable literals do.
+    var literals = -1; var literal_last = -1;
     for pass in 2 {
         p = ctx.nodes[ctx.nodes[specialized].a].first; a = ctx.nodes[call].first;
+        var index = 0;
         while p >= 0 && a >= 0 {
+            let param = ctx.edges[p].value;
             let value = value_of(ctx, ctx.edges[a].value);
-            if (pass == 1) == value.known { infer_type_pattern(ctx, ctx.nodes[ctx.edges[p].value].a, natural_argument_type(ctx, value), bindings); }
-            p = ctx.edges[p].next; a = ctx.edges[a].next;
+            if pass == 1 && value.known && ctx.nodes[param].flags & 1 == 0 && numeric(ctx, value.ty) {
+                let pattern = ctx.nodes[param].a;
+                let s = lookup(ctx, pattern, bindings, 1);
+                if ctx.nodes[pattern].tag == N_TYPE && ctx.nodes[pattern].first < 0 && s >= 0 && ctx.symbols[s].decl < 0 && ctx.symbols[s].scope == bindings && (ctx.symbols[s].ty < 0 || ctx.symbols[s].flags & 64 != 0) {
+                    ctx.symbols[s].flags |= 64;
+                    let edge = ctx.edges.len; ctx.edges.push(Edge { value: -2 - index });
+                    if literal_last < 0 { literals = edge; } else { ctx.edges[literal_last].next = edge; } literal_last = edge;
+                }
+            }
+            if (pass == 1) == value.known { infer_type_pattern(ctx, ctx.nodes[param].a, natural_argument_type(ctx, value), bindings); }
+            p = ctx.edges[p].next; a = ctx.edges[a].next; index++;
         }
     }
     var e = key;
     while e >= 0 {
         let s = ctx.edges[e].value;
         if ctx.symbols[s].ty < 0 { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, str("cannot infer type parameter '", ctx.tokens[ctx.symbols[s].token].text, "'")); }
-        ctx.edges[e].value = ctx.symbols[s].ty; e = ctx.edges[e].next;
+        ctx.edges[e].value = ctx.symbols[s].ty;
+        if ctx.edges[e].next < 0 { ctx.edges[e].next = literals; break; }
+        e = ctx.edges[e].next;
     }
+    if key < 0 { key = literals; }
     for instance in ctx.function_instances {
         if instance.template == symbol && same_type_arguments(ctx, instance.arguments, key) { return instance.symbol; }
     }
@@ -123,6 +138,13 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
     let concrete = register_symbol(ctx, original.token, original.ns, 5, specialized, bindings, original.flags);
     ctx.symbols[concrete].state = 2; ctx.symbols[concrete].capture_limit = original.capture_limit;
     ctx.function_instances.push(FunctionInstance { template: symbol, arguments: key, symbol: concrete });
+    e = literals;
+    while e >= 0 {
+        var q = ctx.nodes[ctx.nodes[specialized].a].first;
+        for i in -2 - ctx.edges[e].value { q = ctx.edges[q].next; }
+        ctx.nodes[ctx.edges[q].value].flags |= 64;
+        e = ctx.edges[e].next;
+    }
     return concrete;
 }
 
