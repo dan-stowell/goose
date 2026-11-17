@@ -1,9 +1,14 @@
+binary
+csv
+dictionary
 exception
 ffi
 mat
 math
+os
 quat
 slice_pool
 slice_pool_internal
 slot_pool
+std
 vec

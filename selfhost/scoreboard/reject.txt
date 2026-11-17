@@ -40,6 +40,8 @@ errors_tc/later_break_implicit_copy
 errors_tc/lexical_name_nested_fn_pattern
 errors_tc/lexical_name_type_param_pattern
 errors_tc/loop_value_implicit_copy
+errors_tc/literal_param_flow
+errors_tc/literal_param_range
 errors_tc/match_constant_binder
 errors_tc/match_constant_local
 errors_tc/match_constant_var_global

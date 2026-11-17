@@ -573,8 +573,7 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
         return;
     }
     let v = c_expression(ctx, n);
-    if dest.ty == 0 || v.ty == 0 || ctx.types[v.ty].kind == T_BOTTOM || (x.ty >= 0 && ctx.types[x.ty].kind == T_BOTTOM) { if v.code.len > 0 { emit(ctx, str("  (void)(", v.code, ");
-")); } return; }
+    if dest.ty == 0 || v.ty == 0 || ctx.types[v.ty].kind == T_BOTTOM || (x.ty >= 0 && ctx.types[x.ty].kind == T_BOTTOM) { if v.code.len > 0 { emit(ctx, str("  (void)(", v.code, ");\n")); } return; }
     if ctx.types[dest.ty].size_class == 2 {
         if ctx.c_function >= 0 && x.tag == N_NAME && x.symbol == ctx.return_locals[ctx.c_function] { return; }
         let elem = element_type(ctx, dest.ty);
