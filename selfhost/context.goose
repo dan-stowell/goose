@@ -25,6 +25,8 @@ struct Compiler {
     default_decl: i64 = -1,
     default_param: i64 = -1,
     loop_depth: i64 = 0,
+    // Breaks seen in the innermost loop or block being checked.
+    loop_breaks: i64 = 0,
     global_order: i64[>..]&,
     c_output: u8[>..]&,
     c_declarations: u8[>..]&,

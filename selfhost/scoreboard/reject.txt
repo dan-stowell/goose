@@ -1,4 +1,11 @@
+errors/checkfree_extern
 errors/double_optional
+errors/extern_simd
+errors/inline_export
+errors/inline_extern
+errors/inline_recursive
+errors/inline_simd
+errors/inline_thread
 errors/param_default_not_trailing
 errors/param_default_untyped
 errors_tc/constant_division_overflow

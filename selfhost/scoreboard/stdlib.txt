@@ -1,2 +1,6 @@
 ffi
+mat
+math
+quat
 slice_pool_internal
+vec

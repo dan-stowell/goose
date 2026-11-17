@@ -197,6 +197,8 @@ fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
         return (a.flags & 2 == b.flags & 2 && a.bytes <= b.bytes) || (a.flags & 2 != 0 && b.flags & 2 == 0 && a.bytes < b.bytes);
     }
     if a.kind == T_FLOAT && b.kind == T_FLOAT { return a.bytes <= b.bytes || v.known; }
+    // Every integer becomes a float implicitly, rounding to the nearest (§6.3).
+    if a.kind == T_INTEGER && b.kind == T_FLOAT { return true; }
     if (a.kind == T_ARRAY || a.kind == T_SLICE) && (b.kind == T_ARRAY || b.kind == T_SLICE) && a.element == b.element {
         if b.kind == T_SLICE { return !v.readonly || b.flags & 1 != 0; }
         if b.flags == 0 { return a.kind == T_ARRAY && a.flags == 0 && a.count == b.count; }
@@ -211,6 +213,9 @@ fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
 fn merge_numeric(ctx: Compiler&, a: Value, b: Value, token: i64) -> i64 {
     if !numeric(ctx, a.ty) || !numeric(ctx, b.ty) { error_at(ctx, token, "numeric operands required"); }
     if a.ty == b.ty { return a.ty; }
+    // An integer meeting a float becomes that float, a literal or not.
+    if ctx.types[a.ty].kind == T_INTEGER && ctx.types[b.ty].kind == T_FLOAT { return b.ty; }
+    if ctx.types[a.ty].kind == T_FLOAT && ctx.types[b.ty].kind == T_INTEGER { return a.ty; }
     if a.known && !b.known { if !fits(ctx, a, b.ty) { error_at(ctx, token, "constant operand does not fit the other operand's type"); } return b.ty; }
     if b.known && !a.known { if !fits(ctx, b, a.ty) { error_at(ctx, token, "constant operand does not fit the other operand's type"); } return a.ty; }
     if fits(ctx, a, b.ty) { return b.ty; }
@@ -241,6 +246,16 @@ fn child_count(ctx: Compiler&, n: i64) -> i64 {
     return count;
 }
 
+// A named constant (a global let or const with no written type bound to an
+// integer constant, 3.1) and an untyped let bound to a literal-like float,
+// local or global (6.3), adapt at each use as their initializer would.
+fn adapts_as_constant(ctx: Compiler&, s: i64) -> bool {
+    let symbol = ctx.symbols[s];
+    if !symbol.known || symbol.kind != 2 || symbol.flags & 1 != 0 || symbol.decl < 0 { return false; }
+    let decl = ctx.nodes[symbol.decl];
+    if decl.tag != N_BIND || decl.a >= 0 { return false; }
+    return symbol.scope == 0 || ctx.types[symbol.ty].kind == T_FLOAT;
+}
 recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Value {
     let x = ctx.nodes[n];
     let tag = x.tag;
@@ -261,7 +276,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         v.readonly = ctx.symbols[s].readonly || ctx.symbols[s].flags & 2 != 0 || (ctx.types[v.ty].kind == T_SLICE && ctx.types[v.ty].flags & 1 != 0) || (ctx.types[v.ty].kind == T_REFERENCE && ctx.types[v.ty].flags & 1 != 0);
         v.growshrink = ctx.symbols[s].growshrink;
         v.inexact = ctx.symbols[s].inexact;
-        v.known = false; v.bits = ctx.symbols[s].bits;
+        v.known = adapts_as_constant(ctx, s); v.bits = ctx.symbols[s].bits;
     } else if tag == N_UNARY {
         let operand = check_expression(ctx, x.a, scope, -1);
         let op = ctx.tokens[x.token].text;
@@ -294,13 +309,18 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             require_fit(ctx, x.a, a, common);
             if op != "<<" && op != ">>" { require_fit(ctx, x.b, b, common); }
             v.ty = common;
-            if op == "<" || op == "<=" || op == ">" || op == ">=" { v.ty = boolean_type(ctx); }
+            if ctx.types[common].kind == T_FLOAT && (ctx.types[a.ty].kind != T_FLOAT || a.known) && (ctx.types[b.ty].kind != T_FLOAT || b.known) { v.known = true; }
+            if op == "<" || op == "<=" || op == ">" || op == ">=" { v.ty = boolean_type(ctx); v.known = false; }
         }
     } else if tag == N_CAST {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1)); v.ty = resolve_type(ctx, x.b, scope);
         if !numeric(ctx, a.ty) || !numeric(ctx, v.ty) { error_at(ctx, x.token, "casts require numeric types"); }
-        if ctx.types[a.ty].kind == T_FLOAT && ctx.types[v.ty].kind == T_INTEGER { error_at(ctx, x.token, "not implemented yet: defined wrapping float-to-integer conversion"); }
         v.known = a.known; v.bits = a.bits;
+        if ctx.types[a.ty].kind == T_FLOAT && ctx.types[v.ty].kind == T_INTEGER {
+            if x.flags & 1 == 0 { error_at(ctx, x.token, "not implemented yet: range-checked float-to-integer conversion"); }
+            // A float constant keeps no integer bits to fold.
+            v.known = false; v.bits = 0;
+        }
     } else if tag == N_MEMBER {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1));
         if element_type(ctx, a.ty) >= 0 && (ctx.tokens[x.token].text == "len" || ctx.tokens[x.token].text == "cap") {
@@ -371,6 +391,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
     } else if tag == N_BREAK || tag == N_CONTINUE {
         if ctx.loop_depth == 0 { error_at(ctx, x.token, "loop exit outside a loop or block"); }
+        if tag == N_BREAK { ctx.loop_breaks++; }
         if x.first >= 0 { error_at(ctx, x.token, "not implemented yet: value-producing break"); }
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
     } else if tag == N_EXPR_STMT { let inner = check_expression(ctx, x.a, scope, -1); if ctx.types[inner.ty].kind == T_BOTTOM { v = inner; } }
@@ -684,6 +705,7 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
 recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let x = ctx.nodes[n];
     ctx.loop_depth++;
+    let outer_breaks = ctx.loop_breaks; ctx.loop_breaks = 0;
     if x.tag == N_WHILE { require_fit(ctx, x.a, decay(ctx, check_expression(ctx, x.a, scope, -1)), boolean_type(ctx)); check_expression(ctx, x.b, scope, 0); }
     else if x.tag == N_LOOP || x.tag == N_EARLY { check_expression(ctx, x.a, scope, 0); }
     else {
@@ -710,6 +732,9 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64) -> Value {
         check_expression(ctx, x.c, inner, 0);
     }
     ctx.loop_depth--;
+    // A loop that no break leaves never completes (6.5): it is as a return.
+    let left = ctx.loop_breaks > 0; ctx.loop_breaks = outer_breaks;
+    if x.tag == N_LOOP && !left { return Value { ty: intern_type(ctx, Type { kind: T_BOTTOM }) }; }
     return Value {};
 }
 fn check_return(ctx: Compiler&, n: i64, raw: Value, spec: i64, token: i64) {
@@ -999,15 +1024,15 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         ctx.nodes[param].symbol = s; p = ctx.edges[p].next;
     }
     if ctx.nodes[decl].flags & 2 == 0 {
-        let previous = ctx.checking_function; let previous_loop = ctx.loop_depth;
-        ctx.checking_function = id; ctx.loop_depth = 0;
+        let previous = ctx.checking_function; let previous_loop = ctx.loop_depth; let previous_breaks = ctx.loop_breaks;
+        ctx.checking_function = id; ctx.loop_depth = 0; ctx.loop_breaks = 0;
         // A body declared outside a default may take that default again,
         // which makes it recursive rather than an endless default (§3.2).
         let defaults = ctx.default_stack; let default_mark = defaults.len; defaults.push(-1);
         let tail = check_expression(ctx, body, scope, result);
         if ctx.types[tail.ty].kind != T_BOTTOM { check_return(ctx, ctx.nodes[body].a, tail, id, ctx.nodes[decl].token); }
         defaults.resize(default_mark);
-        ctx.checking_function = previous; ctx.loop_depth = previous_loop;
+        ctx.checking_function = previous; ctx.loop_depth = previous_loop; ctx.loop_breaks = previous_breaks;
     } else if result < 0 { ctx.specializations[id].result = 0; }
     if ctx.specializations[id].result < 0 { ctx.specializations[id].result = 0; }
     if ctx.nodes[first_child(ctx, results)].ty < 0 { ctx.nodes[first_child(ctx, results)].ty = ctx.specializations[id].result; }
