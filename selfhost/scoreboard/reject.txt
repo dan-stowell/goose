@@ -60,6 +60,7 @@ errors_tc/elementwise_scalar_mixed_kind
 errors_tc/elementwise_scalar_mixed_width
 errors_tc/elementwise_scalar_mod
 errors_tc/elementwise_scalar_slice
+errors_tc/field_default_growing
 errors_tc/field_default_mutual
 errors_tc/field_default_param_default
 errors_tc/field_default_variant
