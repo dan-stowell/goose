@@ -35,6 +35,12 @@ with tempfile.TemporaryDirectory(prefix='goose-builtins-') as tmp:
     negatives = {
         'type_arguments': 'var a: i64[>..] = []; print(check_length<i64>(a, 1));',
         'pool_shrink': 'reusable var a: i64[>..] = [1,2]; a.pop_n(1);',
+        'byteview_write': 'var a=[1,2]; let b=bytes_of(a); b[0]=0;',
+        'byteview_loop': 'var a: i64[>..]=[1,2]; let b=bytes_of(a); for i in 2 { print(b); a.clear(); }',
+        'byteview_capture': 'var a: i64[>..]=[1,2]; let b=bytes_of(a); fn read() { print(b); } a.clear(); read();',
+        'byteview_shrink': 'var a: i64[>..]=[1,2]; let b=bytes_of(a); a.clear(); print(b);',
+        'byteview_references': 'var x=1; var a: i64&[1]=[x]; print(bytes_of(a));',
+        'move_readonly': 'let a="abc"; a.move_from("def");',
         'foreign_index': 'var a=[1,2]; var b=[3,4]; print(a.index_of(b[0]));',
         'count_type': 'var a: i64[>..] = []; print(a.check_length(true));',
         'message_type': 'var a: i64[>..] = []; let s="oops"; print(a.check_length(1,s));',

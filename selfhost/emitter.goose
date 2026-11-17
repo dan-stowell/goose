@@ -917,11 +917,6 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         var base = 0; for c, i in path { if c == '/' || c == '\\' { base = i + 1; } }
         return CValue { code: save_text(ctx, str("gg_view((void *)", c_literal(ctx, path[base..]), ", ", path.len - base, ")")), ty: x.ty, address: "", stack: "" };
     }
-    if builtin == -30 {
-        let a = c_decay(ctx, c_expression(ctx, first_child(ctx, n))); let view = raw_temporary(ctx, "gg_slice");
-        emit(ctx, str("  ", view, " = ", c_view(ctx, a), "; ", view, ".len *= sizeof(", c_type(ctx, element_type(ctx, a.ty)), ");\n"));
-        return CValue { code: view, ty: x.ty, address: "", stack: "" };
-    }
     if builtin == -27 {
         let name = temporary(ctx, x.ty); emit(ctx, str("  memset(&", name, ", 0, sizeof(", name, "));\n"));
         return CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };
@@ -953,7 +948,28 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         return no_c_value(ctx);
     }
     if builtin == -40 { return c_dispatch(ctx, n); }
-    if builtin <= -30 && builtin >= -32 {
+    if builtin <= -43 && builtin >= -45 {
+        let e = x.first; let recv = ctx.edges[e].value;
+        let original = c_expression(ctx, recv);
+        let element = element_type(ctx, original.ty);
+        // Freeze the view before evaluating the source, which can rebind it.
+        let view = raw_temporary(ctx, "gg_slice");
+        emit(ctx, str("  ", view, " = ", c_view(ctx, original), ";\n"));
+        if builtin == -45 {
+            let result = temporary(ctx, x.ty);
+            emit(ctx, str("  gg_little_endian();\n  ", result, " = gg_view(", view, ".data, ", view, ".len * sizeof(", c_type(ctx, element), "));\n"));
+            return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
+        }
+        let arg = c_expression(ctx, ctx.edges[ctx.edges[e].next].value);
+        if builtin == -43 {
+            emit(ctx, str("  gg_move_from(", view, ", ", c_view(ctx, arg), ", sizeof(", c_type(ctx, element), "));\n"));
+            return no_c_value(ctx);
+        }
+        let result = temporary(ctx, x.ty);
+        emit(ctx, str("  ", result, " = (int64_t)(((uintptr_t)(", c_reference(ctx, arg), ") - (uintptr_t)", view, ".data) / sizeof(", c_type(ctx, element), "));\n"));
+        return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
+    }
+    if builtin <= -40 && builtin >= -42 {
         var e = x.first;
         let original = c_expression(ctx, ctx.edges[e].value);
         let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, ctx.edges[e].value)).ty, false), address: "", stack: "" });
@@ -963,14 +979,14 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         e = ctx.edges[e].next;
         var message = save_text(ctx, "gg_view(NULL, 0)");
         if e >= 0 { message = c_view(ctx, c_expression(ctx, ctx.edges[e].value)); }
-        if builtin == -32 {
+        if builtin == -42 {
             emit(ctx, str("  gg_pop_n(", c_reference(ctx, array), ", (uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "));\n"));
             return no_c_value(ctx);
         }
         let token = ctx.tokens[x.token];
         let location = c_literal(ctx, str(" (", ctx.sources[token.file].path, ":", token.line, ")"));
         let result = temporary(ctx, x.ty);
-        if builtin == -30 { emit(ctx, str("  ", result, " = gg_check_length((uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
+        if builtin == -40 { emit(ctx, str("  ", result, " = gg_check_length((uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
         else { emit(ctx, str("  ", result, " = gg_range_index(", c_view(ctx, array), ", ", arg.code, ", sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
         return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
     }

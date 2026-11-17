@@ -62,6 +62,7 @@ struct Symbol {
     growshrink: bool = false,
     inexact: bool = false,
     capture_limit: i64 = -1,
+    byteviewed: bool = false,
 }
 
 

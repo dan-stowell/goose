@@ -152,14 +152,29 @@ fn store_in_array(ctx: Compiler&, value: Value, array: Value, scope: i64, token:
         }
     }
 }
+// Existing typed views remain conservatively live to scope exit. Byte views
+// also invalidate on shrink, but a finished local read need not pin storage.
+// Keep captured/global values live: a later call can read them indirectly.
+fn byte_view_live(ctx: Compiler&, symbol: Symbol, token: i64) -> bool {
+    if ctx.loop_depth > 0 || symbol.scope == 0 || ctx.scopes[symbol.scope].function != ctx.checking_function { return true; }
+    for nested in ctx.symbols {
+        if nested.kind == 3 && nested.scope > 0 && scope_contains(ctx, symbol.scope, nested.scope) { return true; }
+    }
+    for t, i in ctx.tokens {
+        if i > token && t.file == ctx.tokens[symbol.token].file && t.text == ctx.tokens[symbol.token].text { return true; }
+    }
+    return false;
+}
 fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64, balanced: bool, at_call: bool) {
     if root < 0 { error_at(ctx, token, "not implemented yet: shrink through an unknown root"); }
     for s in ctx.symbols {
         if balanced && at_call { continue; }
         if s.kind != 2 || s.state != 2 || s.ty < 0 || !scope_contains(ctx, s.scope, scope) { continue; }
         let shape = ctx.types[s.ty];
-        let direct_view = (shape.kind == T_SLICE || shape.kind == T_REFERENCE) && shape.element == element;
-        if (direct_view && s.root == root) || (s.held >= 0 && (!direct_view || contains_view(ctx, shape.element)) && holds_view_of(ctx, s.ty, element) && root_depth(ctx, s.held) >= root_depth(ctx, root)) {
+        let byte_live = ctx.symbols[root].byteviewed && byte_view_live(ctx, s, token);
+        let typed_view = (shape.kind == T_SLICE || shape.kind == T_REFERENCE) && shape.element == element;
+        let direct_view = (shape.kind == T_SLICE || shape.kind == T_REFERENCE) && (shape.element == element || byte_live);
+        if (direct_view && s.root == root) || (s.held >= 0 && (((!typed_view || contains_view(ctx, shape.element)) && holds_view_of(ctx, s.ty, element)) || (byte_live && contains_view(ctx, s.ty))) && root_depth(ctx, s.held) >= root_depth(ctx, root)) {
             error_at(ctx, token, str("shrink may invalidate '", ctx.tokens[s.token].text, "'; this checker conservatively keeps views live to scope exit"));
         }
     }
@@ -1526,6 +1541,23 @@ fn check_result(ctx: Compiler&, n: i64, raw: Value, spec: i64, result: i64, toke
     ctx.nodes[result].inexact = ctx.nodes[result].inexact || v.inexact;
 }
 
+// The current C backend gives empty structs/arrays a padding byte. Do not
+// expose that placeholder as a serialized language value.
+recursive fn image_layout_supported(ctx: Compiler&, ty: i64) -> bool {
+    let t = ctx.types[ty];
+    if t.kind == T_ARRAY { return t.count != 0 && image_layout_supported(ctx, t.element); }
+    if t.kind == T_STRUCT {
+        if t.first < 0 { return false; }
+        var e = t.first;
+        while e >= 0 { if !image_layout_supported(ctx, ctx.fielddefs[ctx.edges[e].value].ty) { return false; } e = ctx.edges[e].next; }
+    }
+    if t.kind == T_ENUM {
+        var e = t.first;
+        while e >= 0 { let vt = ctx.edges[e].value; if ctx.types[vt].first >= 0 && !image_layout_supported(ctx, vt) { return false; } e = ctx.edges[e].next; }
+    }
+    return true;
+}
+
 recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let callee = ctx.nodes[n].a;
     let member = ctx.nodes[callee].tag == N_MEMBER;
@@ -1617,16 +1649,6 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if name == "src_line" { ctx.nodes[n].symbol = -28; return Value { ty: default_integer(ctx), bits: site as u64 }; }
         ctx.nodes[n].symbol = -29; return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), readonly: true, bits: site as u64 };
     }
-    // bytes_of(a): an array's element region as a read-only byte view (12).
-    if !member && name == "bytes_of" && lookup(ctx, callee, scope, 3) < 0 {
-        if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "bytes_of takes one array"); }
-        let arg = first_child(ctx, n); let v = decay(ctx, check_expression(ctx, arg, scope, -1));
-        let t = ctx.types[v.ty];
-        if t.kind != T_ARRAY || (t.flags != 0 && t.flags < 3) { error_at(ctx, ctx.nodes[arg].token, "bytes_of needs a fixed-size or resizable array"); }
-        if ctx.types[t.element].size_class != 0 { error_at(ctx, ctx.nodes[arg].token, "bytes_of needs fixed-size elements"); }
-        ctx.nodes[n].symbol = -30;
-        return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), root: v.root, readonly: true };
-    }
     if !member && (name == "assert" || name == "abort" || name == "exit" || name == "copy" || name == "default") {
         if name == "default" {
             let t = first_child(ctx, callee); if t < 0 { error_at(ctx, ctx.nodes[n].token, "default requires a type argument"); }
@@ -1653,6 +1675,40 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if array_method { ctx.nodes[n].flags |= 256; }
         return check_call(ctx, n, scope);
     }
+    if name == "move_from" || name == "index_of" || name == "bytes_of" {
+        if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
+        let argc = if name == "bytes_of" { 1 } else { 2 };
+        if child_count(ctx, n) != argc { error_at(ctx, ctx.nodes[n].token, "builtin argument count mismatch"); }
+        let e = ctx.nodes[n].first; let recv = ctx.edges[e].value;
+        let array = decay(ctx, check_expression(ctx, recv, scope, -1));
+        let element = element_type(ctx, array.ty);
+        if element < 0 { error_at(ctx, ctx.nodes[recv].token, "operation requires an array or slice"); }
+        if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[recv].token, "operation requires fixed-size elements"); }
+        if name == "bytes_of" {
+            if contains_view(ctx, element) { error_at(ctx, ctx.nodes[recv].token, "bytes_of cannot expose elements containing references or slices"); }
+            if !image_layout_supported(ctx, element) { error_at(ctx, ctx.nodes[recv].token, "not implemented yet: byte images containing zero-size storage"); }
+            if array.root >= 0 && ctx.symbols[array.root].kind == 4 { error_at(ctx, ctx.nodes[recv].token, "bytes_of requires persistent storage"); }
+            if array.root >= 0 { ctx.symbols[array.root].byteviewed = true; }
+            ctx.nodes[n].symbol = -45;
+            return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), root: array.root, readonly: true, growshrink: array.growshrink, inexact: array.inexact };
+        }
+        let arg = ctx.edges[ctx.edges[e].next].value;
+        let raw = check_expression(ctx, arg, scope, -1); let value = decay(ctx, raw);
+        if name == "move_from" {
+            if ctx.types[array.ty].kind != T_SLICE { error_at(ctx, ctx.nodes[recv].token, "move_from requires a destination slice"); }
+            if array.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only slice"); }
+            if ctx.types[value.ty].kind != T_SLICE || element_type(ctx, value.ty) != element { error_at(ctx, ctx.nodes[arg].token, "move_from requires a slice of the same element type"); }
+            store_in_array(ctx, Value { ty: element, root: value.held, growshrink: value.growshrink, held: value.held }, array, scope, ctx.nodes[n].token);
+            ctx.nodes[n].symbol = -43; return Value {};
+        }
+        if ctx.types[array.ty].kind != T_ARRAY || ctx.types[array.ty].flags == 1 { error_at(ctx, ctx.nodes[recv].token, "index_of requires an indexable array"); }
+        if value.ty != element || (raw.place < 0 && ctx.types[raw.ty].kind != T_REFERENCE) { error_at(ctx, ctx.nodes[arg].token, "index_of requires a reference to an array element"); }
+        if array.root < 0 || array.root != value.root || array.inexact || value.inexact { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference rooted at the array itself"); }
+        let owner = decay(ctx, Value { ty: ctx.symbols[array.root].ty });
+        if ctx.types[owner.ty].kind != T_ARRAY || element_type(ctx, owner.ty) != element { error_at(ctx, ctx.nodes[arg].token, "index_of requires a root containing one array of this element type"); }
+        reference_type(ctx, array.ty, false); reference_type(ctx, element, false);
+        ctx.nodes[n].symbol = -44; return Value { ty: default_integer(ctx) };
+    }
     if name == "check_length" || name == "range_index" || name == "pop_n" {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
         let count = child_count(ctx, n);
@@ -1669,10 +1725,10 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let v = decay(ctx, check_expression(ctx, arg, scope, -1));
         if name == "range_index" {
             if ctx.types[v.ty].kind != T_SLICE || element_type(ctx, v.ty) != element { error_at(ctx, ctx.nodes[arg].token, "range_index requires a slice of the array element type"); }
-            ctx.nodes[n].symbol = -31;
+            ctx.nodes[n].symbol = -41;
         } else {
             if ctx.types[v.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[arg].token, "count must be an integer"); }
-            ctx.nodes[n].symbol = -30;
+            ctx.nodes[n].symbol = -40;
         }
         e = ctx.edges[e].next;
         if e >= 0 {
@@ -1685,7 +1741,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             if !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: shrinking within a larger expression"); }
             if array.readonly { error_at(ctx, ctx.nodes[n].token, "cannot mutate a read-only array"); }
             shrink_array(ctx, array, scope, ctx.nodes[n].token, false);
-            ctx.nodes[n].symbol = -32; return Value {};
+            ctx.nodes[n].symbol = -42; return Value {};
         }
         return Value { ty: default_integer(ctx) };
     }

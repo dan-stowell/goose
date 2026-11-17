@@ -242,6 +242,14 @@ fn runtime_source() -> const u8[:] {
         if (s.len) memmove((unsigned char *)data + (size_t)n * element, s.data, (size_t)s.len * element);
         gg_lset(l, w, n + s.len);
     }
+    static void gg_move_from(gg_slice dst, gg_slice src, size_t element) {
+        if (dst.len != src.len) gg_fail("move_from lengths differ");
+        if (dst.len && element) memmove(dst.data, src.data, (size_t)dst.len * element);
+    }
+    static void gg_little_endian(void) {
+        const uint16_t one = 1;
+        if (*(const uint8_t *)&one != 1) gg_fail("serialization needs a little-endian host (not supported yet)");
+    }
     static void gg_builtin_fail(gg_slice message, const char *fallback, const char *location) {
         if (!message.data) { fprintf(stderr, "goose runtime error: %s%s\n", fallback, location); exit(1); }
         fputs("goose runtime error: ", stderr);
