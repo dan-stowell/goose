@@ -147,7 +147,8 @@ fn generic_ahead(ctx: Compiler&) -> bool {
             if p + 1 >= ctx.parse_limit { return false; }
             let after = ctx.tokens[p + 1].text;
             if after == "(" || after == "{" { return true; }
-            return after == "." && p + 3 < ctx.parse_limit && ctx.tokens[p + 2].kind == TK_NAME && ctx.tokens[p + 3].text == "{";
+            // Opt<i64>.None names a variant of an instance, as Opt<i64>.Some { .. } constructs one.
+            return after == "." && p + 2 < ctx.parse_limit && ctx.tokens[p + 2].kind == TK_NAME;
         }
         if s == ";" || s == "=" || s == "}" { return false; }
         p++;
@@ -286,21 +287,7 @@ recursive fn primary(ctx: Compiler&, constructs: bool) -> i64 {
     }
     if take(ctx, "match") {
         let n = node(ctx, N_MATCH, t); ctx.nodes[n].a = expression(ctx, 0, false, false); expect(ctx, "{");
-        while !at(ctx, "}") {
-            let arm = node(ctx, N_ARM, ctx.cursor);
-            if ctx.tokens[ctx.cursor].kind == TK_NAME {
-                ctx.nodes[arm].a = name_node(ctx, N_NAME);
-                if take(ctx, "&") { ctx.nodes[arm].flags = 1; }
-                if !at(ctx, "=>") { ctx.nodes[arm].b = node(ctx, N_NAME, identifier(ctx)); }
-            } else {
-                ctx.nodes[arm].a = expression(ctx, 5, false, false);
-                if take(ctx, "..") {
-                    let r = node(ctx, N_RANGE, ctx.cursor - 1); ctx.nodes[r].a = ctx.nodes[arm].a; ctx.nodes[r].b = expression(ctx, 5, false, false); ctx.nodes[arm].a = r;
-                }
-            }
-            expect(ctx, "=>"); ctx.nodes[arm].c = expression(ctx, 0, true, false); child(ctx, n, arm);
-            if !take(ctx, ",") { break; }
-        }
+        while !at(ctx, "}") { child(ctx, n, match_arm(ctx)); if !take(ctx, ",") { break; } }
         expect(ctx, "}"); return n;
     }
     if take(ctx, "[") {
@@ -325,6 +312,50 @@ recursive fn primary(ctx: Compiler&, constructs: bool) -> i64 {
     if k == TK_NAME || at(ctx, "::") { return name_node(ctx, N_NAME); }
     error_at(ctx, t, "expected expression");
     return -1;
+}
+
+// An arm's patterns are its children: names, integer literals, either one
+// negated, or N_RANGE bounds. Flags: 1 binds by reference, 2 is `_`. A lone
+// unqualified name may bind the variant's payload to the arm's b.
+fn wildcard_ahead(ctx: Compiler&) -> bool { ctx.tokens[ctx.cursor].kind == TK_NAME && ctx.tokens[ctx.cursor].text == "_" }
+fn pattern_bound(ctx: Compiler&) -> i64 {
+    let t = ctx.cursor;
+    let negated = take(ctx, "-");
+    var n = -1;
+    if ctx.tokens[ctx.cursor].kind == TK_NAME || at(ctx, "::") { n = name_node(ctx, N_NAME); }
+    else if ctx.tokens[ctx.cursor].kind == TK_INT { n = node(ctx, N_INT, ctx.cursor); ctx.cursor++; }
+    else { error_at(ctx, ctx.cursor, str("integer constant expected in match pattern, found '", ctx.tokens[ctx.cursor].text, "'")); }
+    if !negated { return n; }
+    let u = node(ctx, N_UNARY, t); ctx.nodes[u].a = n; return u;
+}
+recursive fn match_arm(ctx: Compiler&) -> i64 {
+    let arm = node(ctx, N_ARM, ctx.cursor);
+    if wildcard_ahead(ctx) {
+        ctx.cursor++; ctx.nodes[arm].flags = 2;
+        if at(ctx, ",") { error_at(ctx, ctx.cursor, "_ cannot be listed with other patterns"); }
+    } else {
+        let inlist = "a list of patterns binds no payload: give the variant an arm of its own";
+        var count = 0;
+        loop {
+            var item = pattern_bound(ctx);
+            if at(ctx, "..") {
+                let r = node(ctx, N_RANGE, ctx.cursor); ctx.cursor++;
+                ctx.nodes[r].a = item; ctx.nodes[r].b = pattern_bound(ctx); item = r;
+            }
+            child(ctx, arm, item); count++;
+            if ctx.nodes[item].tag == N_NAME && ctx.nodes[item].flags & 1 == 0 && (at(ctx, "&") || ctx.tokens[ctx.cursor].kind == TK_NAME) {
+                if count > 1 { error_at(ctx, ctx.cursor, inlist); }
+                if take(ctx, "&") { ctx.nodes[arm].flags = 1; }
+                ctx.nodes[arm].b = node(ctx, N_NAME, identifier(ctx));
+                if at(ctx, ",") { error_at(ctx, ctx.cursor, inlist); }
+                break;
+            }
+            if !take(ctx, ",") { break; }
+            if wildcard_ahead(ctx) { error_at(ctx, ctx.cursor, "_ cannot be listed with other patterns"); }
+        }
+    }
+    expect(ctx, "=>"); ctx.nodes[arm].c = expression(ctx, 0, true, false);
+    return arm;
 }
 
 recursive fn function_value(ctx: Compiler&) -> i64 {
@@ -541,7 +572,12 @@ fn parse(ctx: Compiler&, file: i64) {
                 expect(ctx, "{");
                 while !at(ctx, "}") {
                     let v = node(ctx, N_VARIANT, identifier(ctx));
-                    if at(ctx, "{") { fields(ctx, v); }
+                    var e = ctx.nodes[n].first;
+                    while e >= 0 {
+                        if same_name(ctx, ctx.nodes[ctx.edges[e].value].token, ctx.nodes[v].token) { error_at(ctx, ctx.nodes[v].token, str("duplicate variant name: ", ctx.tokens[ctx.nodes[v].token].text)); }
+                        e = ctx.edges[e].next;
+                    }
+                    if at(ctx, "{") { fields(ctx, v); ctx.nodes[v].flags = 1; }
                     child(ctx, n, v);
                     if !take(ctx, ",") { break; }
                 }

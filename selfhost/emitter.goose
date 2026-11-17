@@ -89,6 +89,7 @@ fn c_adapt(ctx: Compiler&, v: CValue, target: i64) -> const u8[:] {
     if ctx.types[target].kind == T_REFERENCE { return c_reference(ctx, v); }
     let a = c_decay(ctx, v);
     if ctx.types[target].kind == T_SLICE { return c_view(ctx, a); }
+    if ctx.types[target].kind == T_ENUM && is_variant(ctx, a.ty) { return save_text(ctx, str("gg_wrap_", a.ty, "(", a.code, ")")); }
     if numeric(ctx, target) { return save_text(ctx, str("((", c_type(ctx, target), ")(", a.code, "))")); }
     return a.code;
 }
@@ -124,6 +125,18 @@ recursive fn emit_type(ctx: Compiler&, ty: i64) {
         if e < 0 { emit(ctx, "unsigned char empty;\n"); }
         while e >= 0 { let f = ctx.edges[e].value; emit(ctx, str("  ", c_type(ctx, ctx.fielddefs[f].ty), " f", f, ";\n")); e = ctx.edges[e].next; }
         emit(ctx, "};\n#pragma pack(pop)\n");
+    } else if t.kind == T_ENUM {
+        // A tag and a union of the payloads; payload-less variants take no room.
+        emit(ctx, str("typedef struct gg_type_", ty, " gg_type_", ty, ";\n"));
+        var e = t.first; var payloads = false;
+        while e >= 0 { emit_type(ctx, ctx.edges[e].value); if has_payload(ctx, ctx.edges[e].value) { payloads = true; } e = ctx.edges[e].next; }
+        emit(ctx, str("#pragma pack(push, 1)\nstruct gg_type_", ty, " {\n  ", if enum_tag_bytes(ctx, ty) == 2 { "uint16_t" } else { "uint8_t" }, " tag;\n"));
+        if payloads {
+            emit(ctx, "  union {\n"); e = t.first;
+            while e >= 0 { let vt = ctx.edges[e].value; if has_payload(ctx, vt) { emit(ctx, str("    ", c_type(ctx, vt), " v", ctx.types[vt].count, ";\n")); } e = ctx.edges[e].next; }
+            emit(ctx, "  } u;\n");
+        }
+        emit(ctx, "};\n#pragma pack(pop)\n");
     } else if t.kind == T_ARRAY && t.flags == 0 {
         emit_type(ctx, t.element);
         var extent = t.count; if extent == 0 { extent = 1; }
@@ -138,7 +151,7 @@ fn c_binary(ctx: Compiler&, op: const u8[:], a: CValue, b: CValue, result: i64) 
     let t = ctx.types[a.ty];
     if op == "==" || op == "!=" {
         if element_type(ctx, a.ty) >= 0 { return save_text(ctx, str(if op == "!=" { "!" } else { "" }, "gg_equal_elements_", element_type(ctx, a.ty), "(", c_view(ctx, a), ", ", c_view(ctx, b), ")")); }
-        if t.kind == T_STRUCT { return save_text(ctx, str(if op == "!=" { "!" } else { "" }, "gg_eq_", a.ty, "(", a.code, ",", b.code, ")")); }
+        if t.kind == T_STRUCT || t.kind == T_ENUM { return save_text(ctx, str(if op == "!=" { "!" } else { "" }, "gg_eq_", a.ty, "(", a.code, ",", b.code, ")")); }
     }
     if t.kind == T_INTEGER {
         if op == "/" || op == "%" {
@@ -217,6 +230,11 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         if ctx.types[a.ty].kind == T_FLOAT && ctx.types[x.ty].kind == T_INTEGER { return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")gg_float_wrap((double)(", a.code, ")))")), ty: x.ty, address: "", stack: "" }; }
         return converted(ctx, a, x.ty);
     }
+    if tag == N_MEMBER && x.flags & 1024 != 0 {
+        let name = temporary(ctx, x.ty);
+        emit(ctx, str("  memset(&", name, ", 0, sizeof(", name, ")); ", name, ".tag = ", ctx.types[x.symbol].count, ";\n"));
+        return CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };
+    }
     if tag == N_MEMBER {
         let a = c_decay(ctx, c_expression(ctx, x.a));
         if element_type(ctx, a.ty) >= 0 {
@@ -248,7 +266,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         let dest = CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };
         c_into(ctx, n, dest); return dest;
     }
-    if tag == N_IF || tag == N_BLOCK {
+    if tag == N_IF || tag == N_BLOCK || tag == N_MATCH {
         if x.ty == 0 || ctx.types[x.ty].kind == T_BOTTOM { c_into(ctx, n, no_c_value(ctx)); return no_c_value(ctx); }
         if ctx.types[x.ty].size_class > 0 { let dest = c_array_temp(ctx, x.ty); c_into(ctx, n, dest); return dest; }
         let name = temporary(ctx, x.ty);
@@ -265,6 +283,7 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
         if x.c >= 0 { emit(ctx, " else {\n"); c_into(ctx, x.c, dest); emit(ctx, "  }"); }
         emit(ctx, "\n"); return;
     }
+    if x.tag == N_MATCH { c_match(ctx, n, dest); return; }
     if x.tag == N_BLOCK {
         emit(ctx, "  {\n"); var e = x.first;
         while e >= 0 { c_statement(ctx, ctx.edges[e].value); e = ctx.edges[e].next; }
@@ -273,14 +292,19 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
     }
     if x.tag == N_CALL && ctx.types[x.ty].size_class == 2 && dest.ty != 0 { c_call(ctx, n, dest); return; }
     if x.tag == N_CONSTRUCT {
+        // A variant built into its enum fills the payload in place, then the tag.
+        let wrapped = dest.ty != 0 && ctx.types[dest.ty].kind == T_ENUM && is_variant(ctx, x.ty);
+        var payload = save_text(ctx, str("(", dest.code, ")"));
+        if wrapped { payload = save_text(ctx, str("(", dest.code, ").u.v", ctx.types[x.ty].count)); }
         var e = x.first;
         while e >= 0 {
             let init = ctx.edges[e].value; let f = ctx.nodes[init].symbol;
-            let field = save_text(ctx, str("(", dest.code, ").f", f));
+            let field = save_text(ctx, str(payload, ".f", f));
             let address = save_text(ctx, str("&(", field, ")"));
             c_into(ctx, ctx.nodes[init].a, CValue { code: field, ty: ctx.fielddefs[f].ty, address: address, stack: dest.stack });
             e = ctx.edges[e].next;
         }
+        if wrapped { emit(ctx, str("  (", dest.code, ").tag = ", ctx.types[x.ty].count, ";\n")); }
         return;
     }
     if x.tag == N_ARRAY || x.tag == N_FILL {
@@ -306,11 +330,50 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
         return;
     }
     let v = c_expression(ctx, n);
-    if dest.ty == 0 || ctx.types[v.ty].kind == T_BOTTOM { if v.code.len > 0 { emit(ctx, str("  (void)(", v.code, ");\n")); } return; }
+    if dest.ty == 0 || v.ty == 0 || ctx.types[v.ty].kind == T_BOTTOM { if v.code.len > 0 { emit(ctx, str("  (void)(", v.code, ");\n")); } return; }
     if ctx.types[dest.ty].size_class == 2 {
         if ctx.c_function >= 0 && x.tag == N_NAME && x.symbol == ctx.return_locals[ctx.c_function] { return; }
         let view = c_view(ctx, v); emit(ctx, str("  gg_append(", c_reference(ctx, dest), ", (", view, ").data, (", view, ").len, sizeof(", c_type(ctx, element_type(ctx, dest.ty)), "));\n"));
     } else { emit(ctx, str("  ", dest.code, " = ", c_adapt(ctx, v, dest.ty), ";\n")); }
+}
+
+// An enum match switches on the tag and copies a bound payload; an integer
+// match tests its arms in order, each pattern a value or a half-open range.
+recursive fn c_match(ctx: Compiler&, n: i64, dest: CValue) {
+    let x = ctx.nodes[n];
+    let s = snapshot(ctx, c_decay(ctx, c_expression(ctx, x.a)));
+    let enumerated = ctx.types[s.ty].kind == T_ENUM;
+    if enumerated { emit(ctx, str("  switch ((", s.code, ").tag) {\n")); }
+    var e = x.first; var first = true;
+    while e >= 0 {
+        let arm = ctx.nodes[ctx.edges[e].value];
+        if enumerated {
+            if arm.flags & 2 != 0 { emit(ctx, "  default:"); }
+            var p = arm.first;
+            while p >= 0 { emit(ctx, str("  case ", ctx.types[ctx.nodes[ctx.edges[p].value].symbol].count, ":")); p = ctx.edges[p].next; }
+            emit(ctx, " {\n");
+            if arm.b >= 0 { emit(ctx, str("  ", c_symbol(ctx, ctx.nodes[arm.b].symbol), " = (", s.code, ").u.v", ctx.types[ctx.nodes[first_child(ctx, ctx.edges[e].value)].symbol].count, ";\n")); }
+            c_into(ctx, arm.c, dest);
+            emit(ctx, "  break; }\n");
+        } else {
+            if !first { emit(ctx, " else "); } else { emit(ctx, "  "); }
+            if arm.flags & 2 == 0 {
+                emit(ctx, "if (0");
+                let scalar = c_type(ctx, s.ty);
+                var p = arm.first;
+                while p >= 0 {
+                    let item = ctx.nodes[ctx.edges[p].value];
+                    if item.tag == N_RANGE { emit(ctx, str(" || ((", s.code, ") >= ((", scalar, ")UINT64_C(", ctx.nodes[item.a].bits, ")) && (", s.code, ") < ((", scalar, ")UINT64_C(", ctx.nodes[item.b].bits, ")))")); }
+                    else { emit(ctx, str(" || (", s.code, ") == ((", scalar, ")UINT64_C(", item.bits, "))")); }
+                    p = ctx.edges[p].next;
+                }
+                emit(ctx, ") ");
+            }
+            emit(ctx, "{\n"); c_into(ctx, arm.c, dest); emit(ctx, "  }");
+        }
+        first = false; e = ctx.edges[e].next;
+    }
+    emit(ctx, if enumerated { "  }\n" } else { "\n" });
 }
 
 recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
