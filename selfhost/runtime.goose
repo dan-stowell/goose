@@ -304,10 +304,6 @@ fn runtime_source() -> const u8[:] {
             gg_builtin_fail(message, "slice not within this array", location);
         return (int64_t)index;
     }
-    static void gg_pop_n(gg_reference a, uint64_t n, size_t element) {
-        if (n > (uint64_t)a.header->len) gg_fail("pop_n count negative or beyond the array's length");
-        gg_resize(a, a.header->len - (int64_t)n, element, NULL);
-    }
     typedef struct { int64_t start, len; } gg_span;
     static gg_stack *gg_span_stack(gg_reference a) {
         return &gg_slot_stacks[a.stack - gg_stacks];

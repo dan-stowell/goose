@@ -955,23 +955,23 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         return no_c_value(ctx);
     }
     if builtin == -40 { return c_dispatch(ctx, n); }
-    if builtin <= -49 && builtin >= -51 {
+    if builtin <= BI_ALLOC_SLICE && builtin >= BI_REALLOC_SLICE {
         var e = x.first; let recv = ctx.edges[e].value;
         let original = c_expression(ctx, recv);
         let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, recv)).ty, false) });
         let element = element_type(ctx, original.ty); e = ctx.edges[e].next;
         var old = no_c_value(ctx);
-        if builtin != -49 { old = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.edges[e].value))); e = ctx.edges[e].next; }
-        if builtin == -50 {
+        if builtin != BI_ALLOC_SLICE { old = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.edges[e].value))); e = ctx.edges[e].next; }
+        if builtin == BI_FREE_SLICE {
             emit(ctx, str("  gg_pool_slice_free(", receiver.code, ", ", old.code, ", sizeof(", c_type(ctx, element), "));\n"));
             return no_c_value(ctx);
         }
         let count = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.edges[e].value)));
         let result = temporary(ctx, x.ty);
-        if builtin == -49 { emit(ctx, str("  ", result, " = gg_pool_slice_alloc(", receiver.code, ", (uint64_t)(", count.code, "), sizeof(", c_type(ctx, element), "));\n")); }
+        if builtin == BI_ALLOC_SLICE { emit(ctx, str("  ", result, " = gg_pool_slice_alloc(", receiver.code, ", (uint64_t)(", count.code, "), sizeof(", c_type(ctx, element), "));\n")); }
         else { emit(ctx, str("  ", result, " = gg_pool_slice_realloc(", receiver.code, ", ", old.code, ", (uint64_t)(", count.code, "), sizeof(", c_type(ctx, element), "));\n")); }
         let index = raw_temporary(ctx, "int64_t");
-        let begin = if builtin == -49 { "0" } else { save_text(ctx, str(old.code, ".len")) };
+        let begin = if builtin == BI_ALLOC_SLICE { "0" } else { save_text(ctx, str(old.code, ".len")) };
         emit(ctx, str("  gg_pool_busy[(", receiver.code, ").stack - gg_stacks] = 1;\n  for (", index, " = ", begin, "; ", index, " < ", result, ".len; ", index, "++) {\n"));
         let address = save_text(ctx, str("((", c_type(ctx, element), " *)", result, ".data + ", index, ")"));
         let dest = CValue { code: save_text(ctx, str("(*", address, ")")), ty: element, address: address };
@@ -979,13 +979,13 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         emit(ctx, str("  }\n  gg_pool_busy[(", receiver.code, ").stack - gg_stacks] = 0;\n"));
         return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)) };
     }
-    if builtin <= -46 && builtin >= -48 {
+    if builtin <= BI_FREE && builtin >= BI_ALLOC_REF {
         let e = x.first; let recv = ctx.edges[e].value;
         let original = c_expression(ctx, recv);
         let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, recv)).ty, false) });
         let pool = c_decay(ctx, receiver); let element = element_type(ctx, pool.ty);
         let arg = ctx.edges[ctx.edges[e].next].value;
-        if builtin == -46 {
+        if builtin == BI_FREE {
             let value = snapshot(ctx, c_decay(ctx, c_expression(ctx, arg)));
             emit(ctx, str("  gg_pool_free(", receiver.code, ", (uint64_t)(", value.code, "));\n"));
             return no_c_value(ctx);
@@ -996,23 +996,23 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         let address = save_text(ctx, str("((", c_type(ctx, element), " *)(", pool.code, ").base + ", index, ")"));
         emit(ctx, str("  *", address, " = ", value.code, ";\n"));
         emit(ctx, str("  gg_pool_finish(", receiver.code, ", ", index, ");\n"));
-        if builtin == -48 { return CValue { code: address, ty: x.ty }; }
+        if builtin == BI_ALLOC_REF { return CValue { code: address, ty: x.ty }; }
         return CValue { code: index, ty: x.ty, address: save_text(ctx, str("&", index)) };
     }
-    if builtin <= -43 && builtin >= -45 {
+    if builtin <= BI_MOVE_FROM && builtin >= BI_BYTES_OF {
         let e = x.first; let recv = ctx.edges[e].value;
         let original = c_expression(ctx, recv);
         let element = element_type(ctx, original.ty);
         // Freeze the view before evaluating the source, which can rebind it.
         let view = raw_temporary(ctx, "gg_slice");
         emit(ctx, str("  ", view, " = ", c_view(ctx, original), ";\n"));
-        if builtin == -45 {
+        if builtin == BI_BYTES_OF {
             let result = temporary(ctx, x.ty);
             emit(ctx, str("  gg_little_endian();\n  ", result, " = gg_view(", view, ".data, ", view, ".len * sizeof(", c_type(ctx, element), "));\n"));
             return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
         }
         let arg = c_expression(ctx, ctx.edges[ctx.edges[e].next].value);
-        if builtin == -43 {
+        if builtin == BI_MOVE_FROM {
             emit(ctx, str("  gg_move_from(", view, ", ", c_view(ctx, arg), ", sizeof(", c_type(ctx, element), "));\n"));
             return no_c_value(ctx);
         }
@@ -1020,7 +1020,7 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         emit(ctx, str("  ", result, " = (int64_t)(((uintptr_t)(", c_reference(ctx, arg), ") - (uintptr_t)", view, ".data) / sizeof(", c_type(ctx, element), "));\n"));
         return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
     }
-    if builtin <= -40 && builtin >= -42 {
+    if builtin <= BI_CHECK_LENGTH && builtin >= BI_RANGE_INDEX {
         var e = x.first;
         let original = c_expression(ctx, ctx.edges[e].value);
         let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, ctx.edges[e].value)).ty, false), address: "", stack: "" });
@@ -1030,14 +1030,10 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         e = ctx.edges[e].next;
         var message = save_text(ctx, "gg_view(NULL, 0)");
         if e >= 0 { message = c_view(ctx, c_expression(ctx, ctx.edges[e].value)); }
-        if builtin == -42 {
-            emit(ctx, str("  gg_pop_n(", c_reference(ctx, array), ", (uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "));\n"));
-            return no_c_value(ctx);
-        }
         let token = ctx.tokens[x.token];
         let location = c_literal(ctx, str(" (", ctx.sources[token.file].path, ":", token.line, ")"));
         let result = temporary(ctx, x.ty);
-        if builtin == -40 { emit(ctx, str("  ", result, " = gg_check_length((uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
+        if builtin == BI_CHECK_LENGTH { emit(ctx, str("  ", result, " = gg_check_length((uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
         else { emit(ctx, str("  ", result, " = gg_range_index(", c_view(ctx, array), ", ", arg.code, ", sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
         return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
     }

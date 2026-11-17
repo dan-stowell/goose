@@ -1,5 +1,18 @@
 // Semantic checking is separate from emission. This is an experimental
 // bootstrap checker; the fixture's scope is described in README.md.
+// Keep these builtin IDs distinct from negative IDs used by dispatch.
+const BI_CHECK_LENGTH = -140;
+const BI_RANGE_INDEX = -141;
+const BI_MOVE_FROM = -143;
+const BI_INDEX_OF = -144;
+const BI_BYTES_OF = -145;
+const BI_FREE = -146;
+const BI_ALLOC_INDEX = -147;
+const BI_ALLOC_REF = -148;
+const BI_ALLOC_SLICE = -149;
+const BI_FREE_SLICE = -150;
+const BI_REALLOC_SLICE = -151;
+
 struct Value {
     ty: i64 = 0,
     root: i64 = -1,
@@ -1477,7 +1490,7 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Va
         ctx.break_target = n; ctx.loop_depth++;
         let s = register_symbol(ctx, ctx.nodes[x.a].token, -1, 2, n, inner, if ctx.types[binding_type].kind == T_REFERENCE { 0 } else { 32 });
         ctx.symbols[s].ty = binding_type; ctx.symbols[s].root = root; ctx.symbols[s].state = 2; ctx.nodes[x.a].symbol = s;
-        ctx.symbols[s].held = held; ctx.symbols[s].inexact = loaded_view; ctx.symbols[s].growshrink = growshrink;
+        ctx.symbols[s].held = held; ctx.symbols[s].inexact = loaded_view; ctx.symbols[s].growshrink = growshrink && contains_view(ctx, binding_type);
         if x.first >= 0 {
             let index = ctx.edges[x.first].value; let i = register_symbol(ctx, ctx.nodes[index].token, -1, 2, n, inner, 0);
             ctx.symbols[i].ty = default_integer(ctx); ctx.symbols[i].state = 2; ctx.nodes[index].symbol = i;
@@ -1756,13 +1769,13 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             }
             e = ctx.edges[e].next;
         }
-        if name == "free_slice" { ctx.nodes[n].symbol = -50; return Value {}; }
+        if name == "free_slice" { ctx.nodes[n].symbol = BI_FREE_SLICE; return Value {}; }
         let count_node = ctx.edges[e].value; let length = decay(ctx, check_builtin_argument(ctx, n, count_node, scope, -1));
         if ctx.types[length.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[count_node].token, "slice pool length must be an integer"); }
         let init = pool_default_expression(ctx, element, ctx.nodes[n].token, scope);
         ctx.nodes[n].b = init;
         store_in_array(ctx, received(ctx, value_of(ctx, init), element), pool, scope, ctx.nodes[n].token);
-        ctx.nodes[n].symbol = if name == "alloc_slice" { -49 } else { -51 };
+        ctx.nodes[n].symbol = if name == "alloc_slice" { BI_ALLOC_SLICE } else { BI_REALLOC_SLICE };
         return Value { ty: slice_type(ctx, element, false), root: pool.root, held: ctx.symbols[pool.root].held };
     }
     if preferred < 0 && (name == "free" || name == "alloc_index" || name == "alloc_ref") {
@@ -1780,12 +1793,12 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if name == "free" {
             let value = decay(ctx, check_builtin_argument(ctx, n, arg, scope, -1));
             if ctx.types[value.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[arg].token, "free requires an integer index"); }
-            ctx.nodes[n].symbol = -46; return Value {};
+            ctx.nodes[n].symbol = BI_FREE; return Value {};
         }
         let value = check_builtin_argument(ctx, n, arg, scope, element); require_fit(ctx, arg, value, element);
         store_in_array(ctx, received(ctx, value, element), pool, scope, ctx.nodes[n].token);
-        if name == "alloc_index" { ctx.nodes[n].symbol = -47; return Value { ty: default_integer(ctx) }; }
-        ctx.nodes[n].symbol = -48; return Value { ty: reference_type(ctx, element, false), root: pool.root, place: pool.place };
+        if name == "alloc_index" { ctx.nodes[n].symbol = BI_ALLOC_INDEX; return Value { ty: default_integer(ctx) }; }
+        ctx.nodes[n].symbol = BI_ALLOC_REF; return Value { ty: reference_type(ctx, element, false), root: pool.root, place: pool.place };
     }
     if preferred < 0 && (name == "move_from" || name == "index_of" || name == "bytes_of") {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
@@ -1806,7 +1819,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
                     if owner.kind == 2 && root_depth(ctx, i) <= root_depth(ctx, array.root) { ctx.symbols[i].byteviewed = true; }
                 }
             }
-            ctx.nodes[n].symbol = -45;
+            ctx.nodes[n].symbol = BI_BYTES_OF;
             return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), root: array.root, readonly: true, growshrink: array.growshrink || (ctx.types[array.ty].kind == T_ARRAY && ctx.types[array.ty].flags == 4), inexact: array.inexact };
         }
         let arg = ctx.edges[ctx.edges[e].next].value;
@@ -1816,7 +1829,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             if array.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only slice"); }
             if ctx.types[value.ty].kind != T_SLICE || element_type(ctx, value.ty) != element { error_at(ctx, ctx.nodes[arg].token, "move_from requires a slice of the same element type"); }
             store_in_array(ctx, Value { ty: element, root: value.held, growshrink: value.growshrink, held: value.held }, array, scope, ctx.nodes[n].token);
-            ctx.nodes[n].symbol = -43; return Value {};
+            ctx.nodes[n].symbol = BI_MOVE_FROM; return Value {};
         }
         if ctx.types[array.ty].kind != T_ARRAY || ctx.types[array.ty].flags == 1 { error_at(ctx, ctx.nodes[recv].token, "index_of requires an indexable array"); }
         if value.ty != element || (raw.place < 0 && ctx.types[raw.ty].kind != T_REFERENCE) { error_at(ctx, ctx.nodes[arg].token, "index_of requires a reference to an array element"); }
@@ -1824,7 +1837,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let owner = decay(ctx, Value { ty: ctx.symbols[array.root].ty });
         if ctx.types[owner.ty].kind != T_ARRAY || element_type(ctx, owner.ty) != element { error_at(ctx, ctx.nodes[arg].token, "index_of requires a root containing one array of this element type"); }
         reference_type(ctx, array.ty, false); reference_type(ctx, element, false);
-        ctx.nodes[n].symbol = -44; return Value { ty: default_integer(ctx) };
+        ctx.nodes[n].symbol = BI_INDEX_OF; return Value { ty: default_integer(ctx) };
     }
     if preferred < 0 && (name == "check_length" || name == "range_index") {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
@@ -1843,10 +1856,10 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let v = decay(ctx, check_builtin_argument(ctx, n, arg, scope, -1));
         if name == "range_index" {
             if ctx.types[v.ty].kind != T_SLICE || element_type(ctx, v.ty) != element { error_at(ctx, ctx.nodes[arg].token, "range_index requires a slice of the array element type"); }
-            ctx.nodes[n].symbol = -41;
+            ctx.nodes[n].symbol = BI_RANGE_INDEX;
         } else {
             if ctx.types[v.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[arg].token, "count must be an integer"); }
-            ctx.nodes[n].symbol = -40;
+            ctx.nodes[n].symbol = BI_CHECK_LENGTH;
         }
         e = ctx.edges[e].next;
         if e >= 0 {

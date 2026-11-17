@@ -27,17 +27,20 @@ span tree. No performance claim is made.
 Also fixed loaded loop-slice provenance, reusable-pool shrink through merged
 references, and dispatch of user overloads sharing builtin names. Master gained
 bytes_of, pop_n, enums, generics, packed storage and emitter work during this run;
-rebases required consolidating dispatch and resolving runtime additions.
+rebases required consolidating dispatch and resolving runtime additions. The final
+rebase also integrated case dispatch and loop-control work; new builtin IDs are
+now named constants in a separate range. Scalar iteration copies must not inherit
+a grow-shrink reference restriction from the sequence they were read from.
 
 ## Measured boards
 
 | point | run | exact reject diagnostics | stdlib | W1 |
 |---|---:|---:|---:|---|
 | starting worktree | 23/776 | 4/2036 | 0/17 | fixed point |
-| rebased master ec124f8e committed board | 63/776 | 39/2036 | 6/17 | — |
-| this branch | 83/776 | 39/2036 | 6/17 | fixed point |
+| rebased master 766fc7bf committed board | 79/776 | 39/2036 | 6/17 | — |
+| this branch | 100/776 | 39/2036 | 6/17 | fixed point |
 
-Thus the raw +60 positives include concurrent master work; this branch adds 20
+Thus the raw +77 positives include concurrent master work; this branch adds 21
 passing positives over that master board. The existing many-spans pool fixture,
 bounds failures, message failures, and slot-reuse fixture now pass.
 
