@@ -5,3 +5,11 @@ samples/*.ppm
 samples/*.pgm
 samples/*.png
 __pycache__
+
+# research runs (dan-stowell fork)
+/STOP
+/.claude/fresh
+/.claude/status-asked
+/.claude/settings.local.json
+/.claude/worktrees/
+/research/data/
