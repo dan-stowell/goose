@@ -563,8 +563,50 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
     }
     c_statement(ctx, n); return no_c_value(ctx);
 }
+fn new_label(ctx: Compiler&) -> i64 { let label = ctx.c_label; ctx.c_label++; return label; }
+// && and || and ! of bools in a condition become jumps rather than a value.
+recursive fn short_circuit(ctx: Compiler&, n: i64) -> bool {
+    let x = ctx.nodes[n];
+    if x.tag == N_BINARY { let op = ctx.tokens[x.token].text; return op == "&&" || op == "||"; }
+    if x.tag == N_UNARY && ctx.types[x.ty].kind == T_BOOL { let op = ctx.tokens[x.token].text; return (op == "!" || op == "(") && short_circuit(ctx, x.a); }
+    return false;
+}
+// Jumps to label target when condition n evaluates to when; falls through
+// otherwise. Operands are evaluated in order, the right only when needed.
+recursive fn c_branch(ctx: Compiler&, n: i64, when: bool, target: i64) {
+    let x = ctx.nodes[n];
+    if x.tag == N_UNARY && ctx.types[x.ty].kind == T_BOOL && !ctx.nodes[x.a].truth {
+        let op = ctx.tokens[x.token].text;
+        if op == "!" { c_branch(ctx, x.a, !when, target); return; }
+        if op == "(" { c_branch(ctx, x.a, when, target); return; }
+    }
+    if x.tag == N_BINARY {
+        let op = ctx.tokens[x.token].text;
+        if op == "&&" || op == "||" {
+            // a && b is false as soon as a is; a || b is true as soon as a is.
+            let decisive = op == "||";
+            if when == decisive { c_branch(ctx, x.a, decisive, target); c_branch(ctx, x.b, decisive, target); return; }
+            let skip = new_label(ctx);
+            c_branch(ctx, x.a, decisive, skip); c_branch(ctx, x.b, when, target);
+            emit(ctx, str("label", skip, ":;\n")); return;
+        }
+    }
+    let v = c_condition(ctx, n);
+    emit(ctx, str("  if (", if when { "" } else { "!" }, "(", v.code, ")) goto label", target, ";\n"));
+}
 recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
     let x = ctx.nodes[n];
+    if x.tag == N_IF && short_circuit(ctx, x.a) {
+        let otherwise = new_label(ctx);
+        c_branch(ctx, x.a, false, otherwise);
+        emit(ctx, "  {\n"); c_into(ctx, x.b, dest); emit(ctx, "  }\n");
+        if x.c >= 0 {
+            let done = new_label(ctx);
+            emit(ctx, str("  goto label", done, ";\nlabel", otherwise, ":;\n  {\n")); c_into(ctx, x.c, dest);
+            emit(ctx, str("  }\nlabel", done, ":;\n"));
+        } else { emit(ctx, str("label", otherwise, ":;\n")); }
+        return;
+    }
     if x.tag == N_IF {
         let condition = c_condition(ctx, x.a); emit(ctx, str("  if (", condition.code, ") {\n"));
         c_into(ctx, x.b, dest); emit(ctx, "  }");
@@ -1202,7 +1244,7 @@ recursive fn c_loop(ctx: Compiler&, n: i64, dest: CValue) {
     } else if x.tag == N_EARLY { c_into(ctx, x.a, dest); }
     else {
         emit(ctx, str("label", advance, ":;\n"));
-        if x.tag == N_WHILE { let condition = c_condition(ctx, x.a); emit(ctx, str("  if (!(", condition.code, ")) goto label", done, ";\n")); c_statement(ctx, x.b); }
+        if x.tag == N_WHILE { c_branch(ctx, x.a, false, done); c_statement(ctx, x.b); }
         else { c_statement(ctx, x.a); }
         emit(ctx, str("  goto label", advance, ";\n"));
     }

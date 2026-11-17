@@ -1,5 +1,5 @@
 // Evaluation order the emitter must keep when it drops temporaries. Expected output (stock goose):
-// 12 1121 15 1020 16 5 8 11 false 10
+// 12 1121 15 1020 16 5 8 11 false 10 / 200 15011
 fn bump(x: i64&) -> i64 { x += 10; return x; }
 fn pair(a: i64, b: i64) -> i64 { return a * 100 + b; }
 fn grow(xs: i64[>..]&) -> i64 { xs.push(7); return xs.len; }
@@ -21,4 +21,9 @@ fn main() {
     let g = xs[i] + pair(i, bump(i));
     let h = !(x > 3) && y < 100 || z == 0;
     print(a, " ", b, " ", c, " ", d, " ", z, " ", e, " ", f, " ", g, " ", h, " ", i);
+    var k = 0; var taken = 0;
+    if bump(k) > 0 && bump(k) > 100 || bump(k) > 0 { taken += 1; }
+    if !(bump(k) < 0 || bump(k) > 1000) && !(k == 0) { taken += 10; } else { taken += 100; }
+    while k < 200 && bump(k) != 0 { taken += 1000; }
+    print(k, " ", taken);
 }
