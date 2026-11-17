@@ -171,7 +171,7 @@ document.getElementById('legend').innerHTML = LEVELS.map((l, i) =>
   for (const wl of ['W1', 'W2']) {
     const rungs = [...new Set(HISTORY.flatMap(h => h.rows.filter(r => r.workload === wl).map(r => r.rung)))];
     if (!rungs.length) continue;
-    const H = 210, L = 64, R = 170, T = 14, B = 40, PW = W - L - R, PH = H - T - B;
+    const H = 210, L = 64, R = 200, T = 14, B = 40, PW = W - L - R, PH = H - T - B;
     const ymax = Math.max(...HISTORY.flatMap(h => h.rows.filter(r => r.workload === wl).map(r => r.max))) * 1.1;
     const n = HISTORY.length, xs = i => L + (n === 1 ? PW / 2 : i / (n - 1) * PW), ys = v => T + PH - v / ymax * PH;
     s += `<h3 style="margin-top:${wl === 'W1' ? 0 : 18}px">${wl === 'W1' ? 'W1: the compiler compiling itself' : 'W2: the fixture suite'}</h3><svg width="${W}" height="${H}">`;
