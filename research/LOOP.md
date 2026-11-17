@@ -65,7 +65,7 @@ doesn't fight over the build directory. It must not edit code. Output goes to `r
       -c model_provider=exe-llm -c 'model_providers.exe-llm.name="exe-llm"' \
       -c 'model_providers.exe-llm.base_url="https://llm.int.exe.xyz/v1"' \
       "$(cat research/prompts/skeptic.md)" </dev/null \
-      > /home/exedev/goose-fork/research/reviews/inbox/$(date +%Y%m%dT%H%M)-codex-skeptic.md 2>&1 &
+      > /home/exedev/goose/research/reviews/inbox/$(date +%Y%m%dT%H%M)-codex-skeptic.md 2>&1 &
 
 A stalled or refused review gets one line in `REVIEWS.md` and is dropped. If a provider flags a
 prompt, reword it around compile speed and correctness; don't retry it unchanged. A finding that work
