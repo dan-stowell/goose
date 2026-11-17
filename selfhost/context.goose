@@ -17,6 +17,8 @@ struct Compiler {
     shrinks: Shrink[>..]&,
     effect_revision: i64 = 0,
     flow: i64 = -1,
+    const_scope: i64 = 0,
+    const_what: i64 = 0,
     visit: i64 = 0,
     specializations: Specialization[>..]&,
     checking_function: i64 = -1,

@@ -253,13 +253,24 @@ recursive fn constant_integer(ctx: Compiler&, n: i64) -> u64 {
     let tag = ctx.nodes[n].tag;
     if tag == N_INT { return ctx.tokens[ctx.nodes[n].token].integer; }
     if tag == N_NAME {
+        if ctx.const_scope > 0 {
+            // A size names constants: a local or type parameter hides them (3.3).
+            let what = if ctx.const_what == 1 { "capacity" } else if ctx.const_what == 2 { "fill count" } else { "size" };
+            let name = ctx.tokens[ctx.nodes[n].token].text;
+            let local = lookup(ctx, n, ctx.const_scope, 2);
+            if local >= 0 && ctx.symbols[local].scope != 0 { error_at(ctx, ctx.nodes[n].token, str("array ", what, " ", name, " names a local variable, not a constant")); }
+            let param = lookup(ctx, n, ctx.const_scope, 1);
+            if param >= 0 && ctx.symbols[param].decl < 0 { error_at(ctx, ctx.nodes[n].token, str("array ", what, " ", name, " names a type parameter, not a constant")); }
+        }
         let s = lookup(ctx, n, 0, 2);
         if s >= 0 && ctx.symbols[s].flags & 1 == 0 {
             if ctx.symbols[s].state == 3 { error_at(ctx, ctx.nodes[n].token, "cyclic constant initializer"); }
             ctx.symbols[s].state = 3;
             let values = ctx.nodes[ctx.symbols[s].decl].b;
             if values >= 0 && ctx.nodes[values].first >= 0 {
+                let outer = ctx.const_scope; ctx.const_scope = 0;
                 let result = constant_integer(ctx, ctx.edges[ctx.nodes[values].first].value);
+                ctx.const_scope = outer;
                 ctx.symbols[s].state = 0; return result;
             }
         }
@@ -339,7 +350,10 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
                 if width == "u8" { count = 1; } else if width == "u16" { count = 2; } else if width == "u64" { count = 8; } else if width == "varint" { count = 0; }
             }
         } else if syntax.b >= 0 && ctx.nodes[syntax.b].tag != N_TYPE {
+            let outer = ctx.const_scope; let outer_what = ctx.const_what;
+            ctx.const_scope = scope; ctx.const_what = if syntax.flags & 15 == 2 { 1 } else { 0 };
             let value = constant_integer(ctx, syntax.b);
+            ctx.const_scope = outer; ctx.const_what = outer_what;
             if value > 281474976710656 { error_at(ctx, syntax.token, "array size is negative or exceeds the 48-bit limit"); }
             count = value as i64;
         }

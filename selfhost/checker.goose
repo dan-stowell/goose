@@ -93,9 +93,15 @@ recursive fn contains_view(ctx: Compiler&, ty: i64) -> bool {
     }
     return false;
 }
+// A root as src/ names it in diagnostics.
+fn root_name(ctx: Compiler&, root: i64) -> const u8[:] {
+    if root < 0 { return "static data"; }
+    if ctx.symbols[root].kind == 4 { return "<temporary>"; }
+    return ctx.tokens[ctx.symbols[root].token].text;
+}
 fn store_lifetime(ctx: Compiler&, v: Value, destination: i64, token: i64) {
     let root = content_root(ctx, v);
-    if contains_view(ctx, v.ty) && root_depth(ctx, root) > root_depth(ctx, destination) { error_at(ctx, token, "stored reference would outlive its owner"); }
+    if contains_view(ctx, v.ty) && root_depth(ctx, root) > root_depth(ctx, destination) { error_at(ctx, token, str("storing a reference rooted at ", root_name(ctx, root), ", which does not outlive the destination")); }
     if destination >= 0 && root_depth(ctx, root) >= root_depth(ctx, ctx.symbols[destination].held) { ctx.symbols[destination].held = root; }
 }
 fn content_root(ctx: Compiler&, v: Value) -> i64 {
@@ -316,7 +322,11 @@ fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
     ctx.nodes[n].target = target;
 }
 fn merge_numeric(ctx: Compiler&, a: Value, b: Value, token: i64) -> i64 {
-    if !numeric(ctx, a.ty) || !numeric(ctx, b.ty) { error_at(ctx, token, "numeric operands required"); }
+    if !numeric(ctx, a.ty) || !numeric(ctx, b.ty) {
+        var text: u8[>..] = [];
+        format(text, "operator ", ctx.tokens[token].text, " cannot be applied to "); type_text(ctx, a.ty, text); text.append(" and "); type_text(ctx, b.ty, text);
+        error_at(ctx, token, text);
+    }
     if a.ty == b.ty { return a.ty; }
     // An integer meeting a float becomes that float, a literal or not.
     if ctx.types[a.ty].kind == T_INTEGER && ctx.types[b.ty].kind == T_FLOAT { return b.ty; }
@@ -944,7 +954,9 @@ recursive fn check_array(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
     if x.tag == N_FILL {
         let a = decay(ctx, check_expression(ctx, x.a, scope, element));
         if element < 0 { element = a.ty; } else { require_fit(ctx, x.a, a, element); }
+        let outer = ctx.const_scope; let outer_what = ctx.const_what; ctx.const_scope = scope; ctx.const_what = 2;
         count = constant_integer(ctx, x.b) as i64; root = a.root;
+        ctx.const_scope = outer; ctx.const_what = outer_what;
     } else {
         var e = x.first;
         while e >= 0 {
