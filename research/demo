@@ -136,6 +136,7 @@ def human(n):
 # --- the record -------------------------------------------------------------
 
 RECORDS = []
+W2_FAILURES = {}   # rung -> (passed, ran, fixtures, [(first failure, [fixtures])])
 PRINT_LOCK = threading.Lock()
 
 
@@ -469,8 +470,10 @@ def w2(fs, tree, run, rungs, jobs, show_failures):
             for (f, _, _), o in zip(fs, outcomes):
                 if o != "pass" and not o.startswith("skip"):
                     clusters.setdefault(o, []).append(f.stem)
-            for o, names in sorted(clusters.items(), key=lambda kv: -len(kv[1]))[:12]:
+            top = sorted(clusters.items(), key=lambda kv: -len(kv[1]))[:12]
+            for o, names in top:
                 print(f"    {len(names):4}  {o}  (e.g. {names[0]})")
+            W2_FAILURES[name] = (passed, len(ran), len(fs), top)
 
 
 # --- the summary --------------------------------------------------------------
@@ -686,6 +689,13 @@ def write_ladder(rows, totals, cmdline, up, started, sha, unsupported, nfix, ful
     if unsupported:
         text.append("What does not run on the self-hosted rung today:\n")
         text += [f"- {u}" for u in unsupported]
+        text.append("")
+    for rung, (passed, ran, n, top) in W2_FAILURES.items():
+        if passed == ran:
+            continue
+        text.append(f"W2 on {rung}: {passed}/{ran} pass ({n - ran} skipped); the largest failure "
+                    "clusters (first error):\n")
+        text += [f"- {len(names)}: {o} (e.g. `{names[0]}`)" for o, names in top]
         text.append("")
     text.append(markdown_tables(rows, totals))
     (ROOT / "research" / "LADDER.md").write_text("\n".join(text) + "\n")
