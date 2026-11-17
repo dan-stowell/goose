@@ -17,3 +17,4 @@ Append-only: one line per commit, a paragraph at each milestone.
 - 2026-11-17 LADDER.md and research/runs/20261117T013206Z-de28e5b6.json from a full demo run (W1 4.1/2.6/10.6 s; W2 22.5/2.7 s stock, self-hosted 30/771).
 - 2026-11-17 feat-enums: fixed-mode enums, variant types/constructors/constants, match over enums and integers (coverage, overlap, binders), results generic over constness, instantiation chain limit.
 - 2026-11-17 feat-storage: selfhost gets limited arrays (T[..k] fixed struct, T[..]) and packed variable-size storage (T[], T[uN], T[varint], variable struct fields, varint), pop_n.
+- 2026-11-17 feat-storage rebased on master (enums, stdlib): run 40 -> 63, reject 39, stdlib 6; index_symbol added for two unindexed temporary-root pushes.

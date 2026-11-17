@@ -899,6 +899,7 @@ fn project_result(ctx: Compiler&, call: i64, index: i64, scope: i64) -> i64 {
         let temporary_scope = scope_new(ctx, scope, ctx.checking_function);
         v.root = ctx.symbols.len;
         ctx.symbols.push(Symbol { token: ctx.nodes[n].token, ns: -1, kind: 4, decl: n, scope: temporary_scope, ty: v.ty, state: 2 });
+        index_symbol(ctx, v.root);
     }
     annotate(ctx, n, v);
     return n;
@@ -1448,6 +1449,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         if call < 0 && contains_view(ctx, ty) {
             let own = ctx.symbols.len;
             ctx.symbols.push(Symbol { token: ctx.nodes[param].token, ns: -1, kind: 4, decl: param, scope: 0, ty: ty, state: 2 });
+            index_symbol(ctx, own);
             if ctx.types[ty].kind == T_REFERENCE || ctx.types[ty].kind == T_SLICE { ctx.symbols[s].root = own; }
             ctx.symbols[s].held = own;
         }
