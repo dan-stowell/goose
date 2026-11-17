@@ -90,7 +90,9 @@ def positive_fixtures():
 
 
 def error_fixtures():
-    return sorted((TEST / "errors").glob("*.goose")) + sorted((TEST / "errors_tc").glob("*.goose"))
+    own = [f for f in sorted((ROOT / "selfhost" / "tests").glob("*.goose"))
+           if re.search(r"^// error: ", f.read_text(encoding="utf-8"), re.MULTILINE)]
+    return sorted((TEST / "errors").glob("*.goose")) + sorted((TEST / "errors_tc").glob("*.goose")) + own
 
 
 def score_run(sh, f, work):

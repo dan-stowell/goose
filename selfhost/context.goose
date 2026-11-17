@@ -48,6 +48,13 @@ struct Compiler {
     fielddefs: Field[>..]&,
     scopes: Scope[>..]&,
     symbols: Symbol[>..]&,
+    symbol_buckets: i64[>..]&,
+    symbol_chain: i64[>..]&,
+    call_start: i64[>..]&,
+    call_targets: i64[>..]&,
+    cycle_stack: i64[>..]&,
+    cycle_counter: i64 = 0,
+    cycle_top: i64 = 0,
 }
 
 fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
@@ -75,6 +82,11 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
     var owned_fielddefs: Field[>..] = [];
     var owned_scopes: Scope[>..] = [];
     var owned_symbols: Symbol[>..] = [];
+    var owned_symbol_buckets: i64[>..] = [];
+    var owned_symbol_chain: i64[>..] = [];
+    var owned_call_start: i64[>..] = [];
+    var owned_call_targets: i64[>..] = [];
+    var owned_cycle_stack: i64[>..] = [];
     var ctx = Compiler {
         function_instances: owned_function_instances,
         checked_calls: owned_checked_calls,
@@ -100,6 +112,11 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
         fielddefs: owned_fielddefs,
         scopes: owned_scopes,
         symbols: owned_symbols,
+        symbol_buckets: owned_symbol_buckets,
+        symbol_chain: owned_symbol_chain,
+        call_start: owned_call_start,
+        call_targets: owned_call_targets,
+        cycle_stack: owned_cycle_stack,
     };
     compile_command(ctx, mode, path, output);
 }

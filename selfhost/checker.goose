@@ -30,6 +30,10 @@ struct Specialization {
     result_inexact: bool = false,
     result_used: bool = false,
     visit: i64 = 0,
+    cycle_index: i64 = -1,
+    cycle_low: i64 = 0,
+    cycle_open: bool = false,
+    cycle: i64 = -1,
 }
 struct CheckedCall { node: i64, scope: i64, callee: i64 }
 struct Shrink { root: i64, balanced: bool }
@@ -402,6 +406,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         let temporary_scope = scope_new(ctx, scope, ctx.checking_function);
         let temporary_root = ctx.symbols.len;
         ctx.symbols.push(Symbol { token: x.token, ns: -1, kind: 4, decl: n, scope: temporary_scope, ty: v.ty, state: 2 });
+        index_symbol(ctx, temporary_root);
         v.root = temporary_root;
         if tag != N_CALL || ctx.nodes[n].symbol == -27 { v.readonly = true; }
     }
@@ -871,10 +876,10 @@ fn check_program(ctx: Compiler&) {
         changed = ctx.effect_revision != before;
     }
     ctx.checking_function = -1;
+    call_cycles(ctx);
     for call in ctx.checked_calls {
         let caller = ctx.scopes[call.scope].function;
-        ctx.visit++;
-        if caller >= 0 && reaches_function(ctx, call.callee, caller, ctx.visit) {
+        if caller >= 0 && ctx.specializations[call.callee].cycle == ctx.specializations[caller].cycle {
             for local in ctx.symbols {
                 if local.kind == 2 && local.ty >= 0 && ctx.scopes[local.scope].function == caller && ctx.types[local.ty].size_class > 0 && scope_contains(ctx, local.scope, call.scope) { error_at(ctx, ctx.nodes[call.node].token, "call into a recursive cycle while nonfixed local is in scope"); }
             }
@@ -887,12 +892,47 @@ recursive fn stable_array_path(ctx: Compiler&, n: i64) -> bool {
     if x.tag == N_MEMBER { return ctx.types[x.ty].kind != T_REFERENCE && stable_array_path(ctx, x.a); }
     return false;
 }
-recursive fn reaches_function(ctx: Compiler&, from: i64, target: i64, visit: i64) -> bool {
-    if from == target { return true; }
-    if ctx.specializations[from].visit == visit { return false; }
-    ctx.specializations[from].visit = visit;
-    for call in ctx.checked_calls { if ctx.scopes[call.scope].function == from && reaches_function(ctx, call.callee, target, visit) { return true; } }
-    return false;
+// A call is into a recursive cycle exactly when callee and caller share a
+// strongly connected component of the call graph. The graph is laid out once
+// as offsets and targets (calls grouped by caller), then one Tarjan pass
+// stores each specialization's component on it.
+fn call_cycles(ctx: Compiler&) {
+    let count = ctx.specializations.len;
+    ctx.call_start.push(0);
+    for i in count { ctx.call_start.push(0); }
+    for call in ctx.checked_calls { let f = ctx.scopes[call.scope].function; if f >= 0 { ctx.call_start[f + 1]++; } }
+    for i in count { ctx.call_start[i + 1] += ctx.call_start[i]; }
+    var fill: i64[>..] = [];
+    for i in count { fill.push(ctx.call_start[i]); }
+    for call in ctx.checked_calls { ctx.call_targets.push(-1); }
+    for call in ctx.checked_calls {
+        let f = ctx.scopes[call.scope].function;
+        if f >= 0 { ctx.call_targets[fill[f]] = call.callee; fill[f]++; }
+    }
+    for i in count { if ctx.specializations[i].cycle_index < 0 { strong_connect(ctx, i); } }
+}
+recursive fn strong_connect(ctx: Compiler&, v: i64) {
+    ctx.specializations[v].cycle_index = ctx.cycle_counter; ctx.specializations[v].cycle_low = ctx.cycle_counter; ctx.cycle_counter++;
+    // The stack only grows (a pop would make check_program shrink ctx, §5.1).
+    if ctx.cycle_top == ctx.cycle_stack.len { ctx.cycle_stack.push(v); } else { ctx.cycle_stack[ctx.cycle_top] = v; }
+    ctx.cycle_top++; ctx.specializations[v].cycle_open = true;
+    for e in ctx.call_start[v]..ctx.call_start[v + 1] {
+        let w = ctx.call_targets[e];
+        if ctx.specializations[w].cycle_index < 0 {
+            strong_connect(ctx, w);
+            if ctx.specializations[w].cycle_low < ctx.specializations[v].cycle_low { ctx.specializations[v].cycle_low = ctx.specializations[w].cycle_low; }
+        } else if ctx.specializations[w].cycle_open && ctx.specializations[w].cycle_index < ctx.specializations[v].cycle_low {
+            ctx.specializations[v].cycle_low = ctx.specializations[w].cycle_index;
+        }
+    }
+    if ctx.specializations[v].cycle_low == ctx.specializations[v].cycle_index {
+        var done = false;
+        while !done {
+            ctx.cycle_top--; let w = ctx.cycle_stack[ctx.cycle_top];
+            ctx.specializations[w].cycle_open = false; ctx.specializations[w].cycle = v;
+            done = w == v;
+        }
+    }
 }
 recursive fn initialization_order(ctx: Compiler&, file: i64) {
     if ctx.sources[file].visited != 0 { return; }

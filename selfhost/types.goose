@@ -116,12 +116,37 @@ fn scope_new(ctx: Compiler&, parent: i64, function: i64) -> i64 {
     ctx.scopes.push(Scope { parent: parent, function: function, depth: depth });
     return id;
 }
+// Symbols are found through a hash of (scope, name) chained through
+// symbol_chain, newest first, so a lookup touches only its own bucket.
+fn symbol_hash(ctx: Compiler&, scope: i64, token: i64) -> i64 {
+    var h: u64 = 14695981039346656037 ^ (scope as u64);
+    if token >= 0 { for c in ctx.tokens[token].text { h = (h ^ c) * 1099511628211; } }
+    return ((h ^ (h >> 29)) & (ctx.symbol_buckets.len as u64 - 1)) as i64;
+}
+fn index_symbol(ctx: Compiler&, id: i64) {
+    ctx.symbol_chain.push(-1);
+    if ctx.symbols.len * 2 > ctx.symbol_buckets.len {
+        var size = ctx.symbol_buckets.len * 2; if size < 1024 { size = 1024; }
+        // Grow only: shrinking ctx's arrays here would make every caller of
+        // register_symbol a possible shrink of ctx (§5.1).
+        while ctx.symbol_buckets.len < size { ctx.symbol_buckets.push(-1); }
+        for i in size { ctx.symbol_buckets[i] = -1; }
+        for s, i in ctx.symbols {
+            let b = symbol_hash(ctx, s.scope, s.token);
+            ctx.symbol_chain[i] = ctx.symbol_buckets[b]; ctx.symbol_buckets[b] = i;
+        }
+        return;
+    }
+    let b = symbol_hash(ctx, ctx.symbols[id].scope, ctx.symbols[id].token);
+    ctx.symbol_chain[id] = ctx.symbol_buckets[b]; ctx.symbol_buckets[b] = id;
+}
 fn find_symbol(ctx: Compiler&, token: i64, ns: i64, scope: i64, kind: i64) -> i64 {
-    var i = ctx.symbols.len;
-    while i > 0 {
-        i--;
+    if ctx.symbol_buckets.len == 0 { return -1; }
+    var i = ctx.symbol_buckets[symbol_hash(ctx, scope, token)];
+    while i >= 0 {
         let s = ctx.symbols[i];
         if s.scope == scope && (kind == 0 || s.kind == kind) && same_name(ctx, s.token, token) && (scope != 0 || same_name(ctx, s.ns, ns)) { return i; }
+        i = ctx.symbol_chain[i];
     }
     return -1;
 }
@@ -152,6 +177,7 @@ fn register_symbol(ctx: Compiler&, token: i64, ns: i64, kind: i64, decl: i64, sc
     if previous >= 0 && !(kind == 3 && ctx.symbols[previous].kind == 3) { error_at(ctx, token, "name already declared in this scope"); }
     let id = ctx.symbols.len;
     ctx.symbols.push(Symbol { token: token, ns: ns, kind: kind, decl: decl, scope: scope, flags: flags });
+    index_symbol(ctx, id);
     return id;
 }
 fn register_declarations(ctx: Compiler&) {

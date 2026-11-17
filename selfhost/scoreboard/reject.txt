@@ -1,3 +1,4 @@
 errors/double_optional
 errors_tc/constant_division_overflow
 errors_tc/diverging_initializer
+tests/recursive_nonfixed_local
