@@ -15,3 +15,11 @@ then join"). **Number.** 0.11-0.14 s over 7 interleaved runs (load ~5), every fi
 ctx", which the checker then rejects at call sites that write through ctx after the call, §5.1), so the
 table grows in place and the Tarjan stack keeps its own top index. Easy: parallel arrays of i64 are the natural
 data shape.
+
+## 2. Overload resolution scanned every symbol twice per overloaded call (2026-11-17)
+**Before.** After finding 1, W1 front end 0.13-0.18 s, 1,019 M user instructions; perf: 22% in overload_member,
+called for every symbol by resolve_overload. **Fix.** Overloads share the (scope, name) bucket of finding 1's
+hash: walk that chain only. **Number.** 0.09-0.14 s (7 interleaved runs, load 9.4: the ranges touch at 0.14, so
+the count is the proof): 647 M instructions (-37%); outcomes identical. **Goose.** Forced: a local list of
+candidates is rejected (§7.8: a non-fixed-size local may not be in scope across a call into its own recursive
+cycle), so the loop walks the chain directly, which needed the order-independence argument written in the code.

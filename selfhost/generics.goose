@@ -129,9 +129,13 @@ fn overload_member(ctx: Compiler&, candidate: i64, selected: i64) -> bool {
     return a.kind == 3 && a.scope == b.scope && same_name(ctx, a.token, b.token) && (a.scope != 0 || same_name(ctx, a.ns, b.ns));
 }
 recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i64) -> i64 {
-    let limit = ctx.symbols.len;
+    // Overloads share the (scope, name) bucket of the selected symbol, so
+    // only its chain is walked. The result (the unique lowest tier, or an
+    // ambiguity) does not depend on the order candidates are seen in.
+    let head = ctx.symbol_buckets[symbol_hash(ctx, ctx.symbols[selected].scope, ctx.symbols[selected].token)];
     var count = 0;
-    for i in limit { if overload_member(ctx, i, selected) { count++; } }
+    var c = head;
+    while c >= 0 { if overload_member(ctx, c, selected) { count++; } c = ctx.symbol_chain[c]; }
     if count == 1 { return specialize_signature(ctx, selected, call, scope, false); }
     var e = ctx.nodes[call].first;
     while e >= 0 {
@@ -140,7 +144,9 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
     }
     ctx.nodes[call].flags |= 512;
     var best = -1; var best_tier = 3; var ambiguous = false;
-    for i in limit {
+    var next = head;
+    while next >= 0 {
+        let i = next; next = ctx.symbol_chain[i];
         if !overload_member(ctx, i, selected) { continue; }
         let original = ctx.nodes[ctx.symbols[i].decl];
         if child_count(ctx, original.a) != child_count(ctx, call) { continue; }
