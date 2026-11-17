@@ -11,8 +11,8 @@ byteview_provenance
 call_array_capacity
 call_location
 cnames
-continue_restores
 codegen_implicit_callees
+continue_restores
 cycle_holder_results
 cycle_threaded_before_join
 cycle_threaded_results
@@ -52,8 +52,8 @@ reassoc_discarded_value
 rebind_chain_loop
 recursive_loop_walk
 reftops_call_sync
-resize_negative
 rendered_pools
+resize_negative
 return_root_merge
 root_identifier
 short_circuit_temporaries
