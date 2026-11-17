@@ -16,3 +16,4 @@ Append-only: one line per commit, a paragraph at each milestone.
 - 2026-11-17 research/demo: the ladder for W1, W2 (sampled or --full), W3, stage by stage, with --before and a JSON record per run.
 - 2026-11-17 LADDER.md and research/runs/20261117T013206Z-de28e5b6.json from a full demo run (W1 4.1/2.6/10.6 s; W2 22.5/2.7 s stock, self-hosted 30/771).
 - 2026-11-17 feat-enums: fixed-mode enums, variant types/constructors/constants, match over enums and integers (coverage, overlap, binders), results generic over constness, instantiation chain limit.
+- 2026-11-17 emit-dedup: the selfhost emitter numbers names per function, writes refs as markers and partitions specializations to a fixed point; W1 sh2.c 1104 -> 195 functions, 4.51 MB -> 1.73 MB, 0 duplicate bytes; gcc -O2 11.82/12.63/13.36 s -> 5.54/5.74/6.30 s (load 4-7); front end -2.8% instructions; fixed point holds, scoreboard --enforce passes. research/notes/emit-dedup.md.
