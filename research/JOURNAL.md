@@ -53,3 +53,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 feat-storage: relative-link checks (pool and same-root targets, no copies of values holding self-relative links); reject 43 -> 53.
 - 2026-11-17 selfhost defer: parsed (statement or block), checked where written without leaving, emitted at block end, return, break and continue (stdlib 6->7 with exception, reject 19->27, run 30->31)
 - 2026-11-17 selfhost literal parameters (7.7) with whole-program literal verification, and .= as = in generic code; std.goose now checks once its two limited arrays and one block literal are patched out
+- 2026-11-17 selfhost static function values (7.6): block literals (named params or it) and function names bind leftover generics; blocks are anonymous nested functions of the caller, their frames handed to the HOF as env parameters. std.goose now checks with only its two limited arrays patched (run 31->33)

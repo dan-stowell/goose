@@ -44,17 +44,22 @@ fn c_multi(ctx: Compiler&, call: i64) -> const u8[:] {
     while i < ctx.c_multis.len { if ctx.c_multis[i] == call { return save_text(ctx, str("gg_multi_", i / 2)); } i += 2; }
     abort("internal error: multiple-result call not emitted");
 }
+// The frame of target, from the lexical parents of the function being
+// emitted, or from the env a function value's frame was handed in by.
 fn c_frame(ctx: Compiler&, target: i64) -> const u8[:] {
     if target == ctx.c_function { return "(&frame)"; }
     var out: u8[>..] = [];
-    out.append("frame.parent");
-    var current = ctx.scopes[ctx.symbols[ctx.specializations[ctx.c_function].symbol].scope].function;
-    while current != target {
+    out.append("frame");
+    var current = ctx.c_function; var dot = ".";
+    loop {
         if current < 0 { abort("internal error: missing lexical frame"); }
-        out.append("->parent");
+        var k = ctx.specializations[current].envs;
+        while k >= 0 { if ctx.edges[k].value == target { format(out, dot, "env"); out.push(1); format(out, target); out.push(2); return save_text(ctx, out); } k = ctx.edges[k].next; }
+        format(out, dot, "parent"); dot = "->";
         current = ctx.scopes[ctx.symbols[ctx.specializations[current].symbol].scope].function;
+        if current == target { return save_text(ctx, out); }
     }
-    return save_text(ctx, out);
+    return "";
 }
 // A global initializer runs in main before any function frame exists, so the
 // locals of its blocks, and of the defaults its calls take, are kept beside
@@ -993,6 +998,8 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     if decl.flags & 2 == 0 {
         let parent = ctx.scopes[ctx.symbols[spec.symbol].scope].function;
         if parent >= 0 { if comma { emit(ctx, ", "); } emit(ctx, c_frame(ctx, parent)); comma = true; }
+        var k = spec.envs;
+        while k >= 0 { if comma { emit(ctx, ", "); } emit(ctx, c_frame(ctx, ctx.edges[k].value)); comma = true; k = ctx.edges[k].next; }
         if ctx.types[spec.result].size_class == 1 { if comma { emit(ctx, ", "); } emit(ctx, str("gg_ref(NULL, ", dest.stack, ")")); comma = true; }
         if ctx.types[spec.result].size_class == 2 { if comma { emit(ctx, ", "); } emit(ctx, c_reference(ctx, dest)); comma = true; }
         if comma { emit(ctx, ", "); } emit(ctx, str("frame.base + ", ctx.c_slots));
@@ -1173,6 +1180,8 @@ fn c_signature(ctx: Compiler&, spec_id: i64) {
     }
     let parent = ctx.scopes[ctx.symbols[spec.symbol].scope].function;
     if parent >= 0 { if comma { emit(ctx, ", "); } emit_ref(ctx, "struct gg_frame_", parent); emit(ctx, " *parent"); comma = true; }
+    var k = spec.envs;
+    while k >= 0 { if comma { emit(ctx, ", "); } emit_ref(ctx, "struct gg_frame_", ctx.edges[k].value); emit_ref(ctx, " *env", ctx.edges[k].value); comma = true; k = ctx.edges[k].next; }
     if ctx.types[spec.result].size_class > 0 { if comma { emit(ctx, ", "); } emit(ctx, "gg_reference result"); comma = true; }
     if comma { emit(ctx, ", "); } emit(ctx, "int64_t base)");
 }
@@ -1186,6 +1195,8 @@ fn c_frame_struct(ctx: Compiler&, id: i64) {
     let parent = ctx.scopes[ctx.symbols[spec.symbol].scope].function;
     emit_ref(ctx, "struct gg_frame_", id); emit(ctx, " {\n  int64_t base;\n");
     if parent >= 0 { emit_ref(ctx, "  struct gg_frame_", parent); emit(ctx, " *parent;\n"); }
+    var k = spec.envs;
+    while k >= 0 { emit_ref(ctx, "  struct gg_frame_", ctx.edges[k].value); emit_ref(ctx, " *env", ctx.edges[k].value); emit(ctx, ";\n"); k = ctx.edges[k].next; }
     if ctx.types[spec.result].size_class > 0 { emit(ctx, "  gg_reference result;\n"); }
     var symbol = ctx.first_local[id];
     while symbol >= 0 {
@@ -1254,6 +1265,8 @@ fn emit_function(ctx: Compiler&, id: i64) {
     mark = spec_text(ctx, mark);
     emit(ctx, "  frame.base = base;\n");
     if ctx.scopes[ctx.symbols[spec.symbol].scope].function >= 0 { emit(ctx, "  frame.parent = parent;\n"); }
+    var k = spec.envs;
+    while k >= 0 { emit_ref(ctx, "  frame.env", ctx.edges[k].value); emit_ref(ctx, " = env", ctx.edges[k].value); emit(ctx, ";\n"); k = ctx.edges[k].next; }
     if child_count(ctx, spec.results) > 1 {
         declare_ref(ctx, "  gg_results_", id); ctx.c_declarations.append(" gg_return;\n");
         ctx.c_result = c_return_value(ctx, 0);

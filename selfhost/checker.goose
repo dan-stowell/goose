@@ -35,6 +35,9 @@ struct Specialization {
     cycle_open: bool = false,
     cycle: i64 = -1,
     rebinds: i64 = -1,
+    // The specializations whose frames this one receives for the function
+    // values it was given: their bodies' lexical frames (7.6).
+    envs: i64 = -1,
 }
 struct CheckedCall { node: i64, scope: i64, callee: i64 }
 struct Shrink { root: i64, balanced: bool }
@@ -569,6 +572,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     else if tag == N_RETURN {
         if ctx.checking_function < 0 { error_at(ctx, x.token, "return outside a function"); }
         if ctx.defer_loops >= 0 { error_at(ctx, x.token, "return cannot leave a defer body (§6.6)"); }
+        if ctx.nodes[ctx.symbols[ctx.specializations[ctx.checking_function].symbol].decl].flags & 4096 != 0 { error_at(ctx, x.token, "not implemented yet: return from a block literal"); }
         if x.a >= 0 { error_at(ctx, x.token, "not implemented yet: long-distance returns"); }
         check_returns(ctx, n, scope);
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
@@ -1757,10 +1761,21 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if array_method { ctx.nodes[n].flags |= 256; }
         return check_call(ctx, n, scope);
     }
-    let s = lookup(ctx, callee, scope, 3);
+    split_function_values(ctx, n, scope);
+    var s = lookup(ctx, callee, scope, 3);
     if s < 0 { error_at(ctx, ctx.nodes[callee].token, str("unknown function '", name, "'")); }
+    var is_block = false;
+    if ctx.symbols[s].decl == -2 {
+        // A call of a bound function value calls what it names: a block, or
+        // a function name resolving among its overloads as a call by it would.
+        let target = ctx.symbols[s].root;
+        if ctx.nodes[ctx.symbols[target].decl].flags & 4096 != 0 {
+            is_block = true; s = target;
+            if child_count(ctx, n) == 1 && ctx.symbols[target].held >= 0 { s = ctx.symbols[target].held; }
+        } else { s = target; }
+    }
     if ctx.symbols[s].scope != 0 && ctx.symbols[s].state != 2 { error_at(ctx, ctx.nodes[callee].token, "nested function called before its declaration is reached"); }
-    let concrete = resolve_overload(ctx, s, n, scope);
+    let concrete = if is_block { specialize_signature(ctx, s, n, scope, false) } else { resolve_overload(ctx, s, n, scope) };
     if concrete == -2 { return check_dispatch(ctx, n, scope); }
     fill_defaults(ctx, concrete, n);
     let spec = check_function(ctx, concrete, n, scope);
@@ -1811,6 +1826,54 @@ recursive fn check_dispatch(ctx: Compiler&, n: i64, scope: i64) -> Value {
     ctx.nodes[n].symbol = -40;
     return Value { ty: result };
 }
+// Function-value arguments (7.6), a function name or a block literal, come
+// after the others and bind the callee's leftover generic parameters. They
+// move from the call's arguments to a list in its c, once.
+fn function_value_argument(ctx: Compiler&, n: i64, scope: i64) -> bool {
+    let x = ctx.nodes[n];
+    if x.tag == N_FUNVAL { return true; }
+    return x.tag == N_NAME && x.first < 0 && lookup(ctx, n, scope, 2) < 0 && lookup(ctx, n, scope, 3) >= 0;
+}
+fn split_function_values(ctx: Compiler&, call: i64, scope: i64) {
+    if ctx.nodes[call].flags & 2048 != 0 { return; }
+    ctx.nodes[call].flags |= 2048;
+    var e = ctx.nodes[call].first; var previous = -1;
+    while e >= 0 && !function_value_argument(ctx, ctx.edges[e].value, scope) { previous = e; e = ctx.edges[e].next; }
+    if e < 0 { return; }
+    let values = node(ctx, N_BLOCK, ctx.nodes[call].token);
+    while e >= 0 {
+        let v = ctx.edges[e].value;
+        if !function_value_argument(ctx, v, scope) { error_at(ctx, ctx.nodes[v].token, "a function value must be a function name or a block literal, after the other arguments"); }
+        child(ctx, values, v); e = ctx.edges[e].next;
+    }
+    if previous < 0 { ctx.nodes[call].first = -1; ctx.nodes[call].last = -1; }
+    else { ctx.edges[previous].next = -1; ctx.nodes[call].last = previous; }
+    ctx.nodes[call].c = values;
+}
+// A block literal is an anonymous nested function of the code calling with
+// it, its parameters untyped. One written without `=>` has a variant taking
+// `it` for a call with one argument, kept in the template's held.
+fn block_template(ctx: Compiler&, n: i64, scope: i64) -> i64 {
+    if ctx.nodes[n].symbol >= 0 { return ctx.nodes[n].symbol; }
+    let symbol = block_function(ctx, n, ctx.nodes[n].a, scope);
+    if ctx.nodes[n].a < 0 || ctx.nodes[ctx.nodes[n].a].first < 0 {
+        let t = ctx.tokens[ctx.nodes[n].token];
+        let it = ctx.tokens.len;
+        ctx.tokens.push(Token { kind: TK_NAME, text: "it", file: t.file, offset: t.offset, line: t.line, column: t.column });
+        let params = node(ctx, N_BLOCK, ctx.nodes[n].token); child(ctx, params, node(ctx, N_PARAM, it));
+        ctx.symbols[symbol].held = block_function(ctx, n, params, scope);
+    }
+    ctx.nodes[n].symbol = symbol;
+    return symbol;
+}
+fn block_function(ctx: Compiler&, n: i64, params: i64, scope: i64) -> i64 {
+    let f = node(ctx, N_FUNCTION, ctx.nodes[n].token);
+    var p = params; if p < 0 { p = node(ctx, N_BLOCK, ctx.nodes[n].token); }
+    ctx.nodes[f].a = p; ctx.nodes[f].c = ctx.nodes[n].b; ctx.nodes[f].flags = 4096; ctx.nodes[f].ns = -1;
+    let s = register_symbol(ctx, ctx.nodes[n].token, -1, 3, f, scope, 0);
+    ctx.symbols[s].state = 2; ctx.symbols[s].capture_limit = ctx.symbols.len;
+    return s;
+}
 // A call leaving out trailing parameters gets a fresh clone of each one's
 // default after its written arguments, in parameter order (§7.1). The
 // call's flags keep the written count plus one from bit 16, so the rest are
@@ -1822,7 +1885,6 @@ fn fill_defaults(ctx: Compiler&, symbol: i64, call: i64) {
     var written = 0;
     while p >= 0 && e >= 0 { p = ctx.edges[p].next; e = ctx.edges[e].next; written++; }
     if p < 0 { return; }
-    if ctx.nodes[call].flags & 128 != 0 { error_at(ctx, ctx.nodes[call].token, "not implemented yet: a trailing block with parameter defaults"); }
     ctx.nodes[call].flags |= (written + 1) << 16;
     while p >= 0 {
         let parameter = ctx.edges[p].value;
@@ -1995,6 +2057,15 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
     let body = clone_tree(ctx, ctx.nodes[decl].c);
     let specialized_params = clone_tree(ctx, params);
     ctx.specializations.push(Specialization { symbol: symbol, body: body, scope: scope, result: result, state: 1, results: results, parameters: specialized_params, caller: ctx.checking_function });
+    var fv = ctx.symbols[symbol].function_values;
+    while fv >= 0 {
+        let target = ctx.symbols[ctx.edges[fv].value].root;
+        let env = ctx.scopes[ctx.symbols[target].scope].function;
+        var known = false; var k = ctx.specializations[id].envs;
+        while k >= 0 { if ctx.edges[k].value == env { known = true; } k = ctx.edges[k].next; }
+        if env >= 0 && !known { let edge = ctx.edges.len; ctx.edges.push(Edge { value: env, next: ctx.specializations[id].envs }); ctx.specializations[id].envs = edge; }
+        fv = ctx.edges[fv].next;
+    }
     p = ctx.nodes[specialized_params].first; actual = -1; if call >= 0 { actual = ctx.nodes[call].first; }
     while p >= 0 {
         let param = ctx.edges[p].value;

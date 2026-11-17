@@ -26,6 +26,7 @@ cycle_holder_results
 cycle_outside_reads_holder
 cycle_return_mixed
 cycle_threaded_before_join
+cycle_threaded_context
 cycle_threaded_results
 cycle_threaded_slices
 dispatch_result_no_reference
@@ -125,6 +126,7 @@ short_circuit_temporaries
 shrink_global_let_views
 shrink_pending_own_local
 slice_parameter_store
+shrink_callee_value_region
 slice_ref_loads
 slice_ref_slots
 slice_ref_stores

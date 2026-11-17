@@ -58,6 +58,7 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
     if generic && decl.flags & 2 != 0 { error_at(ctx, decl.token, "extern functions must be fully typed and non-generic"); }
     if !generic {
         if written >= 0 { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, "non-generic function takes no type arguments"); }
+        if ctx.nodes[call].c >= 0 { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, "function values bind to generic parameters"); }
         return symbol;
     }
     if !arity_fits(ctx, original.decl, child_count(ctx, call)) { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, "argument count mismatch"); }
@@ -122,14 +123,34 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
         }
     }
     var e = key;
+    var value = -1; if ctx.nodes[call].c >= 0 { value = ctx.nodes[ctx.nodes[call].c].first; }
+    var bound = -1;
     while e >= 0 {
         let s = ctx.edges[e].value;
+        if ctx.symbols[s].ty < 0 && value >= 0 {
+            // Leftover generics bind the function values, in order (7.6).
+            let v = ctx.edges[value].value; value = ctx.edges[value].next;
+            var target = -1;
+            if ctx.nodes[v].tag == N_FUNVAL { target = block_template(ctx, v, caller_scope); }
+            else {
+                target = lookup(ctx, v, caller_scope, 3);
+                if ctx.symbols[target].decl == -2 { target = ctx.symbols[target].root; }
+            }
+            let f = register_symbol(ctx, ctx.symbols[s].token, -1, 3, -2, bindings, 0);
+            ctx.symbols[f].root = target; ctx.symbols[f].state = 2;
+            let edge = ctx.edges.len; ctx.edges.push(Edge { value: f, next: bound }); bound = edge;
+            ctx.symbols[s].ty = 0;
+            ctx.edges[e].value = -1099511627776 - target;
+            if ctx.edges[e].next < 0 { ctx.edges[e].next = literals; break; }
+            e = ctx.edges[e].next; continue;
+        }
         if ctx.symbols[s].ty < 0 { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, str("cannot infer type parameter '", ctx.tokens[ctx.symbols[s].token].text, "'")); }
         ctx.edges[e].value = ctx.symbols[s].ty;
         if ctx.edges[e].next < 0 { ctx.edges[e].next = literals; break; }
         e = ctx.edges[e].next;
     }
     if key < 0 { key = literals; }
+    if value >= 0 { if probing { return -1; } error_at(ctx, ctx.nodes[call].token, "more function values than unbound generic parameters"); }
     for instance in ctx.function_instances {
         if instance.template == symbol && same_type_arguments(ctx, instance.arguments, key) { return instance.symbol; }
     }
@@ -138,6 +159,7 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
     let concrete = register_symbol(ctx, original.token, original.ns, 5, specialized, bindings, original.flags);
     ctx.symbols[concrete].state = 2; ctx.symbols[concrete].capture_limit = original.capture_limit;
     ctx.function_instances.push(FunctionInstance { template: symbol, arguments: key, symbol: concrete });
+    ctx.symbols[concrete].function_values = bound;
     e = literals;
     while e >= 0 {
         var q = ctx.nodes[ctx.nodes[specialized].a].first;

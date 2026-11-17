@@ -65,6 +65,9 @@ struct Symbol {
     // A literal parameter's (flag 64) adaptations: edges whose value is a
     // type id << 32 | the token where the parameter adapted to it.
     adapted: i64 = -1,
+    // An instance's function-value bindings (7.6): edges to the kind-3
+    // symbols, decl -2, that name each bound generic in its scope.
+    function_values: i64 = -1,
 }
 
 
