@@ -7,6 +7,8 @@ fn c_type(ctx: Compiler&, ty: i64) -> const u8[:] {
     let t = ctx.types[ty];
     if t.kind == T_VOID || t.kind == T_BOTTOM { return "void"; }
     if t.kind == T_NULL { return "void *"; }
+    if t.kind == T_REFERENCE && t.flags & 8 != 0 { return save_text(ctx, str("int", t.bytes * 8, "_t")); }
+    if t.kind == T_REFERENCE && t.flags & 16 != 0 { return save_text(ctx, str("uint", t.bytes * 8, "_t")); }
     if t.kind == T_BOOL { return "uint8_t"; }
     if t.kind == T_INTEGER {
         if t.flags & 2 != 0 { return save_text(ctx, str("uint", t.bytes * 8, "_t")); }
@@ -170,6 +172,36 @@ recursive fn c_condition(ctx: Compiler&, n: i64) -> CValue {
     }
     return c_decay(ctx, c_expression(ctx, n));
 }
+// The base a pool-relative link counts from: its global array's elements.
+fn c_pool_base(ctx: Compiler&, ty: i64) -> const u8[:] {
+    let t = ctx.types[ty];
+    if t.flags & 16 == 0 { return "NULL"; }
+    var owner = c_symbol(ctx, t.decl);
+    if t.count >= 256 {
+        let f = find_field(ctx, ctx.symbols[t.decl].ty, t.count / 256 - 1);
+        owner = save_text(ctx, str("(", owner, ").f", f));
+    }
+    return save_text(ctx, str("(", owner, ").base"));
+}
+// Loads the reference a relative slot at address holds.
+fn c_relative_load(ctx: Compiler&, ty: i64, address: const u8[:]) -> const u8[:] {
+    return save_text(ctx, str("((", c_type(ctx, plain_reference(ctx, ty)), ")gg_rel_load(", address, ", ", ctx.types[ty].bytes, ", ", c_pool_base(ctx, ty), "))"));
+}
+fn c_relative_store(ctx: Compiler&, ty: i64, address: const u8[:], v: CValue) {
+    emit(ctx, str("  gg_rel_store(", address, ", ", ctx.types[ty].bytes, ", ", c_pool_base(ctx, ty), ", (void *)", c_adapt(ctx, v, plain_reference(ctx, ty)), ");\n"));
+}
+// Whether a value holds a self-relative link, which is valid only where it
+// was stored: such values are built in place.
+recursive fn holds_self_relative(ctx: Compiler&, ty: i64) -> bool {
+    let t = ctx.types[ty];
+    if t.kind == T_REFERENCE { return t.flags & 8 != 0; }
+    if t.kind == T_ARRAY && t.flags == 0 { return holds_self_relative(ctx, t.element); }
+    if t.kind == T_STRUCT && t.size_class == 0 {
+        var e = t.first;
+        while e >= 0 { if holds_self_relative(ctx, ctx.fielddefs[ctx.edges[e].value].ty) { return true; } e = ctx.edges[e].next; }
+    }
+    return false;
+}
 fn c_literal(ctx: Compiler&, s: const u8[:]) -> const u8[:] {
     var result: u8[>..] = [];
     result.push('"');
@@ -282,6 +314,7 @@ recursive fn emit_type(ctx: Compiler&, ty: i64) {
         emit_type(ctx, t.element);
         var extent = t.count; if extent == 0 { extent = 1; }
         emit(ctx, str("#pragma pack(push, 1)\ntypedef struct { uint", limited_width(t.count) * 8, "_t len; ", c_type(ctx, t.element), " e[", extent, "]; } ", c_type(ctx, ty), ";\n#pragma pack(pop)\n"));
+    } else if is_relative(ctx, ty) { emit_type(ctx, t.element);
     } else if t.kind == T_REFERENCE && (ctx.types[t.element].size_class == 0 || ctx.types[t.element].size_class == 3) {
         emit_type(ctx, t.element); emit(ctx, str("typedef ", c_type(ctx, t.element), " *", c_type(ctx, ty), ";\n"));
     } else if t.kind == T_REFERENCE || t.kind == T_ARRAY || t.kind == T_SLICE { emit_type(ctx, t.element); }
@@ -336,7 +369,7 @@ fn c_render(ctx: Compiler&, out: CValue, v: CValue) {
     }
     else if (t.kind != T_INTEGER && t.kind != T_FLOAT && t.kind != T_BOOL && element_type(ctx, a.ty) != integer_type(ctx, 1, true)) {
         if ctx.formatters > 0 { emit(ctx, str("  gg_render_base = frame.base + ", ctx.c_slots, ";\n")); }
-        emit(ctx, str("  gg_render_", a.ty, "(", dst, ",", a.code, ");\n"));
+        emit(ctx, str("  gg_render_", a.ty, "(", dst, ",", if holds_self_relative(ctx, a.ty) { a.address } else { a.code }, ");\n"));
     }
     else if t.kind == T_INTEGER { emit(ctx, str("  ", if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(", dst, ", ", a.code, ");\n")); }
     else if t.kind == T_FLOAT { emit(ctx, str("  gg_float(", dst, ", ", a.code, ", ", if t.bytes == 4 { "1" } else { "0" }, ");\n")); }
@@ -406,6 +439,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
             return CValue { code: save_text(ctx, str("((int64_t)(", c_view(ctx, a), ").len)")), ty: x.ty, address: "", stack: "" };
         }
         let field = c_field(ctx, a.ty, a.code, x.symbol);
+        if is_relative(ctx, field.ty) { return CValue { code: c_relative_load(ctx, field.ty, field.address), ty: x.ty, address: field.address, stack: "" }; }
         if ctx.types[field.ty].kind == T_VARINT { return CValue { code: save_text(ctx, str("gg_zig_read(", field.code, ")")), ty: x.ty, address: "", stack: "" }; }
         return CValue { code: field.code, ty: x.ty, address: field.address, stack: field.stack };
     }
@@ -419,6 +453,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         if tag == N_INDEX {
             let pointer = save_text(ctx, str("((", c_type(ctx, elem), " *)", view, ".data) + gg_index(", lower, ", ", view, ".len)"));
             let sampled = raw_temporary(ctx, save_text(ctx, str(c_type(ctx, elem), " *"))); emit(ctx, str("  ", sampled, " = ", pointer, ";\n"));
+            if is_relative(ctx, elem) { return CValue { code: c_relative_load(ctx, elem, sampled), ty: x.ty, address: sampled, stack: "" }; }
             return CValue { code: save_text(ctx, str("(*", sampled, ")")), ty: x.ty, address: sampled, stack: "" };
         }
         var hi = CValue { code: save_text(ctx, str(view, ".len")), ty: default_integer(ctx), address: "", stack: "" };
@@ -535,7 +570,8 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
             return;
         }
         let view = c_view(ctx, v); emit(ctx, str("  gg_append(", c_reference(ctx, dest), ", (", view, ").data, (", view, ").len, sizeof(", c_type(ctx, elem), "));\n"));
-    } else { emit(ctx, str("  ", dest.code, " = ", c_adapt(ctx, v, dest.ty), ";\n")); }
+    } else if is_relative(ctx, dest.ty) { c_relative_store(ctx, dest.ty, dest.address, v); }
+    else { emit(ctx, str("  ", dest.code, " = ", c_adapt(ctx, v, dest.ty), ";\n")); }
 }
 // Appends the value of n, as a value of the variable-size type dest.ty, at
 // the top of dest.stack: built in place wherever the expression allows.
@@ -839,6 +875,13 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
             emit(ctx, str("  gg_rpop_n(", ref, ", ", count.code, ", ", c_element_size(ctx, element), ");\n"));
             return no_c_value(ctx);
         }
+        if builtin == -10 && holds_self_relative(ctx, element) {
+            let slot = raw_temporary(ctx, save_text(ctx, str(c_type(ctx, element), " *")));
+            emit(ctx, str("  ", slot, " = gg_push_slot(", ref, ", ", c_element_size(ctx, element), ");\n"));
+            let code = save_text(ctx, str("(*", slot, ")"));
+            c_into(ctx, arg, CValue { code: code, ty: element, address: slot, stack: "" });
+            return CValue { code: slot, ty: x.ty, address: "", stack: "" };
+        }
         if builtin == -10 {
             let v = snapshot(ctx, converted(ctx, c_expression(ctx, arg), element));
             emit(ctx, str("  gg_append(", ref, ", &", v.code, ", 1, sizeof(", c_type(ctx, element), "));\n"));
@@ -1001,6 +1044,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
             emit(ctx, str("  gg_dyn_assign(", dest.code, ", ", c_view(ctx, v), ", ", c_element_size(ctx, ctx.types[dest.ty].element), ");\n")); return;
         }
         if op == "=" { c_into(ctx, x.b, dest); return; }
+        if op == ".=" && x.flags & 1024 == 0 && is_relative(ctx, ctx.nodes[x.b].target) { let rhs = c_expression(ctx, x.b); c_relative_store(ctx, ctx.nodes[x.b].target, raw.address, rhs); return; }
         if op == ".=" && x.flags & 1024 == 0 { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_adapt(ctx, rhs, ctx.nodes[x.b].target), ";\n")); return; }
         let old = snapshot(ctx, dest);
         var right = CValue { code: "1", ty: dest.ty, address: "", stack: "" };

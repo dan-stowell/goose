@@ -1,3 +1,4 @@
+append_copied_refs
 append_destination_storage
 append_references
 array_length_boundaries
@@ -45,9 +46,11 @@ global_optional_flow
 growshrink_literal_views
 growshrink_reach_stores
 holder_param_bounds
+holder_param_exact
 holder_param_readbacks
 holder_variant_argument
 inline_nested_calls
+inpool_u16
 integer_match_extremes
 let_contents
 limited_assign_sources
@@ -83,6 +86,9 @@ recursive_loop_walk
 redundant_casts
 reftops_call_sync
 rendered_pools
+relative_optional_zero
+relative_readback_param
+reloff_u16
 render_reference_cycle
 resize_negative
 return_root_merge
@@ -99,15 +105,18 @@ root_owner_borrowing
 root_owner_caches
 root_owner_choices
 root_owner_construction
+root_owner_links
 root_owner_sampling
 root_reference_fields
 root_split_params
 root_stored_owner_regions
 root_struct_declarations
 root_struct_types
+roots
 short_circuit_temporaries
 shrink_global_let_views
 shrink_pending_own_local
+slice_parameter_store
 slice_ref_loads
 slice_ref_slots
 slice_ref_stores

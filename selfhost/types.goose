@@ -94,6 +94,14 @@ fn optional_type(ctx: Compiler&, element: i64, readonly: bool) -> i64 {
     var bytes = 8; if ctx.types[element].size_class == 2 { bytes = 16; }
     return intern_type(ctx, Type { kind: T_REFERENCE, element: element, flags: flags, bytes: bytes });
 }
+fn is_relative(ctx: Compiler&, ty: i64) -> bool { return ty >= 0 && ctx.types[ty].kind == T_REFERENCE && ctx.types[ty].flags & 24 != 0; }
+// The reference a relative slot loads as and stores from.
+fn plain_reference(ctx: Compiler&, ty: i64) -> i64 {
+    if !is_relative(ctx, ty) { return ty; }
+    let t = ctx.types[ty];
+    if t.flags & 4 != 0 { return optional_type(ctx, t.element, t.flags & 1 != 0); }
+    return reference_type(ctx, t.element, t.flags & 1 != 0);
+}
 fn is_optional(ctx: Compiler&, ty: i64) -> bool { return ty >= 0 && ctx.types[ty].kind == T_REFERENCE && ctx.types[ty].flags & 4 != 0; }
 fn array_type(ctx: Compiler&, element: i64, mode: i64, count: i64) -> i64 {
     var size_class = 0;
@@ -341,12 +349,38 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
     } else if syntax.tag == N_TYPE_REF || syntax.tag == N_TYPE_OPTIONAL {
         var element = resolve_type_at(ctx, syntax.a, scope, true);
         var readonly = syntax.flags & 16 != 0;
-        if syntax.tag == N_TYPE_OPTIONAL {
+        if syntax.tag == N_TYPE_OPTIONAL && is_relative(ctx, element) {
+            let r = ctx.types[element];
+            ty = intern_type(ctx, Type { kind: T_REFERENCE, element: r.element, count: r.count, flags: r.flags | 4, decl: r.decl, bytes: r.bytes });
+        } else if syntax.tag == N_TYPE_OPTIONAL {
             // T&? is T?: optional only makes a reference nullable.
             if ctx.types[element].kind == T_REFERENCE { readonly = readonly || ctx.types[element].flags & 1 != 0; element = ctx.types[element].element; }
             ty = optional_type(ctx, element, readonly);
+        } else if syntax.b >= 0 {
+            // T&<w> stores the link as a w-wide offset: from the slot itself
+            // (signed), or from the base of a global pool array plus one.
+            let width = ctx.tokens[ctx.nodes[syntax.b].token].text;
+            var bytes = 0;
+            if width == "u8" { bytes = 1; } else if width == "u16" { bytes = 2; } else if width == "u32" { bytes = 4; } else if width == "u64" { bytes = 8; }
+            if bytes == 0 { error_at(ctx, ctx.nodes[syntax.b].token, "not implemented yet: varint relative references"); }
+            var pool = -1; var field = -1; var flags = 8;
+            if syntax.c >= 0 {
+                flags = 16;
+                var path = syntax.c;
+                if ctx.nodes[path].tag == N_MEMBER { path = ctx.nodes[path].a; }
+                pool = lookup(ctx, path, 0, 2);
+                if pool < 0 || ctx.symbols[pool].scope != 0 { error_at(ctx, ctx.nodes[path].token, "a relative reference's pool must be a global array"); }
+                if ctx.nodes[syntax.c].tag == N_MEMBER {
+                    // The field is named by its first spelling's token, so
+                    // the type is the same wherever it is written; the owner's
+                    // type may still be unresolved here.
+                    field = ctx.nodes[syntax.c].token;
+                    for t in ctx.types { if t.kind == T_REFERENCE && t.flags & 16 != 0 && t.decl == pool && t.count >= 256 && same_name(ctx, t.count / 256 - 1, field) { field = t.count / 256 - 1; } }
+                }
+            }
+            if readonly { flags |= 1; }
+            ty = intern_type(ctx, Type { kind: T_REFERENCE, element: element, count: bytes + (field + 1) * 256, flags: flags, decl: pool, bytes: bytes });
         } else { ty = reference_type(ctx, element, readonly); }
-        if syntax.b >= 0 { error_at(ctx, syntax.token, "not implemented yet: relative and optional references"); }
     } else { error_at(ctx, syntax.token, "not implemented yet: this type form"); }
     ctx.nodes[n].ty = ty;
     return ty;
@@ -503,6 +537,7 @@ recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
         let n = ctx.edges[e].value;
         if ctx.nodes[n].tag == N_PAD { error_at(ctx, ctx.nodes[n].token, "not implemented yet: explicit padding"); }
         let ft = resolve_type(ctx, ctx.nodes[n].a, scope);
+        if is_relative(ctx, ft) { plain_reference(ctx, ft); }
         if size_class == 2 && !root { error_at(ctx, ctx.nodes[n].token, "resizable field must be the final field"); }
         if ctx.types[ft].size_class > size_class { size_class = ctx.types[ft].size_class; }
         let f = ctx.fielddefs.len;

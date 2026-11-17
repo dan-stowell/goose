@@ -118,6 +118,34 @@ fn runtime_source() -> const u8[:] {
         if ((uintptr_t)s.data < (uintptr_t)a.data || (element && off % element) || (element && (int64_t)(off / element) + s.len > a.len)) gg_fail(message ? message : "slice not within this array");
         return element ? (int64_t)(off / element) : 0;
     }
+    static void *gg_push_slot(gg_reference a, size_t element) {
+        void *to = gg_allocate(a.stack, element); if (element) memset(to, 0, element); a.header->len++; return to;
+    }
+    /* Relative links: a signed offset from the slot itself, or an offset
+       from a pool's base plus one; 0 is null. */
+    static int64_t gg_rel_read(void *p, int w, int pool) {
+        if (w == 1) return pool ? (int64_t)*(uint8_t *)p : (int64_t)*(int8_t *)p;
+        if (w == 2) return pool ? (int64_t)*(uint16_t *)p : (int64_t)*(int16_t *)p;
+        if (w == 4) return pool ? (int64_t)*(uint32_t *)p : (int64_t)*(int32_t *)p;
+        return *(int64_t *)p;
+    }
+    static void *gg_rel_load(void *slot, int w, unsigned char *base) {
+        int64_t off = gg_rel_read(slot, w, base != NULL);
+        if (!off) return NULL;
+        return base ? base + off - 1 : (unsigned char *)slot + off;
+    }
+    static void gg_rel_store(void *slot, int w, unsigned char *base, void *target) {
+        int64_t off = 0;
+        if (target) {
+            off = base ? (int64_t)((unsigned char *)target - base) + 1 : (int64_t)((unsigned char *)target - (unsigned char *)slot);
+            if (!off) gg_fail("non-null relative reference encodes as null");
+            if (w < 8 && (base ? (off < 0 || (uint64_t)off >> (w * 8)) : (off < -((int64_t)1 << (w * 8 - 1)) || off >= ((int64_t)1 << (w * 8 - 1))))) gg_fail("relative reference offset overflow");
+        }
+        if (w == 1) *(uint8_t *)slot = (uint8_t)off;
+        else if (w == 2) *(uint16_t *)slot = (uint16_t)off;
+        else if (w == 4) *(uint32_t *)slot = (uint32_t)off;
+        else *(int64_t *)slot = off;
+    }
     static void gg_rpop_n(gg_reference a, int64_t k, size_t element) {
         if (k < 0 || k > a.header->len) gg_fail("pop_n count negative or beyond the array's length");
         gg_resize(a, a.header->len - k, element, NULL);

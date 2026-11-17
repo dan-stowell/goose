@@ -105,7 +105,10 @@ recursive fn parse_type(ctx: Compiler&) -> i64 {
             outer = node(ctx, N_TYPE_REF, t);
             if take(ctx, "<") {
                 ctx.nodes[outer].b = node(ctx, N_TYPE, identifier(ctx));
-                if take(ctx, "in") { ctx.nodes[outer].c = name_node(ctx, N_NAME); }
+                if take(ctx, "in") {
+                    ctx.nodes[outer].c = name_node(ctx, N_NAME);
+                    if take(ctx, ".") { let m = node(ctx, N_MEMBER, identifier(ctx)); ctx.nodes[m].a = ctx.nodes[outer].c; ctx.nodes[outer].c = m; }
+                }
                 close_angle(ctx);
             }
         } else if take(ctx, "?") {

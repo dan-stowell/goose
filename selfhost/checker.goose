@@ -64,7 +64,7 @@ fn annotate(ctx: Compiler&, n: i64, v: Value) -> Value {
 fn decay(ctx: Compiler&, v: Value) -> Value {
     var r = v;
     // An optional is not transparent: it decays only once narrowed.
-    if ctx.types[r.ty].kind == T_REFERENCE && ctx.types[r.ty].flags & 4 == 0 { r.ty = ctx.types[r.ty].element; }
+    if r.ty >= 0 && ctx.types[r.ty].kind == T_REFERENCE && ctx.types[r.ty].flags & 4 == 0 { r.ty = ctx.types[r.ty].element; }
     return r;
 }
 fn numeric(ctx: Compiler&, ty: i64) -> bool { return ctx.types[ty].kind == T_INTEGER || ctx.types[ty].kind == T_FLOAT; }
@@ -262,7 +262,7 @@ fn parameter_destination(ctx: Compiler&, ty: i64, external: bool) -> i64 {
     return ty;
 }
 fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
-    if !fits(ctx, v, target) {
+    if !fits(ctx, v, plain_reference(ctx, target)) {
         var text: u8[>..] = [];
         text.append("incompatible types: "); type_text(ctx, v.ty, text);
         if v.readonly && ctx.types[v.ty].kind != T_REFERENCE && ctx.types[v.ty].kind != T_SLICE { text.append(" (read-only)"); }
@@ -463,6 +463,8 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             if ctx.types[a.ty].size_class == 3 && ctx.types[v.ty].size_class != 0 && a.root >= 0 { v.root = root_component(ctx, a.root, f); }
             // A varint field reads as an i64 and is written only at construction.
             if ctx.types[v.ty].kind == T_VARINT { v.ty = default_integer(ctx); v.place = -1; }
+            // A relative link loads as the plain reference it encodes.
+            if is_relative(ctx, v.ty) { v.ty = plain_reference(ctx, v.ty); }
             v.held = a.held;
             var initializer = a.fields;
             while initializer >= 0 {
@@ -484,7 +486,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         if ctx.types[element].size_class != 0 { error_at(ctx, x.token, "variable-size elements require sequential iteration"); }
         if x.b >= 0 { let b = decay(ctx, check_expression(ctx, x.b, scope, -1)); if ctx.types[b.ty].kind != T_INTEGER { error_at(ctx, x.token, "index must be an integer"); } }
         if x.c >= 0 { let c = decay(ctx, check_expression(ctx, x.c, scope, -1)); if ctx.types[c.ty].kind != T_INTEGER { error_at(ctx, x.token, "slice bound must be an integer"); } }
-        v.ty = element; v.root = a.root; v.place = a.place; v.readonly = a.readonly;
+        v.ty = plain_reference(ctx, element); v.root = a.root; v.place = a.place; v.readonly = a.readonly;
         v.held = a.held;
         v.growshrink = a.growshrink;
         v.inexact = a.inexact;
@@ -1129,7 +1131,10 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     var v = decay(ctx, raw);
     if declared < 0 {
         declared = v.ty;
-        if ctx.nodes[n].flags & 16 != 0 || ((v.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) && ctx.types[v.ty].size_class > 0) || (ctx.nodes[init].tag == N_UNARY && ctx.tokens[ctx.nodes[init].token].text == "&") { declared = reference_type(ctx, v.ty, v.readonly); }
+        // A narrowed read of an optional slot still binds an optional.
+        let slot = plain_reference(ctx, slot_type(ctx, init));
+        if ctx.nodes[n].flags & 16 == 0 && is_optional(ctx, slot) && ctx.types[raw.ty].kind == T_REFERENCE && ctx.types[raw.ty].element == ctx.types[slot].element { declared = slot; v = raw; }
+        else if ctx.nodes[n].flags & 16 != 0 || ((v.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) && ctx.types[v.ty].size_class > 0) || (ctx.nodes[init].tag == N_UNARY && ctx.tokens[ctx.nodes[init].token].text == "&") { declared = reference_type(ctx, v.ty, v.readonly); }
     }
     if ctx.types[declared].kind == T_REFERENCE { v = raw; }
     if ctx.types[declared].size_class > 0 && !adapts_enum(ctx, decay(ctx, raw).ty, declared) && (raw.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) { error_at(ctx, ctx.nodes[init].token, "nonfixed storage is not copied implicitly; use copy or bind by reference"); }
@@ -1276,8 +1281,8 @@ recursive fn slot_type(ctx: Compiler&, n: i64) -> i64 {
     let x = ctx.nodes[n];
     if x.tag == N_UNARY && ctx.tokens[x.token].text == "(" { return slot_type(ctx, x.a); }
     if x.tag == N_NAME && x.symbol >= 0 { return ctx.symbols[x.symbol].ty; }
-    if x.tag == N_MEMBER && x.symbol >= 0 && ctx.types[decay(ctx, value_of(ctx, x.a)).ty].kind == T_STRUCT { return ctx.fielddefs[x.symbol].ty; }
-    if x.tag == N_INDEX { return element_type(ctx, ctx.nodes[x.a].ty); }
+    if x.tag == N_MEMBER && x.symbol >= 0 { let base = decay(ctx, value_of(ctx, x.a)).ty; if base >= 0 && ctx.types[base].kind == T_STRUCT { return ctx.fielddefs[x.symbol].ty; } }
+    if x.tag == N_INDEX && ctx.nodes[x.a].ty >= 0 { return element_type(ctx, ctx.nodes[x.a].ty); }
     return -1;
 }
 // A condition is a bool, or an optional tested for null.
@@ -1332,7 +1337,8 @@ recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
         record_rebind(ctx, target.symbol);
     } else {
         check_stored_view(ctx, stored, x.token);
-        store_lifetime(ctx, stored, raw.root, x.token);
+        // The link is stored in the container the path names.
+        store_lifetime(ctx, stored, decay(ctx, value_of(ctx, target.a)).root, x.token);
         record_rebind(ctx, path_root(ctx, x.a));
     }
     ctx.flow = fact_kill(ctx, ctx.flow, x.a, 0);
