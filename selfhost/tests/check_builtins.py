@@ -34,10 +34,14 @@ with tempfile.TemporaryDirectory(prefix='goose-builtins-') as tmp:
         print(source.name + ': reference output matches')
     negatives = {
         'type_arguments': 'var a: i64[>..] = []; print(check_length<i64>(a, 1));',
+        'merged_pool_shrink': 'var a: i64[>..]=[1]; reusable var p: i64[>..]=[2]; var r: i64[>..]& = if false { a } else { p }; r.clear();',
+        'slice_missing_default': 'var x=1; reusable[] var a: i64&[>..]=[]; a.alloc_slice(1);',
+        'slice_foreign_root': 'reusable[] var a: i64[>..]=[]; var b: i64[>..]=[1]; a.free_slice(b[..]);',
         'not_pool': 'var a: i64[>..]=[1]; a.free(0);',
         'slice_pool_free': 'reusable[] var a: i64[>..]=[1]; a.free(0);',
         'pool_shrink': 'reusable var a: i64[>..] = [1,2]; a.pop_n(1);',
         'byteview_write': 'var a=[1,2]; let b=bytes_of(a); b[0]=0;',
+        'byteview_growshrink_store': 'var a: i64[>..<]=[1]; var boxes: (const u8[:])[>..]=[]; boxes.push(bytes_of(a));',
         'byteview_merged': 'var a: i64[>..]=[1]; var b: i64[>..]=[2]; let v=bytes_of(if true { a[..] } else { b[..] }); b.clear(); print(v);',
         'byteview_loop': 'var a: i64[>..]=[1,2]; let b=bytes_of(a); for i in 2 { print(b); a.clear(); }',
         'byteview_capture': 'var a: i64[>..]=[1,2]; let b=bytes_of(a); fn read() { print(b); } a.clear(); read();',

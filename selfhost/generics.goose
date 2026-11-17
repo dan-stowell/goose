@@ -140,6 +140,9 @@ fn overload_member(ctx: Compiler&, candidate: i64, selected: i64) -> bool {
     return a.kind == 3 && a.scope == b.scope && same_name(ctx, a.token, b.token) && (a.scope != 0 || same_name(ctx, a.ns, b.ns));
 }
 recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i64) -> i64 {
+    return resolve_overload_or_builtin(ctx, selected, call, scope, false);
+}
+recursive fn resolve_overload_or_builtin(ctx: Compiler&, selected: i64, call: i64, scope: i64, fallback: bool) -> i64 {
     // Overloads share the (scope, name) bucket of the selected symbol, so
     // only its chain is walked. The result (the unique lowest tier, or an
     // ambiguity) does not depend on the order candidates are seen in.
@@ -147,7 +150,7 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
     var count = 0;
     var c = head;
     while c >= 0 { if overload_member(ctx, c, selected) { count++; } c = ctx.symbol_chain[c]; }
-    if count == 1 { return specialize_signature(ctx, selected, call, scope, false); }
+    if count == 1 && !fallback { return specialize_signature(ctx, selected, call, scope, false); }
     var e = ctx.nodes[call].first;
     while e >= 0 {
         if ctx.nodes[call].flags & 512 == 0 && !(e == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { check_expression(ctx, ctx.edges[e].value, scope, -1); }
@@ -187,6 +190,7 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
         }
     }
     if best < 0 && tag_dispatch(ctx, selected, call) { return -2; }
+    if best < 0 && fallback { return -1; }
     if best < 0 { error_at(ctx, ctx.nodes[call].token, "no overload matches the arguments"); }
     if ambiguous { error_at(ctx, ctx.nodes[call].token, "ambiguous overload: several candidates have the same matching tier"); }
     return best;

@@ -167,6 +167,7 @@ fn byte_view_live(ctx: Compiler&, symbol: Symbol, token: i64) -> bool {
 }
 fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64, balanced: bool, at_call: bool) {
     if root < 0 { error_at(ctx, token, "not implemented yet: shrink through an unknown root"); }
+    if ctx.symbols[root].flags & 4 != 0 { error_at(ctx, token, "cannot shrink reusable pool"); }
     for s in ctx.symbols {
         if balanced && at_call { continue; }
         if s.kind != 2 || s.state != 2 || s.ty < 0 || !scope_contains(ctx, s.scope, scope) { continue; }
@@ -1458,7 +1459,7 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Va
     else {
         let inner = scope_new(ctx, scope, ctx.checking_function);
         var binding_type = default_integer(ctx);
-        var root = -1;
+        var root = -1; var held = -1; var loaded_view = false; var growshrink = false;
         // The input is evaluated before the loop catches breaks.
         ctx.break_target = outer_target; ctx.loop_depth--;
         if ctx.nodes[x.b].tag == N_RANGE {
@@ -1468,13 +1469,15 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Va
             ctx.nodes[x.b].ty = binding_type;
         } else {
             let iterable = decay(ctx, check_expression(ctx, x.b, scope, -1));
-            binding_type = element_type(ctx, iterable.ty); root = iterable.root;
+            binding_type = element_type(ctx, iterable.ty); root = iterable.root; held = iterable.held; growshrink = iterable.growshrink;
+            if binding_type >= 0 && x.flags & 1 == 0 && (ctx.types[binding_type].kind == T_SLICE || ctx.types[binding_type].kind == T_REFERENCE) { root = iterable.held; loaded_view = true; }
             if binding_type < 0 { binding_type = iterable.ty; if ctx.types[binding_type].kind != T_INTEGER { error_at(ctx, x.token, "for requires an integer or array"); } }
             else if x.flags & 1 != 0 || ctx.types[binding_type].size_class > 0 { binding_type = reference_type(ctx, binding_type, iterable.readonly); }
         }
         ctx.break_target = n; ctx.loop_depth++;
         let s = register_symbol(ctx, ctx.nodes[x.a].token, -1, 2, n, inner, if ctx.types[binding_type].kind == T_REFERENCE { 0 } else { 32 });
         ctx.symbols[s].ty = binding_type; ctx.symbols[s].root = root; ctx.symbols[s].state = 2; ctx.nodes[x.a].symbol = s;
+        ctx.symbols[s].held = held; ctx.symbols[s].inexact = loaded_view; ctx.symbols[s].growshrink = growshrink;
         if x.first >= 0 {
             let index = ctx.edges[x.first].value; let i = register_symbol(ctx, ctx.nodes[index].token, -1, 2, n, inner, 0);
             ctx.symbols[i].ty = default_integer(ctx); ctx.symbols[i].state = 2; ctx.nodes[index].symbol = i;
@@ -1560,12 +1563,51 @@ recursive fn image_layout_supported(ctx: Compiler&, ty: i64) -> bool {
     return true;
 }
 
+// Build a checked default tree once; the emitter executes it once per new
+// slice element, so field defaults with side effects keep their semantics.
+recursive fn pool_default_expression(ctx: Compiler&, ty: i64, token: i64, scope: i64) -> i64 {
+    let t = ctx.types[ty];
+    if t.kind == T_REFERENCE { error_at(ctx, token, "slice pool element has no default: reference"); }
+    if t.kind == T_ENUM {
+        if t.first < 0 { error_at(ctx, token, "slice pool element has no default: empty enum"); }
+        return pool_default_expression(ctx, ctx.edges[t.first].value, token, scope);
+    }
+    if t.kind == T_ARRAY && t.flags == 0 && t.count > 0 {
+        let init = pool_default_expression(ctx, t.element, token, scope);
+        let n = node(ctx, N_FILL, token); ctx.nodes[n].a = init; ctx.nodes[n].flags = 4096;
+        annotate(ctx, n, Value { ty: ty, held: content_root(ctx, value_of(ctx, init)) }); return n;
+    }
+    if t.kind != T_STRUCT { return type_default_value(ctx, ty, token); }
+    let n = node(ctx, N_CONSTRUCT, token); var root = -1; var e = t.first;
+    while e >= 0 {
+        let field = ctx.edges[e].value; let f = ctx.fielddefs[field];
+        let defaults = ctx.default_stack; let mark = defaults.len;
+        for entry in defaults { if entry == -2 - field { error_at(ctx, token, "cyclic slice pool element default"); } }
+        defaults.push(-2 - field);
+        var init = -1;
+        if f.initializer >= 0 {
+            init = clone_tree(ctx, f.initializer); check_expression(ctx, init, t.scope, f.ty);
+        } else { init = pool_default_expression(ctx, f.ty, token, scope); }
+        defaults.resize(mark);
+        let v = value_of(ctx, init); require_fit(ctx, init, v, f.ty);
+        let stored = received(ctx, v, f.ty); check_stored_view(ctx, stored, token);
+        if root_depth(ctx, content_root(ctx, stored)) > root_depth(ctx, root) { root = content_root(ctx, stored); }
+        let added = node(ctx, N_INIT, f.token); ctx.nodes[added].a = init; ctx.nodes[added].symbol = field; child(ctx, n, added);
+        e = ctx.edges[e].next;
+    }
+    annotate(ctx, n, Value { ty: ty, held: root, fields: ctx.nodes[n].first }); return n;
+}
+recursive fn check_builtin_argument(ctx: Compiler&, call: i64, arg: i64, scope: i64, expected: i64) -> Value {
+    if ctx.nodes[call].flags & 512 != 0 || (arg == first_child(ctx, call) && ctx.nodes[call].flags & 256 != 0) { return value_of(ctx, arg); }
+    return check_expression(ctx, arg, scope, expected);
+}
 recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let callee = ctx.nodes[n].a;
     let member = ctx.nodes[callee].tag == N_MEMBER;
     let name = ctx.tokens[ctx.nodes[callee].token].text;
+    let new_builtin = name == "alloc_slice" || name == "free_slice" || name == "realloc_slice" || name == "free" || name == "alloc_index" || name == "alloc_ref" || name == "move_from" || name == "index_of" || name == "bytes_of" || name == "check_length" || name == "range_index";
     var receiver = Value {};
-    if !member && name == "pop_n" {
+    if !member && name == "pop_n" && lookup(ctx, callee, scope, 3) < 0 {
         if child_count(ctx, n) != 2 { error_at(ctx, ctx.nodes[n].token, "pop_n takes an array and count"); }
         let first = ctx.nodes[n].first;
         let method = node(ctx, N_MEMBER, ctx.nodes[callee].token);
@@ -1574,7 +1616,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         return check_call(ctx, n, scope);
     }
     if name == "pop_n" && ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
-    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n");
+    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" || new_builtin);
     if array_method { receiver = check_expression(ctx, ctx.nodes[callee].a, scope, -1); }
     // Builtin arguments are checked with their construction destination.
     if member && element_type(ctx, receiver.ty) >= 0 {
@@ -1683,14 +1725,51 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         ctx.edges.push(Edge { value: ctx.nodes[callee].a, next: ctx.nodes[n].first });
         ctx.nodes[n].first = edge; if ctx.nodes[n].last < 0 { ctx.nodes[n].last = edge; }
         ctx.nodes[n].a = function;
-        if array_method { ctx.nodes[n].flags |= 256; }
+        if array_method { ctx.nodes[n].flags |= 256; if ctx.types[decay(ctx, receiver).ty].kind == T_ARRAY { ctx.nodes[n].flags |= 1024; } }
         return check_call(ctx, n, scope);
     }
-    if name == "free" || name == "alloc_index" || name == "alloc_ref" {
+    var preferred = -1;
+    let user_function = lookup(ctx, callee, scope, 3);
+    if new_builtin && user_function >= 0 && ctx.nodes[n].flags & 1024 == 0 {
+        preferred = resolve_overload_or_builtin(ctx, user_function, n, scope, true);
+        if preferred == -2 { return check_dispatch(ctx, n, scope); }
+    }
+    if preferred < 0 && (name == "alloc_slice" || name == "free_slice" || name == "realloc_slice") {
+        if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
+        let count = if name == "realloc_slice" { 3 } else { 2 };
+        if child_count(ctx, n) != count { error_at(ctx, ctx.nodes[n].token, "slice pool argument count mismatch"); }
+        var e = ctx.nodes[n].first; let recv = ctx.edges[e].value;
+        let pool = decay(ctx, check_builtin_argument(ctx, n, recv, scope, -1));
+        let element = element_type(ctx, pool.ty);
+        if element < 0 || ctx.types[pool.ty].kind != T_ARRAY || ctx.types[pool.ty].flags != 3 || pool.root < 0 || pool.inexact { error_at(ctx, ctx.nodes[recv].token, "operation requires an exact reusable[] pool"); }
+        if ctx.symbols[pool.root].flags & 12 != 12 { error_at(ctx, ctx.nodes[recv].token, "operation exists on reusable[] slice pools only"); }
+        if pool.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only pool"); }
+        if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[recv].token, "pool requires fixed-size elements"); }
+        reference_type(ctx, pool.ty, false); e = ctx.edges[e].next;
+        if name != "alloc_slice" {
+            let arg = ctx.edges[e].value; let value = decay(ctx, check_builtin_argument(ctx, n, arg, scope, -1));
+            if ctx.types[value.ty].kind != T_SLICE || element_type(ctx, value.ty) != element { error_at(ctx, ctx.nodes[arg].token, "operation requires a slice of the pool element type"); }
+            if value.root >= 0 && value.root != pool.root && !value.inexact {
+                let own = ctx.symbols[value.root].scope == 0 || ctx.scopes[ctx.symbols[value.root].scope].function == ctx.checking_function;
+                let pool_own = ctx.symbols[pool.root].scope == 0 || ctx.scopes[ctx.symbols[pool.root].scope].function == ctx.checking_function;
+                if own && pool_own { error_at(ctx, ctx.nodes[arg].token, "operation needs a slice of the pool it is called on"); }
+            }
+            e = ctx.edges[e].next;
+        }
+        if name == "free_slice" { ctx.nodes[n].symbol = -50; return Value {}; }
+        let count_node = ctx.edges[e].value; let length = decay(ctx, check_builtin_argument(ctx, n, count_node, scope, -1));
+        if ctx.types[length.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[count_node].token, "slice pool length must be an integer"); }
+        let init = pool_default_expression(ctx, element, ctx.nodes[n].token, scope);
+        ctx.nodes[n].b = init;
+        store_in_array(ctx, received(ctx, value_of(ctx, init), element), pool, scope, ctx.nodes[n].token);
+        ctx.nodes[n].symbol = if name == "alloc_slice" { -49 } else { -51 };
+        return Value { ty: slice_type(ctx, element, false), root: pool.root, held: ctx.symbols[pool.root].held };
+    }
+    if preferred < 0 && (name == "free" || name == "alloc_index" || name == "alloc_ref") {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
         if child_count(ctx, n) != 2 { error_at(ctx, ctx.nodes[n].token, "pool operation takes a pool and one argument"); }
         let e = ctx.nodes[n].first; let recv = ctx.edges[e].value;
-        let pool = decay(ctx, check_expression(ctx, recv, scope, -1));
+        let pool = decay(ctx, check_builtin_argument(ctx, n, recv, scope, -1));
         let element = element_type(ctx, pool.ty);
         if element < 0 || ctx.types[pool.ty].kind != T_ARRAY || ctx.types[pool.ty].flags != 3 || pool.root < 0 || pool.inexact { error_at(ctx, ctx.nodes[recv].token, "operation requires an exact reusable pool"); }
         if ctx.symbols[pool.root].flags & 12 != 4 { error_at(ctx, ctx.nodes[recv].token, "operation exists on reusable slot pools only"); }
@@ -1699,21 +1778,21 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         reference_type(ctx, pool.ty, false);
         let arg = ctx.edges[ctx.edges[e].next].value;
         if name == "free" {
-            let value = decay(ctx, check_expression(ctx, arg, scope, -1));
+            let value = decay(ctx, check_builtin_argument(ctx, n, arg, scope, -1));
             if ctx.types[value.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[arg].token, "free requires an integer index"); }
             ctx.nodes[n].symbol = -46; return Value {};
         }
-        let value = check_expression(ctx, arg, scope, element); require_fit(ctx, arg, value, element);
+        let value = check_builtin_argument(ctx, n, arg, scope, element); require_fit(ctx, arg, value, element);
         store_in_array(ctx, received(ctx, value, element), pool, scope, ctx.nodes[n].token);
         if name == "alloc_index" { ctx.nodes[n].symbol = -47; return Value { ty: default_integer(ctx) }; }
         ctx.nodes[n].symbol = -48; return Value { ty: reference_type(ctx, element, false), root: pool.root, place: pool.place };
     }
-    if name == "move_from" || name == "index_of" || name == "bytes_of" {
+    if preferred < 0 && (name == "move_from" || name == "index_of" || name == "bytes_of") {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
         let argc = if name == "bytes_of" { 1 } else { 2 };
         if child_count(ctx, n) != argc { error_at(ctx, ctx.nodes[n].token, "builtin argument count mismatch"); }
         let e = ctx.nodes[n].first; let recv = ctx.edges[e].value;
-        let array = decay(ctx, check_expression(ctx, recv, scope, -1));
+        let array = decay(ctx, check_builtin_argument(ctx, n, recv, scope, -1));
         let element = element_type(ctx, array.ty);
         if element < 0 { error_at(ctx, ctx.nodes[recv].token, "operation requires an array or slice"); }
         if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[recv].token, "operation requires fixed-size elements"); }
@@ -1728,10 +1807,10 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
                 }
             }
             ctx.nodes[n].symbol = -45;
-            return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), root: array.root, readonly: true, growshrink: array.growshrink, inexact: array.inexact };
+            return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), root: array.root, readonly: true, growshrink: array.growshrink || (ctx.types[array.ty].kind == T_ARRAY && ctx.types[array.ty].flags == 4), inexact: array.inexact };
         }
         let arg = ctx.edges[ctx.edges[e].next].value;
-        let raw = check_expression(ctx, arg, scope, -1); let value = decay(ctx, raw);
+        let raw = check_builtin_argument(ctx, n, arg, scope, -1); let value = decay(ctx, raw);
         if name == "move_from" {
             if ctx.types[array.ty].kind != T_SLICE { error_at(ctx, ctx.nodes[recv].token, "move_from requires a destination slice"); }
             if array.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only slice"); }
@@ -1747,12 +1826,12 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         reference_type(ctx, array.ty, false); reference_type(ctx, element, false);
         ctx.nodes[n].symbol = -44; return Value { ty: default_integer(ctx) };
     }
-    if name == "check_length" || name == "range_index" {
+    if preferred < 0 && (name == "check_length" || name == "range_index") {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
         let count = child_count(ctx, n);
         if count < 2 || count > 3 { error_at(ctx, ctx.nodes[n].token, "builtin argument count mismatch"); }
         var e = ctx.nodes[n].first;
-        let array = decay(ctx, check_expression(ctx, ctx.edges[e].value, scope, -1));
+        let array = decay(ctx, check_builtin_argument(ctx, n, ctx.edges[e].value, scope, -1));
         let element = element_type(ctx, array.ty);
         reference_type(ctx, array.ty, false);
         if element < 0 || ctx.types[array.ty].kind != T_ARRAY { error_at(ctx, ctx.nodes[n].token, "operation requires an array"); }
@@ -1761,7 +1840,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if name != "range_index" && ctx.types[array.ty].flags < 3 { error_at(ctx, ctx.nodes[n].token, "operation requires a growable array"); }
         e = ctx.edges[e].next;
         let arg = ctx.edges[e].value;
-        let v = decay(ctx, check_expression(ctx, arg, scope, -1));
+        let v = decay(ctx, check_builtin_argument(ctx, n, arg, scope, -1));
         if name == "range_index" {
             if ctx.types[v.ty].kind != T_SLICE || element_type(ctx, v.ty) != element { error_at(ctx, ctx.nodes[arg].token, "range_index requires a slice of the array element type"); }
             ctx.nodes[n].symbol = -41;
@@ -1772,7 +1851,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         e = ctx.edges[e].next;
         if e >= 0 {
             let msg = ctx.edges[e].value;
-            let text = check_expression(ctx, msg, scope, -1);
+            let text = check_builtin_argument(ctx, n, msg, scope, -1);
             if ctx.nodes[msg].tag != N_STRING { error_at(ctx, ctx.nodes[msg].token, "abort message must be a string literal"); }
         }
         return Value { ty: default_integer(ctx) };
@@ -1780,7 +1859,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let s = lookup(ctx, callee, scope, 3);
     if s < 0 { error_at(ctx, ctx.nodes[callee].token, str("unknown function '", name, "'")); }
     if ctx.symbols[s].scope != 0 && ctx.symbols[s].state != 2 { error_at(ctx, ctx.nodes[callee].token, "nested function called before its declaration is reached"); }
-    let concrete = resolve_overload(ctx, s, n, scope);
+    let concrete = if preferred >= 0 { preferred } else { resolve_overload(ctx, s, n, scope) };
     if concrete == -2 { return check_dispatch(ctx, n, scope); }
     fill_defaults(ctx, concrete, n);
     let spec = check_function(ctx, concrete, n, scope);

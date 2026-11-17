@@ -497,6 +497,13 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
     if x.tag == N_CALL && dest.ty != 0 && ctx.types[dest.ty].size_class == 1 && x.ty == dest.ty && x.symbol >= 0 { c_call(ctx, n, dest); return; }
     if dest.ty != 0 && ctx.types[dest.ty].size_class == 1 { c_build(ctx, n, dest); return; }
     if x.tag == N_CALL && ctx.types[x.ty].size_class == 2 && dest.ty != 0 { c_call(ctx, n, dest); return; }
+    if x.tag == N_FILL && x.flags & 4096 != 0 {
+        let element = ctx.types[dest.ty].element; let index = raw_temporary(ctx, "int64_t");
+        emit(ctx, str("  for (", index, " = 0; ", index, " < ", ctx.types[dest.ty].count, "; ", index, "++) {\n"));
+        let code = save_text(ctx, str("(", dest.code, ").data[", index, "]"));
+        let field = CValue { code: code, ty: element, address: save_text(ctx, str("&", code)) };
+        c_into(ctx, x.a, field); emit(ctx, "  }\n"); return;
+    }
     if x.tag == N_CONSTRUCT {
         // A variant built into its enum fills the payload in place, then the tag.
         let wrapped = dest.ty != 0 && ctx.types[dest.ty].kind == T_ENUM && is_variant(ctx, x.ty);
@@ -948,6 +955,30 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         return no_c_value(ctx);
     }
     if builtin == -40 { return c_dispatch(ctx, n); }
+    if builtin <= -49 && builtin >= -51 {
+        var e = x.first; let recv = ctx.edges[e].value;
+        let original = c_expression(ctx, recv);
+        let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, recv)).ty, false) });
+        let element = element_type(ctx, original.ty); e = ctx.edges[e].next;
+        var old = no_c_value(ctx);
+        if builtin != -49 { old = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.edges[e].value))); e = ctx.edges[e].next; }
+        if builtin == -50 {
+            emit(ctx, str("  gg_pool_slice_free(", receiver.code, ", ", old.code, ", sizeof(", c_type(ctx, element), "));\n"));
+            return no_c_value(ctx);
+        }
+        let count = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.edges[e].value)));
+        let result = temporary(ctx, x.ty);
+        if builtin == -49 { emit(ctx, str("  ", result, " = gg_pool_slice_alloc(", receiver.code, ", (uint64_t)(", count.code, "), sizeof(", c_type(ctx, element), "));\n")); }
+        else { emit(ctx, str("  ", result, " = gg_pool_slice_realloc(", receiver.code, ", ", old.code, ", (uint64_t)(", count.code, "), sizeof(", c_type(ctx, element), "));\n")); }
+        let index = raw_temporary(ctx, "int64_t");
+        let begin = if builtin == -49 { "0" } else { save_text(ctx, str(old.code, ".len")) };
+        emit(ctx, str("  gg_pool_busy[(", receiver.code, ").stack - gg_stacks] = 1;\n  for (", index, " = ", begin, "; ", index, " < ", result, ".len; ", index, "++) {\n"));
+        let address = save_text(ctx, str("((", c_type(ctx, element), " *)", result, ".data + ", index, ")"));
+        let dest = CValue { code: save_text(ctx, str("(*", address, ")")), ty: element, address: address };
+        c_into(ctx, x.b, dest);
+        emit(ctx, str("  }\n  gg_pool_busy[(", receiver.code, ").stack - gg_stacks] = 0;\n"));
+        return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)) };
+    }
     if builtin <= -46 && builtin >= -48 {
         let e = x.first; let recv = ctx.edges[e].value;
         let original = c_expression(ctx, recv);

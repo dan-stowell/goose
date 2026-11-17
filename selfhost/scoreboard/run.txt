@@ -143,10 +143,14 @@ slice_parameter_store
 slice_move_bounds
 slice_move_length
 slice_move_rebind_bounds
+slice_pool_foreign
+slice_pool_length
+slice_pool_many_spans
 slice_ref_loads
 slice_ref_slots
 slice_ref_stores
 tre_abandoned_accumulator
+temporary_readbacks
 tre_trailing_abort
 view_aliases
 zero_length_values

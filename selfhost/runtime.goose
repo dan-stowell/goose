@@ -308,6 +308,130 @@ fn runtime_source() -> const u8[:] {
         if (n > (uint64_t)a.header->len) gg_fail("pop_n count negative or beyond the array's length");
         gg_resize(a, a.header->len - (int64_t)n, element, NULL);
     }
+    typedef struct { int64_t start, len; } gg_span;
+    static gg_stack *gg_span_stack(gg_reference a) {
+        return &gg_slot_stacks[a.stack - gg_stacks];
+    }
+    static void gg_span_remove(gg_stack *s, size_t i) {
+        size_t count = s->top / sizeof(gg_span);
+        gg_span *spans = (gg_span *)s->base;
+        if (i + 1 < count) memmove(spans + i, spans + i + 1, (count - i - 1) * sizeof(gg_span));
+        s->top -= sizeof(gg_span);
+    }
+    static void gg_span_free(gg_reference a, int64_t start, int64_t len) {
+        gg_stack *s = gg_span_stack(a);
+        gg_span *spans;
+        size_t count = s->top / sizeof(gg_span), first = 0, after;
+        int64_t end;
+        if (!len) return;
+        end = start + len;
+        spans = (gg_span *)s->base;
+        while (first < count && spans[first].start + spans[first].len < start) first++;
+        after = first;
+        while (after < count && spans[after].start <= end) {
+            if (spans[after].start < start) start = spans[after].start;
+            if (spans[after].start + spans[after].len > end) end = spans[after].start + spans[after].len;
+            after++;
+        }
+        if (after == first) {
+            gg_reserve_stack(s); gg_allocate(s, sizeof(gg_span));
+            spans = (gg_span *)s->base;
+            if (first < count) memmove(spans + first + 1, spans + first, (count - first) * sizeof(gg_span));
+        } else {
+            if (after < count) memmove(spans + first + 1, spans + after, (count - after) * sizeof(gg_span));
+            s->top -= (after - first - 1) * sizeof(gg_span);
+        }
+        spans[first].start = start; spans[first].len = end - start;
+    }
+    static int64_t gg_pool_slice_length(uint64_t n, size_t element) {
+        if (!element || n > GG_RESERVATION / element || n > INT64_MAX) gg_fail("invalid slice length");
+        return (int64_t)n;
+    }
+    static int64_t gg_pool_slice_index(gg_reference a, gg_slice slice, size_t element) {
+        uint64_t offset, index;
+        if (!slice.len) return 0;
+        if (!element) gg_fail("slice not from this pool");
+        offset = (uintptr_t)slice.data - (uintptr_t)a.header->base;
+        index = offset / element;
+        if (offset % element || index >= (uint64_t)a.header->len ||
+            (uint64_t)slice.len > (uint64_t)a.header->len - index)
+            gg_fail("slice not from this pool");
+        return (int64_t)index;
+    }
+    static void gg_pool_slice_extend(gg_reference a, int64_t start, int64_t n, size_t element) {
+        int64_t end;
+        uint64_t limit = GG_RESERVATION / element;
+        if ((uint64_t)start > limit || (uint64_t)n > limit - (uint64_t)start) gg_fail("invalid slice length");
+        end = start + n;
+        if (end > a.header->len) {
+            gg_allocate(a.stack, (size_t)(end - a.header->len) * element);
+            a.header->len = end;
+        }
+    }
+    static int64_t gg_span_place(gg_reference a, int64_t n) {
+        gg_stack *s = gg_span_stack(a);
+        gg_span *spans = (gg_span *)s->base;
+        size_t count = s->top / sizeof(gg_span), i;
+        int64_t start;
+        if (!n) return a.header->len;
+        for (i = 0; i < count; i++) {
+            if (spans[i].len < n) continue;
+            start = spans[i].start;
+            if (spans[i].len == n) gg_span_remove(s, i);
+            else { spans[i].start += n; spans[i].len -= n; }
+            return start;
+        }
+        if (count && spans[count - 1].start + spans[count - 1].len == a.header->len) {
+            start = spans[count - 1].start; gg_span_remove(s, count - 1); return start;
+        }
+        return a.header->len;
+    }
+    static gg_slice gg_pool_slice_alloc(gg_reference a, uint64_t count, size_t element) {
+        int64_t n, start;
+        if (gg_pool_busy[a.stack - gg_stacks]) gg_fail("pool growth during element construction");
+        n = gg_pool_slice_length(count, element);
+        start = gg_span_place(a, n);
+        gg_pool_slice_extend(a, start, n, element);
+        return gg_view(a.header->base + (size_t)start * element, n);
+    }
+    static void gg_pool_slice_free(gg_reference a, gg_slice slice, size_t element) {
+        int64_t start = gg_pool_slice_index(a, slice, element);
+        gg_span_free(a, start, slice.len);
+    }
+    static gg_slice gg_pool_slice_realloc(gg_reference a, gg_slice old, uint64_t count, size_t element) {
+        int64_t n, start, previous;
+        gg_stack *s;
+        gg_span *spans;
+        size_t span_count, i;
+        if (gg_pool_busy[a.stack - gg_stacks]) gg_fail("pool growth during element construction");
+        n = gg_pool_slice_length(count, element);
+        start = gg_pool_slice_index(a, old, element);
+        if (n <= old.len) {
+            gg_span_free(a, start + n, old.len - n);
+            return gg_view(a.header->base + (size_t)start * element, n);
+        }
+        if (!old.len) return gg_pool_slice_alloc(a, count, element);
+        previous = start;
+        if (start + old.len != a.header->len) {
+            s = gg_span_stack(a); spans = (gg_span *)s->base;
+            span_count = s->top / sizeof(gg_span);
+            for (i = 0; i < span_count && spans[i].start < start + old.len; i++) {}
+            if (i < span_count && spans[i].start == start + old.len &&
+                (spans[i].len >= n - old.len || spans[i].start + spans[i].len == a.header->len)) {
+                int64_t extra = n - old.len;
+                if (spans[i].len <= extra) gg_span_remove(s, i);
+                else { spans[i].start += extra; spans[i].len -= extra; }
+            } else {
+                gg_span_free(a, start, old.len);
+                start = gg_span_place(a, n);
+            }
+        }
+        gg_pool_slice_extend(a, start, n, element);
+        if (start != previous) memmove(a.header->base + (size_t)start * element,
+                                      a.header->base + (size_t)previous * element,
+                                      (size_t)old.len * element);
+        return gg_view(a.header->base + (size_t)start * element, n);
+    }
     static int64_t gg_div(int64_t a, int64_t b) { if (!b) gg_fail("division by zero"); if (a==INT64_MIN && b==-1) gg_fail("division overflow"); return a/b; }
     static int64_t gg_mod(int64_t a, int64_t b) {
         int64_t r; if (!b) gg_fail("division by zero"); if (b==-1) return 0;
