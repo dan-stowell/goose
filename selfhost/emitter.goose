@@ -6,6 +6,7 @@ fn save_text(ctx: Compiler&, s: const u8[:]) -> const u8[:] { return own_text(ct
 fn c_type(ctx: Compiler&, ty: i64) -> const u8[:] {
     let t = ctx.types[ty];
     if t.kind == T_VOID || t.kind == T_BOTTOM { return "void"; }
+    if t.kind == T_NULL { return "void *"; }
     if t.kind == T_BOOL { return "uint8_t"; }
     if t.kind == T_INTEGER {
         if t.flags & 2 != 0 { return save_text(ctx, str("uint", t.bytes * 8, "_t")); }
@@ -114,6 +115,7 @@ fn c_reference(ctx: Compiler&, v: CValue) -> const u8[:] {
     return v.address;
 }
 fn c_adapt(ctx: Compiler&, v: CValue, target: i64) -> const u8[:] {
+    if ctx.types[v.ty].kind == T_NULL { return c_null(ctx, target); }
     if ctx.types[target].kind == T_REFERENCE { return c_reference(ctx, v); }
     let a = c_decay(ctx, v);
     if ctx.types[target].kind == T_SLICE { return c_view(ctx, a); }
@@ -122,6 +124,25 @@ fn c_adapt(ctx: Compiler&, v: CValue, target: i64) -> const u8[:] {
     if numeric(ctx, target) { return save_text(ctx, str("((", c_type(ctx, target), ")(", a.code, "))")); }
     if limited_fixed(ctx, target) && a.ty != target { return save_text(ctx, str("gg_limit_", target, "(", c_view(ctx, a), ")")); }
     return a.code;
+}
+// The null of a reference type: address 0, or a fat reference whose header is.
+fn c_null(ctx: Compiler&, ty: i64) -> const u8[:] {
+    if ctx.types[ctx.types[ty].element].size_class == 2 { return "gg_ref(NULL, NULL)"; }
+    return save_text(ctx, str("((", c_type(ctx, ty), ")0)"));
+}
+// A stored reference tested for null; v is the slot's raw value.
+fn c_present(ctx: Compiler&, v: CValue) -> const u8[:] {
+    if ctx.types[v.ty].kind == T_REFERENCE && ctx.types[ctx.types[v.ty].element].size_class == 2 { return save_text(ctx, str("((", v.code, ").header != NULL)")); }
+    return save_text(ctx, str("((", v.code, ") != 0)"));
+}
+// A condition: a bool, or an optional tested for null.
+recursive fn c_condition(ctx: Compiler&, n: i64) -> CValue {
+    if n < 0 { return CValue { code: save_text(ctx, "1"), ty: boolean_type(ctx), address: "", stack: "" }; }
+    if ctx.nodes[n].truth {
+        let v = c_expression(ctx, n);
+        return CValue { code: c_present(ctx, v), ty: boolean_type(ctx), address: "", stack: "" };
+    }
+    return c_decay(ctx, c_expression(ctx, n));
 }
 fn c_literal(ctx: Compiler&, s: const u8[:]) -> const u8[:] {
     var result: u8[>..] = [];
@@ -235,6 +256,10 @@ recursive fn emit_type(ctx: Compiler&, ty: i64) {
 
 fn c_binary(ctx: Compiler&, op: const u8[:], a: CValue, b: CValue, result: i64) -> const u8[:] {
     let t = ctx.types[a.ty];
+    if (op == "==" || op == "!=") && t.kind == T_REFERENCE {
+        if ctx.types[t.element].size_class == 2 { return save_text(ctx, str("((", a.code, ").header ", op, " (", b.code, ").header)")); }
+        return save_text(ctx, str("((", a.code, ") ", op, " (", b.code, "))"));
+    }
     if op == "==" || op == "!=" {
         if element_type(ctx, a.ty) >= 0 { return save_text(ctx, str(if op == "!=" { "!" } else { "" }, "gg_equal_elements_", element_type(ctx, a.ty), "(", c_view(ctx, a), ", ", c_view(ctx, b), ")")); }
         if t.kind == T_STRUCT || t.kind == T_ENUM { return save_text(ctx, str(if op == "!=" { "!" } else { "" }, "gg_eq_", a.ty, "(", a.code, ",", b.code, ")")); }
@@ -298,6 +323,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
     let tag = x.tag;
     if tag == N_NAME { return symbol_value(ctx, x.symbol); }
     if tag == N_RESULT { return c_result_field(ctx, c_multi(ctx, x.a), x.ty, x.flags); }
+    if tag == N_NULL { return CValue { code: "0", ty: x.ty, address: "", stack: "" }; }
     if tag == N_INT || tag == N_BOOL {
         return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")UINT64_C(", x.bits, "))")), ty: x.ty, address: "", stack: "" };
     }
@@ -309,18 +335,20 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         let a = c_expression(ctx, x.a); let op = ctx.tokens[x.token].text;
         if op == "&" { return CValue { code: c_reference(ctx, a), ty: x.ty, address: "", stack: a.stack }; }
         if op == "(" { return a; }
+        if op == "!" && ctx.nodes[x.a].truth { return CValue { code: save_text(ctx, str("(!", c_present(ctx, a), ")")), ty: x.ty, address: "", stack: "" }; }
         let v = snapshot(ctx, c_decay(ctx, a));
         if op == "-" && ctx.types[v.ty].kind == T_INTEGER { return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")((uint64_t)0 - (uint64_t)(", v.code, ")))")), ty: x.ty, address: "", stack: "" }; }
         return CValue { code: save_text(ctx, str("(", op, "(", v.code, "))")), ty: x.ty, address: "", stack: "" };
     }
     if tag == N_BINARY {
         let op = ctx.tokens[x.token].text;
-        let a = snapshot(ctx, converted(ctx, c_expression(ctx, x.a), if ctx.nodes[x.a].target >= 0 { ctx.nodes[x.a].target } else { decay(ctx, value_of(ctx, x.a)).ty }));
         if op == "&&" || op == "||" {
+            let a = c_condition(ctx, x.a);
             let result = temporary(ctx, x.ty); emit(ctx, str("  ", result, " = ", a.code, ";\n  if (", if op == "||" { "!" } else { "" }, result, ") {\n"));
-            let b = c_decay(ctx, c_expression(ctx, x.b)); emit(ctx, str("  ", result, " = ", b.code, ";\n  }\n"));
+            let b = c_condition(ctx, x.b); emit(ctx, str("  ", result, " = ", b.code, ";\n  }\n"));
             return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
         }
+        let a = snapshot(ctx, converted(ctx, c_expression(ctx, x.a), if ctx.nodes[x.a].target >= 0 { ctx.nodes[x.a].target } else { decay(ctx, value_of(ctx, x.a)).ty }));
         let b = snapshot(ctx, converted(ctx, c_expression(ctx, x.b), if ctx.nodes[x.b].target >= 0 { ctx.nodes[x.b].target } else { decay(ctx, value_of(ctx, x.b)).ty }));
         return CValue { code: c_binary(ctx, op, a, b, x.ty), ty: x.ty, address: "", stack: "" };
     }
@@ -384,7 +412,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
 recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
     let x = ctx.nodes[n];
     if x.tag == N_IF {
-        let condition = snapshot(ctx, c_decay(ctx, c_expression(ctx, x.a))); emit(ctx, str("  if (", condition.code, ") {\n"));
+        let condition = snapshot(ctx, c_condition(ctx, x.a)); emit(ctx, str("  if (", condition.code, ") {\n"));
         c_into(ctx, x.b, dest); emit(ctx, "  }");
         if x.c >= 0 { emit(ctx, " else {\n"); c_into(ctx, x.c, dest); emit(ctx, "  }"); }
         emit(ctx, "\n"); return;
@@ -782,6 +810,11 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         let name = temporary(ctx, x.ty); emit(ctx, str("  memset(&", name, ", 0, sizeof(", name, "));\n"));
         return CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };
     }
+    if builtin == -23 {
+        let condition = c_condition(ctx, first_child(ctx, n));
+        emit(ctx, str("  if (!(", condition.code, ")) gg_fail(\"assertion failed\");\n"));
+        return no_c_value(ctx);
+    }
     if builtin <= -23 && builtin >= -26 {
         let arg = c_decay(ctx, c_expression(ctx, first_child(ctx, n)));
         if builtin == -26 {
@@ -894,7 +927,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
             emit(ctx, str("  gg_dyn_assign(", dest.code, ", ", c_view(ctx, v), ", ", c_element_size(ctx, ctx.types[dest.ty].element), ");\n")); return;
         }
         if op == "=" { c_into(ctx, x.b, dest); return; }
-        if op == ".=" { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_reference(ctx, rhs), ";\n")); return; }
+        if op == ".=" { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_adapt(ctx, rhs, ctx.nodes[x.b].target), ";\n")); return; }
         let old = snapshot(ctx, dest);
         var right = CValue { code: "1", ty: dest.ty, address: "", stack: "" };
         if x.b >= 0 { right = snapshot(ctx, converted(ctx, c_expression(ctx, x.b), dest.ty)); }
@@ -962,7 +995,7 @@ recursive fn c_loop(ctx: Compiler&, n: i64, dest: CValue) {
     } else if x.tag == N_EARLY { c_into(ctx, x.a, dest); }
     else {
         emit(ctx, str("label", advance, ":;\n"));
-        if x.tag == N_WHILE { let condition = c_decay(ctx, c_expression(ctx, x.a)); emit(ctx, str("  if (!(", condition.code, ")) goto label", done, ";\n")); c_statement(ctx, x.b); }
+        if x.tag == N_WHILE { let condition = c_condition(ctx, x.a); emit(ctx, str("  if (!(", condition.code, ")) goto label", done, ";\n")); c_statement(ctx, x.b); }
         else { c_statement(ctx, x.a); }
         emit(ctx, str("  goto label", advance, ";\n"));
     }
@@ -1247,5 +1280,5 @@ fn generate_c(ctx: Compiler&) {
     spec_text(ctx, body_start);
     ctx.c_spec_start.push(ctx.c_specs.len);
     write_specializations(ctx);
-    ctx.c_final.append("int main(int argc, char **argv) {\n#ifdef _MSC_VER\n  __try { return gg_program(argc, argv); }\n  __except (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {\n    _resetstkoflw(); gg_fail(\"native call stack overflow\"); return 1;\n  }\n#else\n  return gg_program(argc, argv);\n#endif\n}\n");
+    ctx.c_final.append("int main(int argc, char **argv) {\n#ifdef _MSC_VER\n  __try { return gg_program(argc, argv); }\n  __except (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {\n    _resetstkoflw(); gg_fail(\"native call stack overflow\"); return 1;\n  }\n#else\n  gg_guard_stack();\n  return gg_program(argc, argv);\n#endif\n}\n");
 }

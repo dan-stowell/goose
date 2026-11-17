@@ -14,8 +14,11 @@ call_location
 cnames
 codegen_implicit_callees
 const_global_folding
+compare_order
 continue_restores
 cycle_holder_results
+cycle_outside_reads_holder
+cycle_return_mixed
 cycle_threaded_before_join
 cycle_threaded_results
 cycle_threaded_slices
@@ -25,6 +28,7 @@ extern_libm
 extern_symbol_deprecated
 fat_held
 fieldless_variant_values
+fat_optional
 fixed_array_bulk_fill
 float_conversions_unchecked
 float_equality
@@ -32,6 +36,7 @@ float_literal_spelling
 for_sequence_shrinks
 format_hook_provenance
 generic_shadowing
+global_optional_flow
 growshrink_literal_views
 growshrink_reach_stores
 holder_param_bounds
@@ -48,9 +53,12 @@ match_variant_lists
 namespace_comparisons
 namespace_type_precedence
 namespaces_lib
+native_stack_overflow
 negated_minimum_literals
 nested_call_depth
 nonneg_division_wrap
+optional_loop_callee_assignments
+optional_while_condition_calls
 packed_alignment
 packed_call_abi
 polymorphic_recursion
@@ -65,6 +73,7 @@ recursive_loop_walk
 redundant_casts
 reftops_call_sync
 rendered_pools
+render_reference_cycle
 resize_negative
 return_root_merge
 root_identifier

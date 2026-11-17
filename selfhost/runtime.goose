@@ -18,6 +18,7 @@ fn runtime_source() -> const u8[:] {
     #include <windows.h>
     #else
     #include <sys/mman.h>
+    #include <signal.h>
     #include <unistd.h>
     #endif
     typedef struct { void *data; int64_t len; } gg_slice;
@@ -29,6 +30,23 @@ fn runtime_source() -> const u8[:] {
     static gg_stack gg_stacks[GG_STACK_COUNT];
     static int gg_argc;
     static char **gg_argv;
+    #ifndef _WIN32
+    /* A fault on the guard page past the native stack is reported as an
+       overflow, after the program output so far. */
+    static char *gg_stack_origin;
+    static void gg_on_fault(int sig, siginfo_t *info, void *context) {
+        static const char overflow[] = "goose runtime error: native call stack overflow\n";
+        char *at = (char *)info->si_addr; (void)sig; (void)context; fflush(stdout);
+        if (at <= gg_stack_origin && gg_stack_origin - at < ((ptrdiff_t)1 << 30)) { if (write(2, overflow, sizeof overflow - 1)) {} _exit(1); }
+        signal(SIGSEGV, SIG_DFL); raise(SIGSEGV);
+    }
+    static void gg_guard_stack(void) {
+        static char alternate[65536]; stack_t ss; struct sigaction sa; char here;
+        gg_stack_origin = &here;
+        ss.ss_sp = alternate; ss.ss_size = sizeof alternate; ss.ss_flags = 0; sigaltstack(&ss, NULL);
+        memset(&sa, 0, sizeof sa); sa.sa_sigaction = gg_on_fault; sa.sa_flags = SA_ONSTACK | SA_SIGINFO; sigaction(SIGSEGV, &sa, NULL);
+    }
+    #endif
     static void gg_fail(const char *message) {
         fprintf(stderr, "goose runtime error: %s\n", message); exit(1);
     }

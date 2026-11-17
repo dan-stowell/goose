@@ -101,6 +101,7 @@ struct Node {
     held: i64 = -1,
     fields: i64 = -1,
     standalone: bool = false,
+    truth: bool = false,
 }
 struct Edge { value: i64, next: i64 = -1 }
 

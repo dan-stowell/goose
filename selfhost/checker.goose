@@ -34,6 +34,7 @@ struct Specialization {
     cycle_low: i64 = 0,
     cycle_open: bool = false,
     cycle: i64 = -1,
+    rebinds: i64 = -1,
 }
 struct CheckedCall { node: i64, scope: i64, callee: i64 }
 struct Shrink { root: i64, balanced: bool }
@@ -53,7 +54,8 @@ fn annotate(ctx: Compiler&, n: i64, v: Value) -> Value {
 }
 fn decay(ctx: Compiler&, v: Value) -> Value {
     var r = v;
-    if ctx.types[r.ty].kind == T_REFERENCE { r.ty = ctx.types[r.ty].element; }
+    // An optional is not transparent: it decays only once narrowed.
+    if ctx.types[r.ty].kind == T_REFERENCE && ctx.types[r.ty].flags & 4 == 0 { r.ty = ctx.types[r.ty].element; }
     return r;
 }
 fn numeric(ctx: Compiler&, ty: i64) -> bool { return ctx.types[ty].kind == T_INTEGER || ctx.types[ty].kind == T_FLOAT; }
@@ -212,6 +214,9 @@ fn constant_high(ctx: Compiler&, ty: i64, x: u64, y: u64) -> u64 {
 fn fits(ctx: Compiler&, v: Value, target: i64) -> bool {
     if target == v.ty || ctx.types[v.ty].kind == T_BOTTOM { return true; }
     let a = ctx.types[v.ty]; let b = ctx.types[target];
+    if a.kind == T_NULL { return b.kind == T_REFERENCE && b.flags & 4 != 0; }
+    // A reference fits an optional; an optional fits only an optional.
+    if b.kind == T_REFERENCE && a.kind == T_REFERENCE && a.element == b.element && (a.flags & 4 == 0 || b.flags & 4 != 0) && (!v.readonly || b.flags & 1 != 0) { return true; }
     if b.kind == T_REFERENCE { return v.place >= 0 && decay(ctx, v).ty == b.element && (!v.readonly || b.flags & 1 != 0); }
     if a.kind == T_REFERENCE { return fits_plain(ctx, decay(ctx, v), target); }
     return fits_plain(ctx, v, target);
@@ -334,6 +339,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     var v = Value {};
     if tag == N_INT { v.ty = default_integer(ctx); v.known = true; v.bits = ctx.tokens[x.token].integer; if v.bits > 9223372036854775807 { v.ty = integer_type(ctx, 8, true); } }
     else if tag == N_FLOAT { v.ty = builtin_type(ctx, "f64"); v.known = true; }
+    else if tag == N_NULL { v.ty = intern_type(ctx, Type { kind: T_NULL }); }
     else if tag == N_BOOL { v.ty = boolean_type(ctx); v.known = true; if ctx.tokens[x.token].text == "true" { v.bits = 1; } }
     else if tag == N_STRING { v.ty = slice_type(ctx, integer_type(ctx, 1, true), true); v.readonly = true; }
     else if tag == N_NAME {
@@ -357,7 +363,8 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             v = operand; v.ty = reference_type(ctx, decay(ctx, operand).ty, operand.readonly);
         } else {
             v = decay(ctx, operand);
-            if op == "!" { if v.ty != boolean_type(ctx) { error_at(ctx, x.token, "boolean operand required"); } if v.known { v.bits = 0; if operand.bits == 0 { v.bits = 1; } } }
+            if op == "!" && (is_optional(ctx, operand.ty) || is_optional(ctx, slot_type(ctx, x.a))) { ctx.nodes[x.a].truth = true; v = Value { ty: boolean_type(ctx) }; }
+            else if op == "!" { if v.ty != boolean_type(ctx) { error_at(ctx, x.token, "boolean operand required"); } if v.known { v.bits = 0; if operand.bits == 0 { v.bits = 1; } } }
             else if op == "-" || op == "~" {
                 if !numeric(ctx, v.ty) { error_at(ctx, x.token, "numeric operand required"); }
                 if op == "-" && ctx.types[v.ty].kind == T_INTEGER && ctx.types[v.ty].flags & 2 != 0 && v.bits != 9223372036854775808 { error_at(ctx, x.token, "cannot negate an unsigned value"); }
@@ -368,6 +375,23 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
                 v.place = -1;
             }
         }
+    } else if tag == N_BINARY && (ctx.tokens[x.token].text == "&&" || ctx.tokens[x.token].text == "||") {
+        require_condition(ctx, x.a, check_expression(ctx, x.a, scope, -1));
+        let before = ctx.flow;
+        ctx.flow = condition_facts(ctx, x.a, ctx.tokens[x.token].text == "&&", before);
+        require_condition(ctx, x.b, check_expression(ctx, x.b, scope, -1));
+        ctx.flow = before;
+        v.ty = boolean_type(ctx);
+    } else if tag == N_BINARY && (ctx.tokens[x.token].text == "==" || ctx.tokens[x.token].text == "!=") && (ctx.nodes[x.a].tag == N_NULL || ctx.nodes[x.b].tag == N_NULL) {
+        // A null test compares a reference's address.
+        var other = x.a; var empty = x.b;
+        if ctx.nodes[x.a].tag == N_NULL { other = x.b; empty = x.a; }
+        let o = check_expression(ctx, other, scope, -1); check_expression(ctx, empty, scope, -1);
+        var slot = o.ty;
+        if ctx.types[slot].kind != T_REFERENCE { slot = slot_type(ctx, other); }
+        if slot < 0 || ctx.types[slot].kind != T_REFERENCE { error_at(ctx, x.token, "only a reference or optional compares with null"); }
+        ctx.nodes[other].target = slot; ctx.nodes[empty].target = slot;
+        v.ty = boolean_type(ctx);
     } else if tag == N_BINARY {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1));
         let b = decay(ctx, check_expression(ctx, x.b, scope, -1));
@@ -461,9 +485,17 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     else if tag == N_RESULT { v = value_of(ctx, n); }
     else if tag == N_BLOCK { v = check_block(ctx, n, scope, expected); }
     else if tag == N_IF {
-        let c = decay(ctx, check_expression(ctx, x.a, scope, -1)); require_fit(ctx, x.a, c, boolean_type(ctx));
+        require_condition(ctx, x.a, check_expression(ctx, x.a, scope, -1));
+        let before = ctx.flow;
+        ctx.flow = condition_facts(ctx, x.a, true, before);
         let a = check_expression(ctx, x.b, scope, expected);
-        if x.c >= 0 { v = join_branch(ctx, a, check_expression(ctx, x.c, scope, expected), x.b, x.c, x.token); }
+        let after_then = ctx.flow;
+        ctx.flow = condition_facts(ctx, x.a, false, before);
+        var else_diverges = false;
+        if x.c >= 0 { let b = check_expression(ctx, x.c, scope, expected); else_diverges = ctx.types[b.ty].kind == T_BOTTOM; v = join_branch(ctx, a, b, x.b, x.c, x.token); }
+        if ctx.types[a.ty].kind == T_BOTTOM { }
+        else if else_diverges { ctx.flow = after_then; }
+        else { ctx.flow = fact_meet(ctx, after_then, ctx.flow); }
     } else if tag == N_MATCH { v = check_match(ctx, n, scope, expected); }
     else if tag == N_WHILE || tag == N_FOR || tag == N_LOOP || tag == N_EARLY { v = check_loop(ctx, n, scope, expected); }
     else if tag == N_RETURN {
@@ -518,6 +550,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         let owner = ctx.types[decay(ctx, Value { ty: ctx.symbols[content_root(ctx, v)].ty }).ty];
         if owner.kind == T_ARRAY && owner.flags == 4 && holds_view_of(ctx, v.ty, owner.element) { v.growshrink = true; }
     }
+    if tag == N_NAME || tag == N_MEMBER || tag == N_INDEX { v = narrowed(ctx, n, v); }
     return annotate(ctx, n, v);
 }
 
@@ -868,7 +901,8 @@ recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
                 if ctx.types[ctx.fielddefs[field].ty].kind == T_REFERENCE { error_at(ctx, ctx.nodes[n].token, str("field '", ctx.tokens[ctx.fielddefs[field].token].text, "' is a reference, which has no default value")); }
                 init = type_default_value(ctx, ctx.fielddefs[field].ty, ctx.nodes[n].token);
                 type_default = true;
-            } else { error_at(ctx, ctx.nodes[n].token, str("missing field '", ctx.tokens[ctx.fielddefs[field].token].text, "'")); }
+            } else if is_optional(ctx, ctx.fielddefs[field].ty) { init = node(ctx, N_NULL, ctx.nodes[n].token); }
+            else { error_at(ctx, ctx.nodes[n].token, str("missing field '", ctx.tokens[ctx.fielddefs[field].token].text, "'")); }
         }
         let added = node(ctx, N_INIT, ctx.fielddefs[field].token); ctx.nodes[added].a = init; ctx.nodes[added].symbol = field; child(ctx, n, added);
         // A default may not lead to a construction that takes it again (3.2).
@@ -1091,10 +1125,192 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     }
     if ctx.nodes[n].flags & 1 == 0 && v.known { ctx.symbols[s].known = true; ctx.symbols[s].bits = v.bits; }
     store_lifetime(ctx, Value { ty: declared, root: v.root, held: v.held }, s, ctx.nodes[n].token);
+    if is_optional(ctx, declared) && non_null(ctx, raw) { ctx.flow = fact_add(ctx, ctx.flow, name); }
+}
+
+// Optional narrowing. A flow state is a persistent list in ctx.edges of the
+// checked path nodes (a name, a field or a constant index of one) known not
+// to be null; branches save and join states as plain list heads.
+recursive fn same_path(ctx: Compiler&, a: i64, b: i64) -> bool {
+    let x = ctx.nodes[a]; let y = ctx.nodes[b];
+    if x.tag == N_UNARY && ctx.tokens[x.token].text == "(" { return same_path(ctx, x.a, b); }
+    if y.tag == N_UNARY && ctx.tokens[y.token].text == "(" { return same_path(ctx, a, y.a); }
+    if x.tag != y.tag { return false; }
+    if x.tag == N_NAME { return x.symbol >= 0 && x.symbol == y.symbol; }
+    if x.tag == N_MEMBER { return same_name(ctx, x.token, y.token) && same_path(ctx, x.a, y.a); }
+    if x.tag == N_INDEX {
+        if x.b < 0 || y.b < 0 || ctx.nodes[x.b].tag != N_INT || ctx.nodes[y.b].tag != N_INT || x.flags != y.flags { return false; }
+        return ctx.tokens[ctx.nodes[x.b].token].integer == ctx.tokens[ctx.nodes[y.b].token].integer && same_path(ctx, x.a, y.a);
+    }
+    return false;
+}
+// The same path written in unchecked syntax: compared by spelling.
+recursive fn same_path_text(ctx: Compiler&, a: i64, b: i64) -> bool {
+    let x = ctx.nodes[a]; let y = ctx.nodes[b];
+    if x.tag == N_UNARY && ctx.tokens[x.token].text == "(" { return same_path_text(ctx, x.a, b); }
+    if y.tag == N_UNARY && ctx.tokens[y.token].text == "(" { return same_path_text(ctx, a, y.a); }
+    if x.tag != y.tag { return false; }
+    if x.tag == N_NAME { return same_name(ctx, x.token, y.token); }
+    if x.tag == N_MEMBER { return same_name(ctx, x.token, y.token) && same_path_text(ctx, x.a, y.a); }
+    if x.tag == N_INDEX { return x.b >= 0 && y.b >= 0 && ctx.nodes[x.b].tag == N_INT && ctx.nodes[y.b].tag == N_INT && ctx.tokens[ctx.nodes[x.b].token].integer == ctx.tokens[ctx.nodes[y.b].token].integer && same_path_text(ctx, x.a, y.a); }
+    return false;
+}
+// Whether prefix names path or a part of the storage path reaches through.
+fn path_has_prefix(ctx: Compiler&, path: i64, prefix: i64, strict: bool, text: bool) -> bool {
+    var p = path; var first = true;
+    while p >= 0 {
+        let x = ctx.nodes[p];
+        if !(first && strict) {
+            if text && same_path_text(ctx, p, prefix) { return true; }
+            if !text && same_path(ctx, p, prefix) { return true; }
+        }
+        first = false;
+        if x.tag == N_MEMBER || x.tag == N_INDEX || (x.tag == N_UNARY && ctx.tokens[x.token].text == "(") { p = x.a; } else { p = -1; }
+    }
+    return false;
+}
+fn path_root(ctx: Compiler&, path: i64) -> i64 {
+    var p = path;
+    while p >= 0 {
+        let x = ctx.nodes[p];
+        if x.tag == N_NAME { return x.symbol; }
+        if x.tag == N_MEMBER || x.tag == N_INDEX || x.tag == N_UNARY { p = x.a; } else { return -1; }
+    }
+    return -1;
+}
+fn fact_known(ctx: Compiler&, state: i64, n: i64) -> bool {
+    var e = state;
+    while e >= 0 { if same_path(ctx, ctx.edges[e].value, n) { return true; } e = ctx.edges[e].next; }
+    return false;
+}
+fn fact_add(ctx: Compiler&, state: i64, n: i64) -> i64 {
+    if fact_known(ctx, state, n) { return state; }
+    let id = ctx.edges.len; ctx.edges.push(Edge { value: n, next: state }); return id;
+}
+// Drops the facts about storage reached through path (kind 0: path or any
+// part of it, 1: strictly inside it, 2: spelled like it, 3: rooted at symbol).
+fn fact_kill(ctx: Compiler&, state: i64, path: i64, kind: i64) -> i64 {
+    var kept = -1; var e = state; var changed = false;
+    while e >= 0 {
+        let fact = ctx.edges[e].value;
+        var dead = false;
+        if kind == 0 || kind == 1 { dead = path_has_prefix(ctx, fact, path, kind == 1, false); }
+        else if kind == 2 { dead = path_has_prefix(ctx, fact, path, false, true); }
+        else { dead = path_root(ctx, fact) == path; }
+        if dead { changed = true; } else { let id = ctx.edges.len; ctx.edges.push(Edge { value: fact, next: kept }); kept = id; }
+        e = ctx.edges[e].next;
+    }
+    if !changed { return state; }
+    return kept;
+}
+fn fact_meet(ctx: Compiler&, a: i64, b: i64) -> i64 {
+    if a == b { return a; }
+    var kept = -1; var e = a;
+    while e >= 0 {
+        let fact = ctx.edges[e].value;
+        if fact_known(ctx, b, fact) { let id = ctx.edges.len; ctx.edges.push(Edge { value: fact, next: kept }); kept = id; }
+        e = ctx.edges[e].next;
+    }
+    return kept;
+}
+// Kills the facts a loop body may invalidate by a rebinding, before it runs.
+recursive fn fact_kill_rebinds(ctx: Compiler&, state: i64, n: i64) -> i64 {
+    if n < 0 || state < 0 { return state; }
+    let x = ctx.nodes[n];
+    if x.tag == N_FUNCTION { return state; }
+    var result = state;
+    if x.tag == N_ASSIGN && x.a >= 0 && ctx.tokens[x.token].text == ".=" { result = fact_kill(ctx, result, x.a, 2); }
+    result = fact_kill_rebinds(ctx, result, x.a);
+    result = fact_kill_rebinds(ctx, result, x.b);
+    result = fact_kill_rebinds(ctx, result, x.c);
+    var e = x.first;
+    while e >= 0 { result = fact_kill_rebinds(ctx, result, ctx.edges[e].value); e = ctx.edges[e].next; }
+    return result;
+}
+// The facts that hold when condition n evaluates to truth.
+recursive fn condition_facts(ctx: Compiler&, n: i64, truth: bool, state: i64) -> i64 {
+    let x = ctx.nodes[n];
+    if x.tag == N_UNARY {
+        let op = ctx.tokens[x.token].text;
+        if op == "(" { return condition_facts(ctx, x.a, truth, state); }
+        if op == "!" { return condition_facts(ctx, x.a, !truth, state); }
+    }
+    if x.tag == N_BINARY {
+        let op = ctx.tokens[x.token].text;
+        if op == "&&" { if truth { return condition_facts(ctx, x.b, true, condition_facts(ctx, x.a, true, state)); } return state; }
+        if op == "||" { if !truth { return condition_facts(ctx, x.b, false, condition_facts(ctx, x.a, false, state)); } return state; }
+        if op == "==" || op == "!=" {
+            var other = -1;
+            if ctx.nodes[x.b].tag == N_NULL { other = x.a; } else if ctx.nodes[x.a].tag == N_NULL { other = x.b; }
+            if other >= 0 && truth == (op == "!=") { return fact_add(ctx, state, other); }
+        }
+        return state;
+    }
+    if x.truth && truth { return fact_add(ctx, state, n); }
+    return state;
+}
+// The declared type of the slot a path names, before any narrowing.
+recursive fn slot_type(ctx: Compiler&, n: i64) -> i64 {
+    let x = ctx.nodes[n];
+    if x.tag == N_UNARY && ctx.tokens[x.token].text == "(" { return slot_type(ctx, x.a); }
+    if x.tag == N_NAME && x.symbol >= 0 { return ctx.symbols[x.symbol].ty; }
+    if x.tag == N_MEMBER && x.symbol >= 0 && ctx.types[decay(ctx, value_of(ctx, x.a)).ty].kind == T_STRUCT { return ctx.fielddefs[x.symbol].ty; }
+    if x.tag == N_INDEX { return element_type(ctx, ctx.nodes[x.a].ty); }
+    return -1;
+}
+// A condition is a bool, or an optional tested for null.
+fn require_condition(ctx: Compiler&, n: i64, v: Value) {
+    if is_optional(ctx, v.ty) || is_optional(ctx, slot_type(ctx, n)) { ctx.nodes[n].truth = true; return; }
+    require_fit(ctx, n, decay(ctx, v), boolean_type(ctx));
+}
+fn narrowed(ctx: Compiler&, n: i64, v: Value) -> Value {
+    var r = v;
+    if is_optional(ctx, v.ty) && fact_known(ctx, ctx.flow, n) { r.ty = reference_type(ctx, ctx.types[v.ty].element, ctx.types[v.ty].flags & 1 != 0); }
+    return r;
+}
+// Whether a value bound into an optional slot is certainly not null.
+fn non_null(ctx: Compiler&, v: Value) -> bool {
+    let t = ctx.types[v.ty];
+    if t.kind == T_NULL { return false; }
+    if t.kind == T_REFERENCE { return t.flags & 4 == 0; }
+    return true;
+}
+fn record_rebind(ctx: Compiler&, symbol: i64) {
+    if symbol < 0 || ctx.symbols[symbol].scope != 0 || ctx.checking_function < 0 { return; }
+    var e = ctx.specializations[ctx.checking_function].rebinds;
+    while e >= 0 { if ctx.edges[e].value == symbol { return; } e = ctx.edges[e].next; }
+    let id = ctx.edges.len; ctx.edges.push(Edge { value: symbol, next: ctx.specializations[ctx.checking_function].rebinds });
+    ctx.specializations[ctx.checking_function].rebinds = id;
+}
+// `p .= e` rebinds the reference or optional slot p.
+recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
+    let x = ctx.nodes[n];
+    let raw = check_expression(ctx, x.a, scope, -1);
+    let slot = slot_type(ctx, x.a);
+    if slot < 0 || ctx.types[slot].kind != T_REFERENCE { error_at(ctx, x.token, ".= rebinds references only"); }
+    let target = ctx.nodes[x.a];
+    if target.tag == N_NAME && ctx.symbols[target.symbol].flags & 1 == 0 { error_at(ctx, x.token, "cannot rebind a let reference"); }
+    if target.tag != N_NAME && raw.readonly { error_at(ctx, x.token, "cannot write through read-only storage"); }
+    let rhs = check_expression(ctx, x.b, scope, slot);
+    require_fit(ctx, x.b, rhs, slot);
+    let stored = Value { ty: slot, root: rhs.root, growshrink: rhs.growshrink, held: rhs.held };
+    if target.tag == N_NAME {
+        store_lifetime(ctx, stored, target.symbol, x.token);
+        if ctx.types[rhs.ty].kind != T_NULL { ctx.symbols[target.symbol].root = rhs.root; }
+        ctx.symbols[target.symbol].growshrink = ctx.symbols[target.symbol].growshrink || rhs.growshrink;
+        record_rebind(ctx, target.symbol);
+    } else {
+        check_stored_view(ctx, stored, x.token);
+        store_lifetime(ctx, stored, raw.root, x.token);
+        record_rebind(ctx, path_root(ctx, x.a));
+    }
+    ctx.flow = fact_kill(ctx, ctx.flow, x.a, 0);
+    if non_null(ctx, rhs) { ctx.flow = fact_add(ctx, ctx.flow, x.a); }
 }
 recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.nodes[n].first >= 0 { check_receiving(ctx, n, scope, false); return; }
     let x = ctx.nodes[n];
+    if ctx.tokens[x.token].text == ".=" { check_rebind(ctx, n, scope); return; }
     let raw = check_expression(ctx, x.a, scope, -1); let dest = decay(ctx, raw);
     if dest.place < 0 { error_at(ctx, x.token, "assignment requires a stored value"); }
     let direct = ctx.nodes[x.a].tag == N_NAME && ctx.types[raw.ty].kind != T_REFERENCE;
@@ -1106,10 +1322,6 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     // elements into it. Other variable-size values are frozen.
     let dynamic = ctx.types[dest.ty].kind == T_ARRAY && ctx.types[dest.ty].flags == 2;
     if ctx.types[dest.ty].size_class == 1 && !dynamic && ctx.tokens[x.token].text != ".=" { error_at(ctx, x.token, "cannot replace a variable-size value"); }
-    if ctx.tokens[x.token].text == ".=" {
-        if ctx.types[raw.ty].kind != T_REFERENCE { error_at(ctx, x.token, ".= rebinds references only"); }
-        error_at(ctx, x.token, "not implemented yet: reference rebinding analysis");
-    }
     if ctx.types[dest.ty].size_class == 2 { error_at(ctx, x.token, "not implemented yet: whole resizable assignment analysis"); }
     if ctx.symbols[dest.place].flags & 32 != 0 { error_at(ctx, x.token, "cannot write a by-value iteration binding"); }
     if ctx.nodes[x.a].tag == N_MEMBER && ctx.nodes[x.a].symbol >= 0 && ctx.fielddefs[ctx.nodes[x.a].symbol].flags & 1 != 0 { error_at(ctx, x.token, "cannot reassign a let field"); }
@@ -1125,6 +1337,7 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
         if direct && ctx.types[dest.ty].kind == T_SLICE && root_depth(ctx, rhs.root) >= root_depth(ctx, ctx.symbols[dest.place].root) { ctx.symbols[dest.place].root = rhs.root; }
         if direct { ctx.symbols[dest.place].growshrink = ctx.symbols[dest.place].growshrink || rhs.growshrink; }
     } else if ctx.types[dest.ty].kind != T_INTEGER { error_at(ctx, x.token, "increment requires an integer"); }
+    ctx.flow = fact_kill(ctx, ctx.flow, x.a, 1);
     ctx.symbols[dest.place].known = false;
     // Updating an aggregate invalidates a remembered constructor mapping.
     if ctx.types[dest.ty].kind == T_STRUCT { ctx.symbols[dest.place].fields = -1; }
@@ -1135,10 +1348,18 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Va
     let outer_breaks = ctx.loop_breaks; ctx.loop_breaks = 0;
     let outer_target = ctx.break_target; ctx.break_target = n;
     var tail = Value {};
-    if x.tag == N_WHILE { require_fit(ctx, x.a, decay(ctx, check_expression(ctx, x.a, scope, -1)), boolean_type(ctx)); check_expression(ctx, x.b, scope, 0); }
+    let loop_entry = fact_kill_rebinds(ctx, ctx.flow, n);
+    ctx.flow = loop_entry;
+    if x.tag == N_WHILE {
+        require_condition(ctx, x.a, check_expression(ctx, x.a, scope, -1));
+        ctx.flow = condition_facts(ctx, x.a, true, loop_entry);
+        check_expression(ctx, x.b, scope, 0);
+        ctx.flow = condition_facts(ctx, x.a, false, fact_meet(ctx, loop_entry, ctx.flow));
+    }
     else if x.tag == N_LOOP || x.tag == N_EARLY {
         ctx.nodes[n].b = -1; ctx.nodes[n].c = expected;
         tail = check_expression(ctx, x.a, scope, if x.tag == N_EARLY { expected } else { 0 });
+        ctx.flow = fact_meet(ctx, loop_entry, ctx.flow);
     }
     else {
         let inner = scope_new(ctx, scope, ctx.checking_function);
@@ -1165,6 +1386,7 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Va
             ctx.symbols[i].ty = default_integer(ctx); ctx.symbols[i].state = 2; ctx.nodes[index].symbol = i;
         }
         check_expression(ctx, x.c, inner, 0);
+        ctx.flow = fact_meet(ctx, loop_entry, ctx.flow);
     }
     ctx.loop_depth--;
     // A loop that no break leaves never completes (6.5): it is as a return.
@@ -1315,7 +1537,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         }
         if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "builtin takes one argument"); }
         let arg = first_child(ctx, n); let raw = check_expression(ctx, arg, scope, -1); let v = decay(ctx, raw);
-        if name == "assert" { require_fit(ctx, arg, v, boolean_type(ctx)); ctx.nodes[n].symbol = -23; return Value {}; }
+        if name == "assert" { require_condition(ctx, arg, raw); ctx.flow = condition_facts(ctx, arg, true, ctx.flow); ctx.nodes[n].symbol = -23; return Value {}; }
         if name == "copy" { if (v.place < 0 && ctx.types[raw.ty].kind != T_REFERENCE) || ctx.types[v.ty].kind == T_SLICE { error_at(ctx, ctx.nodes[arg].token, "copy requires an owned stored value or its reference"); } ctx.nodes[n].symbol = -26; var result = v; result.place = -1; result.readonly = false; return result; }
         if name == "exit" { require_fit(ctx, arg, v, default_integer(ctx)); ctx.nodes[n].symbol = -25; }
         else { if element_type(ctx, v.ty) != integer_type(ctx, 1, true) { error_at(ctx, ctx.nodes[n].token, "abort requires text"); } ctx.nodes[n].symbol = -24; }
@@ -1341,6 +1563,8 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     if concrete == -2 { return check_dispatch(ctx, n, scope); }
     fill_defaults(ctx, concrete, n);
     let spec = check_function(ctx, concrete, n, scope);
+    var rebound = ctx.specializations[spec].rebinds;
+    while rebound >= 0 { let g = ctx.edges[rebound].value; ctx.flow = fact_kill(ctx, ctx.flow, g, 3); record_rebind(ctx, g); rebound = ctx.edges[rebound].next; }
     ctx.checked_calls.push(CheckedCall { node: n, scope: scope, callee: spec });
     var effect = ctx.specializations[spec].shrinks;
     while effect >= 0 {
@@ -1601,7 +1825,9 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         // which makes it recursive rather than an endless default (§3.2).
         let defaults = ctx.default_stack; let default_mark = defaults.len; defaults.push(-1);
         let outer_site = ctx.default_site; ctx.default_site = -1;
+        let outer_flow = ctx.flow; ctx.flow = -1;
         let tail = check_expression(ctx, body, scope, result);
+        ctx.flow = outer_flow;
         if ctx.types[tail.ty].kind != T_BOTTOM { check_return(ctx, ctx.nodes[body].a, tail, id, ctx.nodes[decl].token); }
         defaults.resize(default_mark); ctx.default_site = outer_site;
         ctx.checking_function = previous; ctx.loop_depth = previous_loop; ctx.loop_breaks = previous_breaks; ctx.break_target = previous_target;

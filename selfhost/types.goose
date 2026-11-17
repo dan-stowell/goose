@@ -13,6 +13,7 @@ const T_BOTTOM = 9;
 // An enum's first lists its variant types. A variant type is a T_STRUCT whose
 // element is its enum and whose count is its index (its tag).
 const T_ENUM = 10;
+const T_NULL = 11;
 
 struct Type {
     kind: i64,
@@ -87,6 +88,13 @@ fn reference_type(ctx: Compiler&, element: i64, readonly: bool) -> i64 {
     var bytes = 8; if ctx.types[element].size_class == 2 { bytes = 16; }
     return intern_type(ctx, Type { kind: T_REFERENCE, element: element, flags: flags, bytes: bytes });
 }
+// An optional is a reference whose null is address 0 (flags bit 4).
+fn optional_type(ctx: Compiler&, element: i64, readonly: bool) -> i64 {
+    var flags = 4; if readonly { flags = 5; }
+    var bytes = 8; if ctx.types[element].size_class == 2 { bytes = 16; }
+    return intern_type(ctx, Type { kind: T_REFERENCE, element: element, flags: flags, bytes: bytes });
+}
+fn is_optional(ctx: Compiler&, ty: i64) -> bool { return ty >= 0 && ctx.types[ty].kind == T_REFERENCE && ctx.types[ty].flags & 4 != 0; }
 fn array_type(ctx: Compiler&, element: i64, mode: i64, count: i64) -> i64 {
     var size_class = 0;
     var bytes = ctx.types[element].bytes * count;
@@ -331,9 +339,14 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
     } else if syntax.tag == N_TYPE_SLICE {
         ty = slice_type(ctx, resolve_type_at(ctx, syntax.a, scope, true), syntax.flags & 16 != 0);
     } else if syntax.tag == N_TYPE_REF || syntax.tag == N_TYPE_OPTIONAL {
-        let element = resolve_type_at(ctx, syntax.a, scope, true);
-        ty = reference_type(ctx, element, syntax.flags & 16 != 0);
-        if syntax.b >= 0 || syntax.tag == N_TYPE_OPTIONAL { error_at(ctx, syntax.token, "not implemented yet: relative and optional references"); }
+        var element = resolve_type_at(ctx, syntax.a, scope, true);
+        var readonly = syntax.flags & 16 != 0;
+        if syntax.tag == N_TYPE_OPTIONAL {
+            // T&? is T?: optional only makes a reference nullable.
+            if ctx.types[element].kind == T_REFERENCE { readonly = readonly || ctx.types[element].flags & 1 != 0; element = ctx.types[element].element; }
+            ty = optional_type(ctx, element, readonly);
+        } else { ty = reference_type(ctx, element, readonly); }
+        if syntax.b >= 0 { error_at(ctx, syntax.token, "not implemented yet: relative and optional references"); }
     } else { error_at(ctx, syntax.token, "not implemented yet: this type form"); }
     ctx.nodes[n].ty = ty;
     return ty;

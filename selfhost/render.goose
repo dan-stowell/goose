@@ -87,7 +87,7 @@ fn c_format_helpers(ctx: Compiler&) {
     c_layout_helpers(ctx);
     emit(ctx, "static void gg_quote(gg_reference out,gg_slice text) { int64_t i; unsigned char c; gg_append(out,\"\\\"\",1,1); for(i=0;i<text.len;i++){c=((unsigned char*)text.data)[i]; if(c=='\\\"'||c=='\\\\'){gg_append(out,\"\\\\\",1,1);gg_append(out,&c,1,1);} else if(c=='\\n')gg_append(out,\"\\\\n\",2,1);else if(c=='\\r')gg_append(out,\"\\\\r\",2,1);else if(c=='\\t')gg_append(out,\"\\\\t\",2,1);else gg_append(out,&c,1,1);}gg_append(out,\"\\\"\",1,1);}\n");
     for t, id in ctx.types {
-        if t.kind == T_VOID || t.kind == T_BOTTOM || (t.kind == T_ENUM && t.flags & 1 == 0 && !t.fixed_ok) { continue; }
+        if t.kind == T_VOID || t.kind == T_BOTTOM || t.kind == T_NULL || (t.kind == T_ENUM && t.flags & 1 == 0 && !t.fixed_ok) { continue; }
         emit(ctx, str("static uint8_t gg_eq_", id, "(", c_type(ctx, id), " a, ", c_type(ctx, id), " b);\n"));
         emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a, gg_slice b);\n"));
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value);\n"));
@@ -115,7 +115,7 @@ fn c_format_helpers(ctx: Compiler&) {
 // Bodies follow the function prototypes, since an overload renders a type.
 fn c_format_bodies(ctx: Compiler&) {
     for t, id in ctx.types {
-        if t.kind == T_VOID || t.kind == T_BOTTOM || (t.kind == T_ENUM && t.flags & 1 == 0 && !t.fixed_ok) { continue; }
+        if t.kind == T_VOID || t.kind == T_BOTTOM || t.kind == T_NULL || (t.kind == T_ENUM && t.flags & 1 == 0 && !t.fixed_ok) { continue; }
         if t.size_class == 1 {
             // Variable-size elements sit back to back: walk them pairwise.
             emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a,gg_slice b) {int64_t i; uint8_t *p=a.data,*q=b.data; if(a.len!=b.len)return 0;for(i=0;i<a.len;i++){if(!gg_eq_", id, "(p,q))return 0;p+=gg_size_", id, "(p);q+=gg_size_", id, "(q);}return 1;}\n"));
@@ -159,6 +159,7 @@ fn c_format_bodies(ctx: Compiler&) {
             var target = "*value";
             if ctx.types[t.element].size_class == 2 { target = "*value.header"; }
             if ctx.types[t.element].size_class == 1 { target = "value"; }
+            if t.flags & 4 != 0 { emit(ctx, str("if (!", c_present(ctx, CValue { code: "value", ty: id }), ") { gg_append(out,\"null\",4,1); return; }\n")); }
             emit(ctx, str("gg_render_", t.element, "(out,", target, ");\n"));
         } else if t.kind == T_ENUM {
             let value = CValue { code: "value", ty: id };

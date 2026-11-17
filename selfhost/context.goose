@@ -16,6 +16,7 @@ struct Compiler {
     checked_calls: CheckedCall[>..]&,
     shrinks: Shrink[>..]&,
     effect_revision: i64 = 0,
+    flow: i64 = -1,
     visit: i64 = 0,
     specializations: Specialization[>..]&,
     checking_function: i64 = -1,
