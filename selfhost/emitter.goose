@@ -545,6 +545,7 @@ recursive fn c_build(ctx: Compiler&, n: i64, dest: CValue) {
     if x.tag == N_UNARY && ctx.tokens[x.token].text == "(" { c_build(ctx, x.a, dest); return; }
     if x.tag == N_CALL && x.ty == dest.ty && x.symbol >= 0 { c_into(ctx, n, dest); return; }
     if t.kind == T_ENUM { c_build_enum(ctx, n, dest); return; }
+    if x.tag == N_CALL && x.symbol == -27 { c_build_default(ctx, dest.ty, stack); return; }
     if t.kind == T_VARINT {
         let v = snapshot(ctx, converted(ctx, c_expression(ctx, n), default_integer(ctx)));
         emit(ctx, str("  gg_push_zig(", stack, ", ", v.code, ");\n")); return;
@@ -583,6 +584,21 @@ recursive fn c_build(ctx: Compiler&, n: i64, dest: CValue) {
     if t.flags != 1 { emit(ctx, str("  gg_push_len(", stack, ", ", view, ".len, 4);\n")); }
     if ctx.types[t.element].size_class == 1 { emit(ctx, str("  gg_push(", stack, ", ", view, ".data, (size_t)gg_span_", t.element, "(", view, ".data, ", view, ".len));\n")); }
     else { emit(ctx, str("  gg_push(", stack, ", ", view, ".data, (size_t)", view, ".len * ", c_element_size(ctx, t.element), ");\n")); }
+}
+// Appends the default value of a variable-size type: empty arrays, zero
+// varints, and a struct's fields' defaults in order.
+recursive fn c_build_default(ctx: Compiler&, ty: i64, stack: const u8[:]) {
+    let t = ctx.types[ty];
+    if t.kind == T_VARINT { emit(ctx, str("  gg_push_zig(", stack, ", 0);\n")); return; }
+    if t.kind == T_ARRAY && t.flags == 1 { emit(ctx, str("  gg_push_len(", stack, ", 0, ", t.count, ");\n")); return; }
+    if t.kind == T_ARRAY { emit(ctx, str("  gg_push_dyn(", stack, ", 0, 1);\n")); return; }
+    var e = t.first;
+    while e >= 0 {
+        let ft = ctx.fielddefs[ctx.edges[e].value].ty;
+        if ctx.types[ft].size_class == 1 { c_build_default(ctx, ft, stack); }
+        else { let zero = temporary(ctx, ft); emit(ctx, str("  memset(&", zero, ", 0, sizeof(", zero, ")); gg_push(", stack, ", &", zero, ", sizeof(", zero, "));\n")); }
+        e = ctx.edges[e].next;
+    }
 }
 // Appends one field or element of type ty: a fixed value is staged in a C
 // temporary, a variable one is built at the top.
@@ -979,13 +995,13 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         emit(ctx, str("  goto label", label, ";\n")); return;
     }
     if x.tag == N_ASSIGN {
-        let raw = c_expression(ctx, x.a); let dest = c_decay(ctx, raw); let op = ctx.tokens[x.token].text;
+        let raw = c_expression(ctx, x.a); let dest = c_decay(ctx, raw); let op = if x.flags & 1024 != 0 { "=" } else { ctx.tokens[x.token].text };
         if op == "=" && ctx.types[dest.ty].kind == T_ARRAY && ctx.types[dest.ty].flags == 2 && ctx.types[dest.ty].count < 0 {
             let v = c_decay(ctx, c_expression(ctx, x.b));
             emit(ctx, str("  gg_dyn_assign(", dest.code, ", ", c_view(ctx, v), ", ", c_element_size(ctx, ctx.types[dest.ty].element), ");\n")); return;
         }
         if op == "=" { c_into(ctx, x.b, dest); return; }
-        if op == ".=" { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_adapt(ctx, rhs, ctx.nodes[x.b].target), ";\n")); return; }
+        if op == ".=" && x.flags & 1024 == 0 { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_adapt(ctx, rhs, ctx.nodes[x.b].target), ";\n")); return; }
         let old = snapshot(ctx, dest);
         var right = CValue { code: "1", ty: dest.ty, address: "", stack: "" };
         if x.b >= 0 { right = snapshot(ctx, converted(ctx, c_expression(ctx, x.b), dest.ty)); }

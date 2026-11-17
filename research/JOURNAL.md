@@ -46,3 +46,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 feat-storage: optionals (T?, T&?, null, .= rebinding, flow narrowing by if/while/guard/assert/&&/null tests with a persistent fact list), stack-overflow fault report; run 63 -> 72.
 - 2026-11-17 feat-storage: root structs (one data-stack slot per nonfixed field, per-field provenance pseudo-symbols); run 72 -> 87, stdlib 6 -> 8.
 - 2026-11-17 feat-storage: check_length, range_index, index_of; runtime flushes stdout before an abort; run 87 -> 98.
+- 2026-11-17 feat-storage: globals with only a type start as their default; .= assigns in generic code; run 98 -> 101.

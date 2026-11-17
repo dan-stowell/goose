@@ -592,7 +592,7 @@ fn parse(ctx: Compiler&, file: i64) {
             let n = name_node(ctx, N_ALIAS); expect(ctx, "="); ctx.nodes[n].a = parse_type(ctx); expect(ctx, ";"); ctx.declarations.push(n);
         } else if at(ctx, "let") || at(ctx, "var") || at(ctx, "const") || at(ctx, "reusable") {
             let n = binding(ctx);
-            if ctx.nodes[n].b < 0 { error_at(ctx, ctx.nodes[n].token, "global declarations require an initializer"); }
+            if ctx.nodes[n].b < 0 && ctx.nodes[n].a < 0 { error_at(ctx, ctx.nodes[n].token, "global declarations require an initializer or a type"); }
             ctx.declarations.push(n);
         }
         else { error_at(ctx, ctx.cursor, "expected top-level declaration"); }

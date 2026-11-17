@@ -1108,12 +1108,23 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     if scope != 0 { s = register_symbol(ctx, ctx.nodes[name].token, ctx.nodes[name].ns, 2, n, scope, ctx.nodes[n].flags); ctx.nodes[name].symbol = s; }
     var declared = -1;
     if ctx.nodes[n].a >= 0 { declared = resolve_type(ctx, ctx.nodes[n].a, scope); }
-    let init = first_child(ctx, ctx.nodes[n].b);
+    var init = first_child(ctx, ctx.nodes[n].b);
+    var synthesized = false;
+    if init < 0 && scope == 0 && declared >= 0 {
+        // A global given only a type starts as its type's default value.
+        let syntax = ctx.nodes[ctx.nodes[n].a];
+        if ctx.types[declared].kind == T_STRUCT && !is_variant(ctx, declared) && syntax.tag == N_TYPE {
+            init = node(ctx, N_CONSTRUCT, ctx.nodes[n].token); ctx.nodes[init].flags = 1;
+            let name = node(ctx, N_NAME, syntax.token); ctx.nodes[name].ns = syntax.ns; ctx.nodes[name].flags = syntax.flags & 1; ctx.nodes[name].first = syntax.first; ctx.nodes[name].last = syntax.last;
+            ctx.nodes[init].a = name;
+        } else { init = type_default_value(ctx, declared, ctx.nodes[n].token); synthesized = true; }
+        let values = node(ctx, N_BLOCK, ctx.nodes[n].token); child(ctx, values, init); ctx.nodes[n].b = values;
+    }
     if init < 0 {
         if declared < 0 { error_at(ctx, ctx.nodes[n].token, "uninitialized variable needs a type"); }
         ctx.symbols[s].ty = declared; return;
     }
-    let raw = check_expression(ctx, init, scope, declared);
+    let raw = if synthesized { value_of(ctx, init) } else { check_expression(ctx, init, scope, declared) };
     if ctx.types[raw.ty].kind == T_BOTTOM || raw.ty == 0 { error_at(ctx, ctx.nodes[init].token, "initializer has no value"); }
     var v = decay(ctx, raw);
     if declared < 0 {
@@ -1293,6 +1304,15 @@ fn record_rebind(ctx: Compiler&, symbol: i64) {
     let id = ctx.edges.len; ctx.edges.push(Edge { value: symbol, next: ctx.specializations[ctx.checking_function].rebinds });
     ctx.specializations[ctx.checking_function].rebinds = id;
 }
+fn generic_code(ctx: Compiler&, spec: i64) -> bool {
+    var f = spec;
+    while f >= 0 {
+        let symbol = ctx.symbols[ctx.specializations[f].symbol];
+        if symbol.kind == 5 { return true; }
+        f = ctx.scopes[symbol.scope].function;
+    }
+    return false;
+}
 // `p .= e` rebinds the reference or optional slot p.
 recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
     let x = ctx.nodes[n];
@@ -1321,7 +1341,13 @@ recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
 recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.nodes[n].first >= 0 { check_receiving(ctx, n, scope, false); return; }
     let x = ctx.nodes[n];
-    if ctx.tokens[x.token].text == ".=" { check_rebind(ctx, n, scope); return; }
+    if ctx.tokens[x.token].text == ".=" && ctx.nodes[n].flags & 1024 == 0 {
+        // In generic code .= on a value slot assigns as = does (spec 3.8).
+        let raw = check_expression(ctx, x.a, scope, -1);
+        let slot = slot_type(ctx, x.a);
+        if (slot < 0 || ctx.types[slot].kind != T_REFERENCE) && generic_code(ctx, ctx.checking_function) { ctx.nodes[n].flags |= 1024; }
+        else { check_rebind(ctx, n, scope); return; }
+    }
     let raw = check_expression(ctx, x.a, scope, -1); let dest = decay(ctx, raw);
     if dest.place < 0 { error_at(ctx, x.token, "assignment requires a stored value"); }
     let direct = ctx.nodes[x.a].tag == N_NAME && ctx.types[raw.ty].kind != T_REFERENCE;
@@ -1332,7 +1358,7 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     // A runtime-capacity limited array keeps its capacity; assignment copies
     // elements into it. Other variable-size values are frozen.
     let dynamic = ctx.types[dest.ty].kind == T_ARRAY && ctx.types[dest.ty].flags == 2;
-    if ctx.types[dest.ty].size_class == 1 && !dynamic && ctx.tokens[x.token].text != ".=" { error_at(ctx, x.token, "cannot replace a variable-size value"); }
+    if ctx.types[dest.ty].size_class == 1 && !dynamic { error_at(ctx, x.token, "cannot replace a variable-size value"); }
     if ctx.types[dest.ty].size_class == 2 { error_at(ctx, x.token, "not implemented yet: whole resizable assignment analysis"); }
     if ctx.symbols[dest.place].flags & 32 != 0 { error_at(ctx, x.token, "cannot write a by-value iteration binding"); }
     if ctx.nodes[x.a].tag == N_MEMBER && ctx.nodes[x.a].symbol >= 0 && ctx.fielddefs[ctx.nodes[x.a].symbol].flags & 1 != 0 { error_at(ctx, x.token, "cannot reassign a let field"); }
