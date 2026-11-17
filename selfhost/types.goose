@@ -315,7 +315,7 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
         ty = array_type(ctx, element, syntax.flags & 15, count);
         if ty < 0 { error_at(ctx, syntax.token, "array element size class is not permitted"); }
     } else if syntax.tag == N_TYPE_SLICE {
-        ty = slice_type(ctx, resolve_type(ctx, syntax.a, scope), syntax.flags & 16 != 0);
+        ty = slice_type(ctx, resolve_type_at(ctx, syntax.a, scope, true), syntax.flags & 16 != 0);
     } else if syntax.tag == N_TYPE_REF || syntax.tag == N_TYPE_OPTIONAL {
         let element = resolve_type_at(ctx, syntax.a, scope, true);
         ty = reference_type(ctx, element, syntax.flags & 16 != 0);
