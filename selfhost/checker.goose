@@ -8,7 +8,11 @@ struct Value {
     growshrink: bool = false,
     inexact: bool = false,
     known: bool = false,
+    // A known integer stands for bits, and for alt where several constants
+    // join (6.4): every value it stands for lies between the two. A single
+    // constant keeps alt 0, which fits every integer type.
     bits: u64 = 0,
+    alt: u64 = 0,
     held: i64 = -1,
     fields: i64 = -1,
 }
@@ -32,11 +36,11 @@ struct Shrink { root: i64, balanced: bool }
 
 fn value_of(ctx: Compiler&, n: i64) -> Value {
     let x = ctx.nodes[n];
-    return Value { ty: x.ty, root: x.root, place: x.place, readonly: x.readonly, growshrink: x.growshrink, inexact: x.inexact, known: x.known, bits: x.bits, held: x.held, fields: x.fields };
+    return Value { ty: x.ty, root: x.root, place: x.place, readonly: x.readonly, growshrink: x.growshrink, inexact: x.inexact, known: x.known, bits: x.bits, alt: x.alt, held: x.held, fields: x.fields };
 }
 fn annotate(ctx: Compiler&, n: i64, v: Value) -> Value {
     ctx.nodes[n].ty = v.ty; ctx.nodes[n].root = v.root; ctx.nodes[n].place = v.place;
-    ctx.nodes[n].readonly = v.readonly; ctx.nodes[n].known = v.known; ctx.nodes[n].bits = v.bits;
+    ctx.nodes[n].readonly = v.readonly; ctx.nodes[n].known = v.known; ctx.nodes[n].bits = v.bits; ctx.nodes[n].alt = v.alt;
     ctx.nodes[n].held = v.held;
     ctx.nodes[n].fields = v.fields;
     ctx.nodes[n].growshrink = v.growshrink;
@@ -178,6 +182,20 @@ fn integer_fits(ctx: Compiler&, bits: u64, ty: i64) -> bool {
     let bound = 1 << (t.bytes * 8 - 1);
     return signed >= -bound && signed < bound;
 }
+fn constant_fits(ctx: Compiler&, a: Type, bits: u64, b: Type, target: i64) -> bool {
+    if a.flags & 2 == 0 && (bits as! i64) < 0 && b.flags & 2 != 0 { return false; }
+    if a.flags & 2 != 0 && bits > 9223372036854775807 && b.flags & 2 == 0 { return false; }
+    return integer_fits(ctx, bits, target);
+}
+// The smaller and the larger of two constants of one integer type.
+fn constant_low(ctx: Compiler&, ty: i64, x: u64, y: u64) -> u64 {
+    if ctx.types[ty].flags & 2 != 0 { return if x < y { x } else { y }; }
+    return if (x as! i64) < (y as! i64) { x } else { y };
+}
+fn constant_high(ctx: Compiler&, ty: i64, x: u64, y: u64) -> u64 {
+    if ctx.types[ty].flags & 2 != 0 { return if x < y { y } else { x }; }
+    return if (x as! i64) < (y as! i64) { y } else { x };
+}
 fn fits(ctx: Compiler&, v: Value, target: i64) -> bool {
     if target == v.ty || ctx.types[v.ty].kind == T_BOTTOM { return true; }
     let a = ctx.types[v.ty]; let b = ctx.types[target];
@@ -189,11 +207,7 @@ fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
     let a = ctx.types[v.ty]; let b = ctx.types[target];
     if v.ty == target { return true; }
     if a.kind == T_INTEGER && b.kind == T_INTEGER {
-        if v.known {
-            if a.flags & 2 == 0 && (v.bits as! i64) < 0 && b.flags & 2 != 0 { return false; }
-            if a.flags & 2 != 0 && v.bits > 9223372036854775807 && b.flags & 2 == 0 { return false; }
-            return integer_fits(ctx, v.bits, target);
-        }
+        if v.known { return constant_fits(ctx, a, v.bits, b, target) && constant_fits(ctx, a, v.alt, b, target); }
         return (a.flags & 2 == b.flags & 2 && a.bytes <= b.bytes) || (a.flags & 2 != 0 && b.flags & 2 == 0 && a.bytes < b.bytes);
     }
     if a.kind == T_FLOAT && b.kind == T_FLOAT { return a.bytes <= b.bytes || v.known; }
@@ -206,8 +220,25 @@ fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
     }
     return false;
 }
+// Parameters and results are generic over constness: a parameter declared
+// u8[:] or T& takes a read-only argument too, and the specialization is
+// checked with the argument's constness. An extern's parameters are C's,
+// with exactly the constness they declare.
+fn parameter_destination(ctx: Compiler&, ty: i64, external: bool) -> i64 {
+    let t = ctx.types[ty];
+    if external || t.flags & 1 != 0 { return ty; }
+    if t.kind == T_SLICE { return slice_type(ctx, t.element, true); }
+    if t.kind == T_REFERENCE { return reference_type(ctx, t.element, true); }
+    return ty;
+}
 fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
-    if !fits(ctx, v, target) { error_at(ctx, ctx.nodes[n].token, str("incompatible types (type ", v.ty, " kind ", ctx.types[v.ty].kind, " width ", ctx.types[v.ty].bytes, " -> ", target, " kind ", ctx.types[target].kind, " width ", ctx.types[target].bytes, ")")); }
+    if !fits(ctx, v, target) {
+        var text: u8[>..] = [];
+        text.append("incompatible types: "); type_text(ctx, v.ty, text);
+        if v.readonly && ctx.types[v.ty].kind != T_REFERENCE && ctx.types[v.ty].kind != T_SLICE { text.append(" (read-only)"); }
+        text.append(" -> "); type_text(ctx, target, text);
+        error_at(ctx, ctx.nodes[n].token, text);
+    }
     ctx.nodes[n].target = target;
 }
 fn merge_numeric(ctx: Compiler&, a: Value, b: Value, token: i64) -> i64 {
@@ -246,6 +277,31 @@ fn child_count(ctx: Compiler&, n: i64) -> i64 {
     return count;
 }
 
+// Constant operands fold as the operation would compute them in 64 bits;
+// whether the result fits its destination is checked where it lands.
+fn fold_integer(ctx: Compiler&, op: const u8[:], a: u64, b: u64, signed: bool, token: i64) -> u64 {
+    if op == "+" { return a + b; }
+    if op == "-" { return a - b; }
+    if op == "*" { return a * b; }
+    if op == "/" || op == "%" {
+        if b == 0 { error_at(ctx, token, "zero divisor in constant"); }
+        if signed {
+            let x = a as! i64; let y = b as! i64;
+            if y == -1 { if op == "/" { return 0 - a; } return 0; }
+            if op == "/" { return (x / y) as! u64; } return (x % y) as! u64;
+        }
+        if op == "/" { return a / b; } return a % b;
+    }
+    if op == "<<" { if b >= 64 { return 0; } return a << b; }
+    if op == ">>" {
+        if signed { let x = a as! i64; if b >= 64 { return if x < 0 { 0 - (1 as u64) } else { 0 }; } return (x >> (b as i64)) as! u64; }
+        if b >= 64 { return 0; } return a >> b;
+    }
+    if op == "&" { return a & b; }
+    if op == "|" { return a | b; }
+    if op == "^" { return a ^ b; }
+    return 0;
+}
 // A named constant (a global let or const with no written type bound to an
 // integer constant, 3.1) and an untyped let bound to a literal-like float,
 // local or global (6.3), adapt at each use as their initializer would.
@@ -289,7 +345,10 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             else if op == "-" || op == "~" {
                 if !numeric(ctx, v.ty) { error_at(ctx, x.token, "numeric operand required"); }
                 if op == "-" && ctx.types[v.ty].kind == T_INTEGER && ctx.types[v.ty].flags & 2 != 0 && v.bits != 9223372036854775808 { error_at(ctx, x.token, "cannot negate an unsigned value"); }
-                if v.known && ctx.types[v.ty].kind == T_INTEGER { if op == "-" { v.bits = 0 - v.bits; v.ty = default_integer(ctx); } else { v.bits = ~v.bits; } }
+                if v.known && ctx.types[v.ty].kind == T_INTEGER {
+                    if op == "-" { v.bits = 0 - v.bits; v.alt = 0 - v.alt; v.ty = default_integer(ctx); }
+                    else { v.bits = ~v.bits; if v.alt != 0 { v.alt = ~v.alt; } }
+                }
                 v.place = -1;
             }
         }
@@ -309,6 +368,18 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             require_fit(ctx, x.a, a, common);
             if op != "<<" && op != ">>" { require_fit(ctx, x.b, b, common); }
             v.ty = common;
+            if a.known && b.known && ctx.types[common].kind == T_INTEGER && op != "<" && op != "<=" && op != ">" && op != ">=" {
+                let signed = ctx.types[common].flags & 2 == 0;
+                v.known = true; v.bits = fold_integer(ctx, op, a.bits, b.bits, signed, x.token);
+                if a.alt != 0 || b.alt != 0 {
+                    // A single constant's alt is 0 by convention: it stands for bits alone.
+                    let aa = if a.alt == 0 { a.bits } else { a.alt }; let ba = if b.alt == 0 { b.bits } else { b.alt };
+                    let p = fold_integer(ctx, op, aa, b.bits, signed, x.token); let q = fold_integer(ctx, op, a.bits, ba, signed, x.token); let r = fold_integer(ctx, op, aa, ba, signed, x.token);
+                    let low = constant_low(ctx, common, constant_low(ctx, common, v.bits, p), constant_low(ctx, common, q, r));
+                    let high = constant_high(ctx, common, constant_high(ctx, common, v.bits, p), constant_high(ctx, common, q, r));
+                    v.bits = high; v.alt = low;
+                }
+            }
             if ctx.types[common].kind == T_FLOAT && (ctx.types[a.ty].kind != T_FLOAT || a.known) && (ctx.types[b.ty].kind != T_FLOAT || b.known) { v.known = true; }
             if op == "<" || op == "<=" || op == ">" || op == ">=" { v.ty = boolean_type(ctx); v.known = false; }
         }
@@ -382,6 +453,14 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             v.growshrink = a.growshrink || b.growshrink;
             v.inexact = a.inexact || b.inexact || a.root != b.root;
             v.place = -1; v.known = false;
+            if a.known && b.known && ctx.types[a.ty].kind == ctx.types[b.ty].kind && (ctx.types[a.ty].kind == T_FLOAT || ctx.types[a.ty].kind == T_INTEGER) {
+                v.known = true;
+                if ctx.types[v.ty].kind == T_INTEGER {
+                    let low = constant_low(ctx, v.ty, constant_low(ctx, v.ty, a.bits, a.alt), constant_low(ctx, v.ty, b.bits, b.alt));
+                    let high = constant_high(ctx, v.ty, constant_high(ctx, v.ty, a.bits, a.alt), constant_high(ctx, v.ty, b.bits, b.alt));
+                    v.bits = high; v.alt = low;
+                }
+            }
         }
     } else if tag == N_WHILE || tag == N_FOR || tag == N_LOOP || tag == N_EARLY { v = check_loop(ctx, n, scope); }
     else if tag == N_RETURN {
@@ -478,13 +557,39 @@ recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
             if ctx.nodes[written].flags == 0 || same_name(ctx, ctx.nodes[written].token, ctx.fielddefs[field].token) { init = ctx.nodes[written].a; ctx.nodes[written].symbol = field; e = ctx.edges[e].next; }
         }
         var init_scope = scope;
+        var type_default = false;
+        var field_default = false;
         if init < 0 {
-            if ctx.fielddefs[field].initializer < 0 { error_at(ctx, ctx.nodes[n].token, str("missing field '", ctx.tokens[ctx.fielddefs[field].token].text, "'")); }
-            init = clone_tree(ctx, ctx.fielddefs[field].initializer);
-            init_scope = ctx.types[ty].scope;
+            if ctx.fielddefs[field].initializer >= 0 {
+                init = clone_tree(ctx, ctx.fielddefs[field].initializer);
+                init_scope = ctx.types[ty].scope;
+                field_default = true;
+            } else if ctx.nodes[n].flags & 1 != 0 {
+                if ctx.types[ctx.fielddefs[field].ty].size_class != 0 && !(ctx.types[ctx.fielddefs[field].ty].kind == T_ARRAY) { error_at(ctx, ctx.nodes[n].token, str("field '", ctx.tokens[ctx.fielddefs[field].token].text, "' has no default value")); }
+                if ctx.types[ctx.fielddefs[field].ty].kind == T_REFERENCE { error_at(ctx, ctx.nodes[n].token, str("field '", ctx.tokens[ctx.fielddefs[field].token].text, "' is a reference, which has no default value")); }
+                init = type_default_value(ctx, ctx.fielddefs[field].ty, ctx.nodes[n].token);
+                type_default = true;
+            } else { error_at(ctx, ctx.nodes[n].token, str("missing field '", ctx.tokens[ctx.fielddefs[field].token].text, "'")); }
         }
         let added = node(ctx, N_INIT, ctx.fielddefs[field].token); ctx.nodes[added].a = init; ctx.nodes[added].symbol = field; child(ctx, n, added);
-        let v = check_expression(ctx, init, init_scope, ctx.fielddefs[field].ty); require_fit(ctx, init, v, ctx.fielddefs[field].ty);
+        // A default may not lead to a construction that takes it again (3.2).
+        let defaults = ctx.default_stack; let mark = defaults.len;
+        if field_default {
+            var i = defaults.len;
+            while i > 0 && defaults[i - 1] != -1 {
+                i--;
+                if defaults[i] == -2 - field {
+                    var text: u8[>..] = [];
+                    format(text, "the default of field ", ctx.tokens[ctx.fielddefs[field].token].text, " of "); type_text(ctx, field_owner(ctx, field), text);
+                    text.append(" leads to this construction of "); type_text(ctx, ty, text); text.append(", which takes it again");
+                    error_at(ctx, ctx.nodes[n].token, text);
+                }
+            }
+            defaults.push(-2 - field);
+        }
+        let v = if type_default { value_of(ctx, init) } else { check_expression(ctx, init, init_scope, ctx.fielddefs[field].ty) };
+        defaults.resize(mark);
+        require_fit(ctx, init, v, ctx.fielddefs[field].ty);
         let stored = received(ctx, v, ctx.fielddefs[field].ty);
         check_stored_view(ctx, stored, ctx.nodes[init].token);
         if contains_view(ctx, stored.ty) && root_depth(ctx, content_root(ctx, stored)) >= root_depth(ctx, root) { root = content_root(ctx, stored); }
@@ -492,6 +597,22 @@ recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
     }
     if e >= 0 { error_at(ctx, ctx.nodes[ctx.edges[e].value].token, "unknown or out-of-order field initializer"); }
     return Value { ty: ty, held: root, fields: ctx.nodes[n].first };
+}
+fn field_owner(ctx: Compiler&, field: i64) -> i64 {
+    for t, i in ctx.types {
+        if t.kind != T_STRUCT { continue; }
+        var e = t.first;
+        while e >= 0 { if ctx.edges[e].value == field { return i; } e = ctx.edges[e].next; }
+    }
+    return -1;
+}
+// The value a type has before anything is written to it, as default<T>()
+// gives it: a checked call of that builtin, for a construction to emit.
+fn type_default_value(ctx: Compiler&, ty: i64, token: i64) -> i64 {
+    let n = node(ctx, N_CALL, token);
+    ctx.nodes[n].symbol = -27; ctx.nodes[n].a = node(ctx, N_NAME, token);
+    annotate(ctx, n, Value { ty: ty });
+    return n;
 }
 recursive fn check_block(ctx: Compiler&, n: i64, parent: i64, expected: i64) -> Value {
     let scope = scope_new(ctx, parent, ctx.checking_function);
@@ -831,6 +952,23 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if name == "print" { ctx.nodes[n].symbol = -20; } else { ctx.nodes[n].symbol = -22; }
         return Value {};
     }
+    if !member && (name == "src_file" || name == "src_line") && lookup(ctx, callee, scope, 3) < 0 {
+        if child_count(ctx, n) != 0 { error_at(ctx, ctx.nodes[n].token, str(name, " takes no arguments")); }
+        var site = ctx.nodes[n].token; if ctx.default_site >= 0 { site = ctx.default_site; }
+        // The site's token stays in the value's bits for the emitter.
+        if name == "src_line" { ctx.nodes[n].symbol = -28; return Value { ty: default_integer(ctx), bits: site as u64 }; }
+        ctx.nodes[n].symbol = -29; return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), readonly: true, bits: site as u64 };
+    }
+    // bytes_of(a): an array's element region as a read-only byte view (12).
+    if !member && name == "bytes_of" && lookup(ctx, callee, scope, 3) < 0 {
+        if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "bytes_of takes one array"); }
+        let arg = first_child(ctx, n); let v = decay(ctx, check_expression(ctx, arg, scope, -1));
+        let t = ctx.types[v.ty];
+        if t.kind != T_ARRAY || (t.flags != 0 && t.flags < 3) { error_at(ctx, ctx.nodes[arg].token, "bytes_of needs a fixed-size or resizable array"); }
+        if ctx.types[t.element].size_class != 0 { error_at(ctx, ctx.nodes[arg].token, "bytes_of needs fixed-size elements"); }
+        ctx.nodes[n].symbol = -30;
+        return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), root: v.root, readonly: true };
+    }
     if !member && (name == "assert" || name == "abort" || name == "exit" || name == "copy" || name == "default") {
         if name == "default" {
             let t = first_child(ctx, callee); if t < 0 { error_at(ctx, ctx.nodes[n].token, "default requires a type argument"); }
@@ -897,11 +1035,11 @@ fn fill_defaults(ctx: Compiler&, symbol: i64, call: i64) {
 // A default is checked at the call, as the argument written there, so its
 // temporaries and block locals belong to the caller. Only the names it
 // reads come from the declaration, through the floor lookup redirects.
-recursive fn check_default(ctx: Compiler&, n: i64, symbol: i64, parameter: i64, caller_scope: i64, expected: i64) -> Value {
+recursive fn check_default(ctx: Compiler&, n: i64, symbol: i64, parameter: i64, caller_scope: i64, expected: i64, site: i64) -> Value {
     let defaults = ctx.default_stack;
     let token = ctx.nodes[parameter].token;
     var i = defaults.len;
-    while i > 0 && defaults[i - 1] >= 0 {
+    while i > 0 && defaults[i - 1] != -1 {
         i--;
         if defaults[i] == token { error_at(ctx, ctx.nodes[n].token, str("the default of parameter ", ctx.tokens[token].text, " leads to a call that takes it again")); }
     }
@@ -910,10 +1048,52 @@ recursive fn check_default(ctx: Compiler&, n: i64, symbol: i64, parameter: i64, 
     let scope = scope_new(ctx, caller_scope, ctx.checking_function);
     ctx.default_floor = scope; ctx.default_scope = ctx.symbols[symbol].scope; ctx.default_limit = ctx.symbols[symbol].capture_limit;
     ctx.default_decl = ctx.symbols[symbol].decl; ctx.default_param = parameter;
+    let outer_site = ctx.default_site; ctx.default_site = site;
     let v = check_expression(ctx, n, scope, expected);
     ctx.default_floor = floor; ctx.default_scope = outer; ctx.default_limit = limit; ctx.default_decl = decl; ctx.default_param = param;
+    ctx.default_site = outer_site;
     defaults.resize(mark);
     return v;
+}
+// An instantiation as diagnostics show it: the type parameters no parameter
+// type names, then the parameter types (typecheck.h DumpInstance).
+fn instance_text(ctx: Compiler&, symbol: i64, out: u8[>..]&) {
+    out.append(ctx.tokens[ctx.symbols[symbol].token].text);
+    var template = -1;
+    for instance in ctx.function_instances { if instance.symbol == symbol { template = ctx.symbols[instance.template].decl; } }
+    let decl = ctx.symbols[symbol].decl;
+    if template >= 0 {
+        var listed = false; var g = ctx.nodes[template].first;
+        while g >= 0 {
+            let generic = ctx.edges[g].value;
+            var named = false; var p = ctx.nodes[ctx.nodes[template].a].first;
+            while p >= 0 { if syntax_names(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.nodes[generic].token) { named = true; } p = ctx.edges[p].next; }
+            let s = find_symbol(ctx, ctx.nodes[generic].token, -1, ctx.symbols[symbol].scope, 1);
+            if !named && s >= 0 {
+                out.append(if listed { ", " } else { "<" }); listed = true;
+                format(out, ctx.tokens[ctx.nodes[generic].token].text, " = "); type_text(ctx, ctx.symbols[s].ty, out);
+            }
+            g = ctx.edges[g].next;
+        }
+        if listed { out.push('>'); }
+    }
+    out.push('(');
+    var p = ctx.nodes[ctx.nodes[decl].a].first; var comma = false;
+    while p >= 0 {
+        if comma { out.append(", "); } comma = true;
+        type_text(ctx, resolve_type(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.symbols[symbol].scope), out);
+        p = ctx.edges[p].next;
+    }
+    out.push(')');
+}
+recursive fn syntax_names(ctx: Compiler&, n: i64, token: i64) -> bool {
+    if n < 0 { return false; }
+    let x = ctx.nodes[n];
+    if x.tag == N_TYPE && x.flags & 1 == 0 && same_name(ctx, x.token, token) { return true; }
+    if syntax_names(ctx, x.a, token) || syntax_names(ctx, x.b, token) { return true; }
+    var e = x.first;
+    while e >= 0 { if syntax_names(ctx, ctx.edges[e].value, token) { return true; } e = ctx.edges[e].next; }
+    return false;
 }
 recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope: i64) -> i64 {
     let decl = ctx.symbols[symbol].decl;
@@ -931,8 +1111,9 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         let expected = resolve_type(ctx, ctx.nodes[parameter].a, ctx.symbols[symbol].scope);
         if actual >= 0 {
             let arg = ctx.edges[actual].value;
-            let v = if first_default >= 0 && index >= first_default { check_default(ctx, arg, symbol, parameter, caller_scope, expected) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
-            require_fit(ctx, arg, v, expected);
+            let v = if first_default >= 0 && index >= first_default { check_default(ctx, arg, symbol, parameter, caller_scope, expected, ctx.nodes[call].token) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
+            require_fit(ctx, arg, v, parameter_destination(ctx, expected, ctx.nodes[decl].flags & 2 != 0));
+            ctx.nodes[arg].target = expected;
             if ctx.types[expected].size_class > 0 && v.place >= 0 { error_at(ctx, ctx.nodes[arg].token, "nonfixed value parameter needs a fresh value or explicit copy"); }
             actual = ctx.edges[actual].next;
         }
@@ -987,6 +1168,15 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
             return i;
         }
     }
+    var nested = 0;
+    for existing in ctx.specializations { if existing.state == 1 && ctx.symbols[existing.symbol].token == ctx.symbols[symbol].token { nested++; } }
+    if nested >= 16 && call >= 0 {
+        let name = ctx.tokens[ctx.symbols[symbol].token].text;
+        var text: u8[>..] = [];
+        format(text, "instantiating "); instance_text(ctx, symbol, text);
+        format(text, " would put more than 16 specializations of ", name, " in progress on this call path: a recursive call must reach a finite set of instantiations");
+        error_at(ctx, ctx.nodes[call].token, text);
+    }
     let results = node(ctx, N_BLOCK, ctx.nodes[decl].token);
     if ctx.nodes[decl].b >= 0 {
         var re = ctx.nodes[ctx.nodes[decl].b].first;
@@ -1021,6 +1211,12 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
             if ctx.types[ty].kind == T_REFERENCE || ctx.types[ty].kind == T_SLICE { ctx.symbols[s].readonly = ctx.symbols[s].readonly || argument.readonly; }
             actual = ctx.edges[actual].next;
         }
+        if call < 0 && contains_view(ctx, ty) {
+            let own = ctx.symbols.len;
+            ctx.symbols.push(Symbol { token: ctx.nodes[param].token, ns: -1, kind: 4, decl: param, scope: 0, ty: ty, state: 2 });
+            if ctx.types[ty].kind == T_REFERENCE || ctx.types[ty].kind == T_SLICE { ctx.symbols[s].root = own; }
+            ctx.symbols[s].held = own;
+        }
         ctx.nodes[param].symbol = s; p = ctx.edges[p].next;
     }
     if ctx.nodes[decl].flags & 2 == 0 {
@@ -1029,9 +1225,10 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         // A body declared outside a default may take that default again,
         // which makes it recursive rather than an endless default (§3.2).
         let defaults = ctx.default_stack; let default_mark = defaults.len; defaults.push(-1);
+        let outer_site = ctx.default_site; ctx.default_site = -1;
         let tail = check_expression(ctx, body, scope, result);
         if ctx.types[tail.ty].kind != T_BOTTOM { check_return(ctx, ctx.nodes[body].a, tail, id, ctx.nodes[decl].token); }
-        defaults.resize(default_mark);
+        defaults.resize(default_mark); ctx.default_site = outer_site;
         ctx.checking_function = previous; ctx.loop_depth = previous_loop; ctx.loop_breaks = previous_breaks;
     } else if result < 0 { ctx.specializations[id].result = 0; }
     if ctx.specializations[id].result < 0 { ctx.specializations[id].result = 0; }

@@ -163,7 +163,8 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
         var p = ctx.nodes[decl.a].first; e = ctx.nodes[call].first;
         while p >= 0 && e >= 0 {
             let actual = value_of(ctx, ctx.edges[e].value);
-            let expected = resolve_type(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.symbols[concrete].scope);
+            let declared = resolve_type(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.symbols[concrete].scope);
+            let expected = parameter_destination(ctx, declared, decl.flags & 2 != 0);
             if !fits(ctx, actual, expected) { matches = false; }
             else {
                 let want = ctx.types[expected];

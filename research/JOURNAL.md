@@ -9,3 +9,4 @@ Append-only: one line per commit, a paragraph at each milestone.
 - 2026-11-17 selfhost parameter defaults, mined from the October gap-param-defaults branch (run 23->24, reject 3->7)
 - 2026-11-17 selfhost fixed multiple results and multi-target receivers, mined from gap-multi-return (run 24->26)
 - 2026-11-17 selfhost function modifiers (simd, inline, checkfree, export), adapting named constants and float lets, int-to-float, as! float, loops without break as bottom (stdlib 2->6/17, reject 7->14)
+- 2026-11-17 selfhost constant folding and joined constant branches, constness-generic parameters, struct literal '..', bytes_of, src_file/src_line, unreached view params rooted globally, field-default cycles and the 16-deep instantiation bound, Goose-spelled types in diagnostics (run 26->30, reject 14->18)

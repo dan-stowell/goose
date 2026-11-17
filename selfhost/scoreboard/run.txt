@@ -2,12 +2,15 @@ bce_function_state
 byteview_global_lists
 byteview_global_stores
 byteview_global_tables
+byteview_provenance
+call_location
 cycle_holder_results
 cycle_threaded_before_join
 cycle_threaded_results
 cycle_threaded_slices
 fixed_array_bulk_fill
 growshrink_literal_views
+growshrink_reach_stores
 holder_param_bounds
 inline_nested_calls
 let_contents
@@ -15,6 +18,7 @@ local_name_suffixes
 namespace_comparisons
 namespaces_lib
 nested_call_depth
+polymorphic_recursion
 reassoc_discarded_value
 rebind_chain_loop
 reftops_call_sync

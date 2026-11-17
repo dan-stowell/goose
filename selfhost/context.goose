@@ -24,6 +24,8 @@ struct Compiler {
     default_limit: i64 = -1,
     default_decl: i64 = -1,
     default_param: i64 = -1,
+    // The token of the call whose default is being checked, for src_line.
+    default_site: i64 = -1,
     loop_depth: i64 = 0,
     // Breaks seen in the innermost loop or block being checked.
     loop_breaks: i64 = 0,

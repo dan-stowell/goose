@@ -352,6 +352,17 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         if builtin == -22 { return no_c_value(ctx); }
         return out;
     }
+    if builtin == -28 { return CValue { code: save_text(ctx, str("((int64_t)", ctx.tokens[x.bits as i64].line, ")")), ty: x.ty, address: "", stack: "" }; }
+    if builtin == -29 {
+        let path = ctx.sources[ctx.tokens[x.bits as i64].file].path;
+        var base = 0; for c, i in path { if c == '/' || c == '\\' { base = i + 1; } }
+        return CValue { code: save_text(ctx, str("gg_view((void *)", c_literal(ctx, path[base..]), ", ", path.len - base, ")")), ty: x.ty, address: "", stack: "" };
+    }
+    if builtin == -30 {
+        let a = c_decay(ctx, c_expression(ctx, first_child(ctx, n))); let view = raw_temporary(ctx, "gg_slice");
+        emit(ctx, str("  ", view, " = ", c_view(ctx, a), "; ", view, ".len *= sizeof(", c_type(ctx, element_type(ctx, a.ty)), ");\n"));
+        return CValue { code: view, ty: x.ty, address: "", stack: "" };
+    }
     if builtin == -27 {
         let name = temporary(ctx, x.ty); emit(ctx, str("  memset(&", name, ", 0, sizeof(", name, "));\n"));
         return CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };

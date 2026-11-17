@@ -375,6 +375,34 @@ recursive fn struct_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
     ctx.types[id].bytes = offset; ctx.types[id].size_class = size_class; ctx.types[id].state = 2;
     return id;
 }
+// A type as Goose spells it, for diagnostics.
+recursive fn type_text(ctx: Compiler&, ty: i64, out: u8[>..]&) {
+    if ty < 0 { out.append("?"); return; }
+    let t = ctx.types[ty];
+    if t.kind == T_VOID { out.append("void"); }
+    else if t.kind == T_BOTTOM { out.append("never"); }
+    else if t.kind == T_BOOL { out.append("bool"); }
+    else if t.kind == T_VARINT { out.append("varint"); }
+    else if t.kind == T_INTEGER { format(out, if t.flags & 2 != 0 { "u" } else { "i" }, t.bytes * 8); }
+    else if t.kind == T_FLOAT { format(out, "f", t.bytes * 8); }
+    else if t.kind == T_STRUCT {
+        out.append(ctx.tokens[ctx.nodes[t.decl].token].text);
+        if t.arguments >= 0 {
+            out.push('<'); var e = t.arguments; var comma = false;
+            while e >= 0 { if comma { out.append(", "); } comma = true; type_text(ctx, ctx.edges[e].value, out); e = ctx.edges[e].next; }
+            out.push('>');
+        }
+    } else if t.kind == T_SLICE { if t.flags & 1 != 0 { out.append("const "); } type_text(ctx, t.element, out); out.append("[:]"); }
+    else if t.kind == T_REFERENCE { if t.flags & 1 != 0 { out.append("const "); } type_text(ctx, t.element, out); out.push('&'); }
+    else if t.kind == T_ARRAY {
+        type_text(ctx, t.element, out);
+        if t.flags == 0 { format(out, "[", t.count, "]"); }
+        else if t.flags == 1 { out.append("[]"); }
+        else if t.flags == 2 { if t.count >= 0 { format(out, "[..", t.count, "]"); } else { out.append("[..]"); } }
+        else if t.flags == 3 { out.append("[>..]"); }
+        else { out.append("[>..<]"); }
+    } else { format(out, "type#", ty); }
+}
 fn find_field(ctx: Compiler&, ty: i64, token: i64) -> i64 {
     var e = ctx.types[ty].first;
     while e >= 0 { let f = ctx.edges[e].value; if same_name(ctx, ctx.fielddefs[f].token, token) { return f; } e = ctx.edges[e].next; }

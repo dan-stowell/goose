@@ -213,6 +213,7 @@ recursive fn expression(ctx: Compiler&, minimum: i64, constructs: bool, statemen
             var style = 0;
             if !at(ctx, "}") {
                 loop {
+                    if take(ctx, "..") { ctx.nodes[n].flags |= 1; break; }
                     let item = node(ctx, N_INIT, ctx.cursor);
                     if ctx.tokens[ctx.cursor].kind == TK_NAME && ahead(ctx, ":") {
                         if style == 2 { error_at(ctx, ctx.cursor, "cannot mix named and positional fields"); }

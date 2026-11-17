@@ -10,5 +10,9 @@ errors/param_default_not_trailing
 errors/param_default_untyped
 errors_tc/constant_division_overflow
 errors_tc/diverging_initializer
+errors_tc/field_default_mutual
+errors_tc/field_default_param_default
 errors_tc/param_default_names_local
 errors_tc/param_default_names_param
+errors_tc/polymorphic_recursion_param
+errors_tc/polymorphic_recursion_type_args
