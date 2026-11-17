@@ -17,6 +17,8 @@ errors_tc/branch_root_block_break
 errors_tc/branch_root_loop_break
 errors_tc/branch_root_match_binder
 errors_tc/break_mismatch
+errors_tc/append_copy_relative
+errors_tc/append_copy_relative_links
 errors_tc/check_length_variable
 errors_tc/const_name_pattern_default
 errors_tc/constant_division_overflow
@@ -49,7 +51,14 @@ errors_tc/param_default_names_param
 errors_tc/polymorphic_recursion_param
 errors_tc/polymorphic_recursion_type_args
 errors_tc/range_index_variable
+errors_tc/relref_copy
+errors_tc/relref_copy_ref_call_annotated
+errors_tc/relref_copy_ref_call_arg
+errors_tc/relref_copy_ref_call_assign
+errors_tc/root_component_cross_owner
+errors_tc/root_cross_component_relative
 errors_tc/slice_pool_const
+errors_tc/slice_pool_relative
 errors_tc/slot_pool_const
 errors_tc/zero_length_capacity
 errors_tc/zero_length_element
@@ -62,4 +71,5 @@ errors_tc/zero_size_variant_element
 errors_tc/zero_size_variant_field
 errors_tc/zero_size_variant_payload
 errors_tc/zero_size_variant_slice_element
+errors_tc/slot_pool_relative
 tests/recursive_nonfixed_local

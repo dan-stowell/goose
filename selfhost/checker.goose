@@ -139,7 +139,51 @@ fn check_stored_view(ctx: Compiler&, v: Value, token: i64) {
         if t.kind == T_ARRAY && t.flags == 4 && holds_view_of(ctx, v.ty, t.element) { error_at(ctx, token, "a reference into a grow-shrink array cannot be stored in a container"); }
     }
 }
+
+// Relative links (spec 3.9): a pool link must point into its pool, a
+// self-relative one into the root it is stored in, and a value holding
+// self-relative links is never copied, since its offsets measure from where
+// it is stored.
+recursive fn holds_self_link(ctx: Compiler&, ty: i64) -> bool {
+    if ty < 0 { return false; }
+    let t = ctx.types[ty];
+    if t.kind == T_REFERENCE { return t.flags & 8 != 0; }
+    if t.kind == T_ARRAY && t.flags != 3 && t.flags != 4 { return holds_self_link(ctx, t.element); }
+    if t.kind == T_STRUCT && t.size_class != 3 {
+        var e = t.first;
+        while e >= 0 { if holds_self_link(ctx, ctx.fielddefs[ctx.edges[e].value].ty) { return true; } e = ctx.edges[e].next; }
+    }
+    return false;
+}
+fn reject_self_link_copy(ctx: Compiler&, ty: i64, token: i64, prefix: const u8[:]) {
+    if !holds_self_link(ctx, ty) { return; }
+    var text: u8[>..] = [];
+    text.append(prefix); text.append("copying a value of type "); type_text(ctx, ty, text);
+    text.append(", which contains self-relative references, is not supported; construct it in place");
+    error_at(ctx, token, text);
+}
+fn check_relative_store(ctx: Compiler&, slot: i64, v: Value, destination: i64, token: i64) {
+    if !is_relative(ctx, slot) || ctx.types[v.ty].kind == T_NULL { return; }
+    let t = ctx.types[slot];
+    if t.flags & 16 != 0 {
+        var want = t.decl;
+        var text: u8[>..] = [];
+        text.append(ctx.tokens[ctx.symbols[t.decl].token].text);
+        if t.count >= 256 {
+            let field = find_field(ctx, ctx.symbols[t.decl].ty, t.count / 256 - 1);
+            if field >= 0 { want = root_component(ctx, t.decl, field); }
+            text.append("."); text.append(ctx.tokens[t.count / 256 - 1].text);
+        }
+        if v.root != want {
+            let name = save_text(ctx, text);
+            error_at(ctx, token, str("a relative reference in ", name, " must point into ", name));
+        }
+        return;
+    }
+    if destination >= 0 && v.root != destination { error_at(ctx, token, "a relative reference must point within the same root as its location"); }
+}
 fn store_in_array(ctx: Compiler&, value: Value, array: Value, scope: i64, token: i64) {
+    if holds_self_link(ctx, value.ty) && value.held >= 0 && value.held != array.root { error_at(ctx, token, "a relative reference must point within the same root as its location"); }
     check_stored_view(ctx, value, token);
     store_lifetime(ctx, value, array.root, token);
     if array.inexact && contains_view(ctx, value.ty) {
@@ -641,6 +685,26 @@ fn bound_text(ctx: Compiler&, n: i64) -> const u8[:] {
     if ctx.nodes[n].tag == N_UNARY { return own_text(ctx, str("-", ctx.tokens[ctx.nodes[ctx.nodes[n].a].token].text)); }
     return ctx.tokens[ctx.nodes[n].token].text;
 }
+// The source spelling of expression n, for diagnostics: its tokens' span,
+// with the brackets it opened closed.
+recursive fn token_span(ctx: Compiler&, n: i64, lo: i64&, hi: i64&) {
+    if n < 0 { return; }
+    let x = ctx.nodes[n]; let t = ctx.tokens[x.token];
+    if t.offset < lo { lo = t.offset; }
+    if t.offset + t.text.len > hi { hi = t.offset + t.text.len; }
+    token_span(ctx, x.a, lo, hi); token_span(ctx, x.b, lo, hi); token_span(ctx, x.c, lo, hi);
+    var e = x.first;
+    while e >= 0 { token_span(ctx, ctx.edges[e].value, lo, hi); e = ctx.edges[e].next; }
+}
+fn source_text(ctx: Compiler&, n: i64) -> const u8[:] {
+    var lo = 9223372036854775807; var hi = 0;
+    token_span(ctx, n, lo, hi);
+    let text = ctx.sources[ctx.tokens[ctx.nodes[n].token].file].text;
+    var open = 0;
+    for i in lo..hi { if text[i] == '[' || text[i] == '(' { open++; } if text[i] == ']' || text[i] == ')' { open--; } }
+    while open > 0 && hi < text.len { if text[hi] == '[' || text[hi] == '(' { open++; } if text[hi] == ']' || text[hi] == ')' { open--; } hi++; }
+    return text[lo..hi];
+}
 fn pattern_text(ctx: Compiler&, item: i64) -> const u8[:] {
     let x = ctx.nodes[item];
     if x.tag == N_RANGE { return own_text(ctx, str(bound_text(ctx, x.a), "..", bound_text(ctx, x.b))); }
@@ -970,6 +1034,8 @@ recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
         let v = if type_default { value_of(ctx, init) } else { check_expression(ctx, init, init_scope, ctx.fielddefs[field].ty) };
         defaults.resize(mark);
         require_fit(ctx, init, v, ctx.fielddefs[field].ty);
+        if ctx.types[ctx.fielddefs[field].ty].flags & 16 != 0 { check_relative_store(ctx, ctx.fielddefs[field].ty, v, -1, ctx.nodes[init].token); }
+        if v.place >= 0 && ctx.types[v.ty].kind != T_REFERENCE && ctx.types[ctx.fielddefs[field].ty].kind != T_REFERENCE { reject_self_link_copy(ctx, ctx.fielddefs[field].ty, ctx.nodes[init].token, ""); }
         let stored = received(ctx, v, ctx.fielddefs[field].ty);
         check_stored_view(ctx, stored, ctx.nodes[init].token);
         if contains_view(ctx, stored.ty) && root_depth(ctx, content_root(ctx, stored)) >= root_depth(ctx, root) { root = content_root(ctx, stored); }
@@ -1173,6 +1239,7 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.types[declared].kind == T_REFERENCE { v = raw; }
     if ctx.types[declared].size_class > 0 && !adapts_enum(ctx, decay(ctx, raw).ty, declared) && (raw.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) { error_at(ctx, ctx.nodes[init].token, "nonfixed storage is not copied implicitly; use copy or bind by reference"); }
     require_fit(ctx, init, v, declared);
+    if ctx.types[declared].kind != T_REFERENCE && (raw.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) { reject_self_link_copy(ctx, declared, ctx.nodes[init].token, ""); }
     ctx.symbols[s].ty = declared; ctx.symbols[s].state = 2; ctx.symbols[s].root = v.root;
     ctx.symbols[s].held = v.held;
     ctx.symbols[s].fields = raw.fields;
@@ -1372,7 +1439,9 @@ recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
     } else {
         check_stored_view(ctx, stored, x.token);
         // The link is stored in the container the path names.
-        store_lifetime(ctx, stored, decay(ctx, value_of(ctx, target.a)).root, x.token);
+        let container = decay(ctx, value_of(ctx, target.a)).root;
+        check_relative_store(ctx, slot, rhs, container, x.token);
+        store_lifetime(ctx, stored, container, x.token);
         record_rebind(ctx, path_root(ctx, x.a));
     }
     ctx.flow = fact_kill(ctx, ctx.flow, x.a, 0);
@@ -1410,6 +1479,7 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
         let shift = ctx.tokens[x.token].text == "<<=" || ctx.tokens[x.token].text == ">>=";
         if shift { if ctx.types[dest.ty].kind != T_INTEGER || ctx.types[decay(ctx, rhs).ty].kind != T_INTEGER { error_at(ctx, x.token, "integer shift operands required"); } }
         else { require_fit(ctx, x.b, rhs, dest.ty); }
+        if rhs.place >= 0 || ctx.types[rhs.ty].kind == T_REFERENCE { reject_self_link_copy(ctx, dest.ty, ctx.nodes[x.b].token, ""); }
         store_lifetime(ctx, received(ctx, rhs, dest.ty), if direct { dest.place } else { dest.root }, x.token);
         if direct && ctx.types[dest.ty].kind == T_SLICE && root_depth(ctx, rhs.root) >= root_depth(ctx, ctx.symbols[dest.place].root) { ctx.symbols[dest.place].root = rhs.root; }
         if direct { ctx.symbols[dest.place].growshrink = ctx.symbols[dest.place].growshrink || rhs.growshrink; }
@@ -1574,6 +1644,10 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
                 if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "append takes one array or slice"); }
                 let arg = ctx.edges[e].value; let v = decay(ctx, check_expression(ctx, arg, scope, array_type(ctx, element, 3, -1)));
                 if element_type(ctx, v.ty) != element { error_at(ctx, ctx.nodes[arg].token, "append element type mismatch"); }
+                if holds_self_link(ctx, element) {
+                    var what: u8[>..] = []; what.append(".append copies the elements of "); what.append(source_text(ctx, arg)); what.append(": ");
+                    reject_self_link_copy(ctx, element, ctx.nodes[n].token, save_text(ctx, what));
+                }
                 if ctx.types[v.ty].size_class == 2 && v.place < 0 { error_at(ctx, ctx.nodes[arg].token, "not implemented yet: constructed append result analysis"); }
                 store_in_array(ctx, Value { ty: element, root: v.held, held: v.held }, array, scope, ctx.nodes[n].token); ctx.nodes[n].symbol = -11;
             } else if name == "resize" {
@@ -1635,7 +1709,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "builtin takes one argument"); }
         let arg = first_child(ctx, n); let raw = check_expression(ctx, arg, scope, -1); let v = decay(ctx, raw);
         if name == "assert" { require_condition(ctx, arg, raw); ctx.flow = condition_facts(ctx, arg, true, ctx.flow); ctx.nodes[n].symbol = -23; return Value {}; }
-        if name == "copy" { if (v.place < 0 && ctx.types[raw.ty].kind != T_REFERENCE) || ctx.types[v.ty].kind == T_SLICE { error_at(ctx, ctx.nodes[arg].token, "copy requires an owned stored value or its reference"); } ctx.nodes[n].symbol = -26; var result = v; result.place = -1; result.readonly = false; return result; }
+        if name == "copy" { reject_self_link_copy(ctx, v.ty, ctx.nodes[arg].token, ""); if (v.place < 0 && ctx.types[raw.ty].kind != T_REFERENCE) || ctx.types[v.ty].kind == T_SLICE { error_at(ctx, ctx.nodes[arg].token, "copy requires an owned stored value or its reference"); } ctx.nodes[n].symbol = -26; var result = v; result.place = -1; result.readonly = false; return result; }
         if name == "exit" { require_fit(ctx, arg, v, default_integer(ctx)); ctx.nodes[n].symbol = -25; }
         else { if element_type(ctx, v.ty) != integer_type(ctx, 1, true) { error_at(ctx, ctx.nodes[n].token, "abort requires text"); } ctx.nodes[n].symbol = -24; }
         return Value { ty: intern_type(ctx, Type { kind: T_BOTTOM }) };
@@ -1809,6 +1883,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
             let v = if first_default >= 0 && index >= first_default { check_default(ctx, arg, symbol, parameter, caller_scope, expected, ctx.nodes[call].token) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
             require_fit(ctx, arg, v, parameter_destination(ctx, expected, ctx.nodes[decl].flags & 2 != 0));
             ctx.nodes[arg].target = expected;
+            if ctx.types[expected].kind != T_REFERENCE && (v.place >= 0 || ctx.types[v.ty].kind == T_REFERENCE) { reject_self_link_copy(ctx, expected, ctx.nodes[arg].token, ""); }
             if ctx.types[expected].size_class > 0 && !adapts_enum(ctx, decay(ctx, v).ty, expected) && v.place >= 0 { error_at(ctx, ctx.nodes[arg].token, "nonfixed value parameter needs a fresh value or explicit copy"); }
             actual = ctx.edges[actual].next;
         }

@@ -600,7 +600,20 @@ recursive fn type_text(ctx: Compiler&, ty: i64, out: u8[>..]&) {
             out.push('>');
         }
     } else if t.kind == T_SLICE { if t.flags & 1 != 0 { out.append("const "); } type_text(ctx, t.element, out); out.append("[:]"); }
-    else if t.kind == T_REFERENCE { if t.flags & 1 != 0 { out.append("const "); } type_text(ctx, t.element, out); out.push('&'); }
+    else if t.kind == T_REFERENCE {
+        if t.flags & 1 != 0 { out.append("const "); }
+        type_text(ctx, t.element, out);
+        if t.flags & 4 != 0 && t.flags & 24 == 0 { out.push('?'); }
+        else {
+            out.push('&');
+            if t.flags & 24 != 0 {
+                out.push('<'); out.push('u'); format(out, t.bytes * 8);
+                if t.flags & 16 != 0 { out.append(" in "); out.append(ctx.tokens[ctx.symbols[t.decl].token].text); if t.count >= 256 { out.push('.'); out.append(ctx.tokens[t.count / 256 - 1].text); } }
+                out.push('>');
+                if t.flags & 4 != 0 { out.push('?'); }
+            }
+        }
+    }
     else if t.kind == T_ARRAY {
         type_text(ctx, t.element, out);
         if t.flags == 0 { format(out, "[", t.count, "]"); }
