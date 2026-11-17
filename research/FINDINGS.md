@@ -23,3 +23,15 @@ hash: walk that chain only. **Number.** 0.09-0.14 s (7 interleaved runs, load 9.
 the count is the proof): 647 M instructions (-37%); outcomes identical. **Goose.** Forced: a local list of
 candidates is rejected (§7.8: a non-fixed-size local may not be in scope across a call into its own recursive
 cycle), so the loop walks the chain directly, which needed the order-independence argument written in the code.
+
+## 3. Half the C was the same functions again (2026-11-17)
+**Before.** Specializations are keyed on each view argument's provenance (root, readonly, held), which the
+checker needs and the C doesn't: W1's C held each function about twice, small helpers up to 198 times
+(research/notes/dedup.md). **Fix (emit-dedup).** Names numbered per function; references to other functions
+and frames marked in the text; classes refined to a fixed point; one body written per class
+(research/notes/emit-dedup.md). **Number (lead's re-check, same input: emit-dedup's selfhost source,
+compiled by the emitter before and after).** C 5,236,874 -> 1,906,276 bytes; gcc -O2 14.17/14.48/15.01 ->
+6.10/6.29/6.57 s (5 interleaved, load 2-4); peak 425 -> 284 MB; both compilers emit identical C for it.
+SHAPES.md killed this idea for Go at 8% duplicate code; here it was 52-64%.
+**Goose.** Forced: the scratch buffer can't shrink while ctx holds slices into other arrays, so it stays
+as big as all functions' text.
