@@ -19,6 +19,7 @@ fn runtime_source() -> const u8[:] {
     #else
     #include <sys/mman.h>
     #include <signal.h>
+    #include <sys/stat.h>
     #include <unistd.h>
     #endif
     typedef struct { void *data; int64_t len; } gg_slice;
@@ -305,11 +306,140 @@ fn runtime_source() -> const u8[:] {
         char *p=gg_cstring(path);FILE *f=fopen(p,"wb");int ok;free(p);if(!f)return 0;
         ok=!data.len || fwrite(data.data,1,(size_t)data.len,f)==(size_t)data.len;if(fclose(f))ok=0;return (uint8_t)ok;
     }
-    static uint8_t gs_os_file_exists(gg_slice path) { char*p=gg_cstring(path);FILE*f=fopen(p,"rb");free(p);if(!f)return 0;fclose(f);return 1; }
+    static uint8_t gs_os_file_exists(gg_slice path) {
+    #ifndef _WIN32
+        struct stat st; char *p=gg_cstring(path); int r=stat(p,&st); free(p); return r==0 && !S_ISDIR(st.st_mode);
+    #else
+        char*p=gg_cstring(path);FILE*f=fopen(p,"rb");free(p);if(!f)return 0;fclose(f);return 1;
+    #endif
+    }
     static void gs_os_write_stdout(gg_slice s) { gg_write(stdout,s); }
     static void gs_os_write_stderr(gg_slice s) { gg_write(stderr,s); }
     static void gs_os_flush_stdout(void) { fflush(stdout); }
     static int64_t gs_os_arg_count(void) { return gg_argc; }
     static void gs_os_arg(int64_t i,gg_reference out) { if(i>=0 && i<gg_argc)gg_append(out,gg_argv[i],(int64_t)strlen(gg_argv[i]),1); }
+    /* std's externs (stdlib/std.goose, os.goose, math.goose, ffi.goose). */
+    #ifndef _WIN32
+    #include <sys/stat.h>
+    #include <dirent.h>
+    #include <time.h>
+    #endif
+    #define GG_M1(n, f, t) static t n(t x) { return f(x); }
+    #define GG_M2(n, f, t) static t n(t x, t y) { return f(x, y); }
+    GG_M1(gs_sqrt, sqrt, double) GG_M1(gs_sin, sin, double) GG_M1(gs_cos, cos, double) GG_M1(gs_tan, tan, double)
+    GG_M1(gs_asin, asin, double) GG_M1(gs_acos, acos, double) GG_M1(gs_atan, atan, double) GG_M2(gs_atan2, atan2, double)
+    GG_M1(gs_exp, exp, double) GG_M1(gs_log, log, double) GG_M1(gs_log2, log2, double) GG_M1(gs_log10, log10, double)
+    GG_M2(gs_pow, pow, double) GG_M2(gs_hypot, hypot, double) GG_M1(gs_cbrt, cbrt, double) GG_M1(gs_exp2, exp2, double)
+    GG_M1(gs_expm1, expm1, double) GG_M1(gs_log1p, log1p, double) GG_M1(gs_sinh, sinh, double) GG_M1(gs_cosh, cosh, double)
+    GG_M1(gs_tanh, tanh, double)
+    GG_M1(gs_sqrtf, sqrtf, float) GG_M1(gs_sinf, sinf, float) GG_M1(gs_cosf, cosf, float) GG_M1(gs_tanf, tanf, float)
+    GG_M1(gs_asinf, asinf, float) GG_M1(gs_acosf, acosf, float) GG_M1(gs_atanf, atanf, float) GG_M2(gs_atan2f, atan2f, float)
+    GG_M1(gs_expf, expf, float) GG_M1(gs_logf, logf, float) GG_M1(gs_log2f, log2f, float) GG_M1(gs_log10f, log10f, float)
+    GG_M2(gs_powf, powf, float) GG_M2(gs_hypotf, hypotf, float) GG_M1(gs_cbrtf, cbrtf, float) GG_M1(gs_exp2f, exp2f, float)
+    GG_M1(gs_expm1f, expm1f, float) GG_M1(gs_log1pf, log1pf, float) GG_M1(gs_sinhf, sinhf, float) GG_M1(gs_coshf, coshf, float)
+    GG_M1(gs_tanhf, tanhf, float)
+    static double gs_mul_add(double x, double y, double z) { return fma(x, y, z); }
+    static float gs_mul_addf(float x, float y, float z) { return fmaf(x, y, z); }
+    static int64_t gs_popcount(uint64_t x) { int64_t n = 0; while (x) { x &= x - 1; n++; } return n; }
+    static int64_t gs_clz(uint64_t x) { int64_t n = 0; if (!x) return 64; while (!(x >> 63)) { x <<= 1; n++; } return n; }
+    static int64_t gs_ctz(uint64_t x) { int64_t n = 0; if (!x) return 64; while (!(x & 1)) { x >>= 1; n++; } return n; }
+    static uint32_t gs_rotl32(uint32_t x, int64_t n) { uint32_t s = (uint32_t)n & 31; return (x << s) | (x >> (-s & 31)); }
+    static uint64_t gs_rotl64(uint64_t x, int64_t n) { uint32_t s = (uint32_t)n & 63; return (x << s) | (x >> (-s & 63)); }
+    static uint32_t gs_rotr32(uint32_t x, int64_t n) { uint32_t s = (uint32_t)n & 31; return (x >> s) | (x << (-s & 31)); }
+    static uint64_t gs_rotr64(uint64_t x, int64_t n) { uint32_t s = (uint32_t)n & 63; return (x >> s) | (x << (-s & 63)); }
+    static uint16_t gs_byte_swap16(uint16_t x) { return (uint16_t)((x << 8) | (x >> 8)); }
+    static uint32_t gs_byte_swap32(uint32_t x) { return (x << 24) | ((x & 0xFF00) << 8) | ((x >> 8) & 0xFF00) | (x >> 24); }
+    static uint64_t gs_byte_swap64(uint64_t x) { return ((uint64_t)gs_byte_swap32((uint32_t)x) << 32) | gs_byte_swap32((uint32_t)(x >> 32)); }
+    /* A ByteSet starts with its members: one bool per byte value. */
+    static int64_t gs_find_any(gg_slice s, const void *set) {
+        const uint8_t *m = set, *p = s.data; int64_t i;
+        for (i = 0; i < s.len; i++) if (m[p[i]]) return i;
+        return -1;
+    }
+    static int64_t gs_find_pair(gg_slice s, const void *a, int64_t d, const void *b) {
+        const uint8_t *ma = a, *mb = b, *p = s.data; int64_t i;
+        for (i = 0; i + d < s.len; i++) if (ma[p[i]] && mb[p[i + d]]) return i;
+        return -1;
+    }
+    /* The shortest digits that read back as x, finite and not zero: their count,
+       and the power of ten they are a fraction of, 0.d1 d2 ... dn * 10^point. */
+    static int64_t gs_f64_digits(double x, gg_slice out, int64_t *point) {
+        char b[40]; int precision, n = 0, i; char *e;
+        if (x != x || x - x != 0 || x == 0) return 0;
+        for (precision = 0; precision < 17; precision++) {
+            snprintf(b, sizeof b, "%.*e", precision, x);
+            if (strtod(b, NULL) == x) break;
+        }
+        e = strchr(b, 'e');
+        for (i = 0; b + i < e; i++) if (b[i] >= '0' && b[i] <= '9' && n < out.len) ((uint8_t *)out.data)[n++] = (uint8_t)b[i];
+        while (n > 1 && ((uint8_t *)out.data)[n - 1] == '0') n--;
+        *point = strtol(e + 1, NULL, 10) + 1;
+        return n;
+    }
+    static float gs_f32_from_bits(uint32_t b) { float v; memcpy(&v, &b, 4); return v; }
+    static double gs_f64_from_bits(uint64_t b) { double v; memcpy(&v, &b, 8); return v; }
+    static uint32_t gs_f32_to_bits(float v) { uint32_t b; memcpy(&b, &v, 4); return b; }
+    static uint64_t gs_f64_to_bits(double v) { uint64_t b; memcpy(&b, &v, 8); return b; }
+    static uint8_t gs_trim_memory(void) { return 1; }
+    static uint8_t gs_ffi_cstr(uint64_t p, gg_reference out) { if (!p) return 0; gg_append(out, (const void *)(uintptr_t)p, (int64_t)strlen((const char *)(uintptr_t)p), 1); return 1; }
+    static uint8_t gs_ffi_bytes(uint64_t p, int64_t n, gg_reference out) { if (!p || n < 0) return 0; gg_append(out, (const void *)(uintptr_t)p, n, 1); return 1; }
+    #ifndef _WIN32
+    static int gg_kind(gg_slice path) { struct stat st; char *p = gg_cstring(path); int r = stat(p, &st); free(p); if (r) return 0; return S_ISDIR(st.st_mode) ? 2 : 1; }
+    static uint8_t gs_os_is_dir(gg_slice path) { return gg_kind(path) == 2; }
+    static uint8_t gs_os_make_dir(gg_slice path) { char *p = gg_cstring(path); mkdir(p, 0777); free(p); return gg_kind(path) == 2; }
+    static uint8_t gs_os_remove_dir(gg_slice path) { char *p = gg_cstring(path); int r = gg_kind(path) == 2 ? rmdir(p) : -1; free(p); return r == 0; }
+    static uint8_t gs_os_remove_file(gg_slice path) { char *p = gg_cstring(path); int r = gg_kind(path) == 1 ? unlink(p) : -1; free(p); return r == 0; }
+    static uint8_t gs_os_rename_file(gg_slice from, gg_slice to) { char *a = gg_cstring(from), *b = gg_cstring(to); int r = rename(a, b); free(a); free(b); return r == 0; }
+    static uint8_t gs_os_append_file(gg_slice path, gg_slice data) {
+        char *p = gg_cstring(path); FILE *f = fopen(p, "ab"); int ok; free(p); if (!f) return 0;
+        ok = !data.len || fwrite(data.data, 1, (size_t)data.len, f) == (size_t)data.len; if (fclose(f)) ok = 0; return (uint8_t)ok;
+    }
+    static uint8_t gs_os_write_file_atomic(gg_slice path, gg_slice data) {
+        char *p = gg_cstring(path), *t = malloc((size_t)path.len + 16); int ok; gg_slice tv;
+        sprintf(t, "%s.tmp%d", p, (int)getpid()); tv = gg_view(t, (int64_t)strlen(t));
+        ok = gs_os_write_file(tv, data) && rename(t, p) == 0; if (!ok) unlink(t); free(p); free(t); return (uint8_t)ok;
+    }
+    static int gg_name_order(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+    static uint8_t gs_os_list_dir(gg_slice path, gg_reference out) {
+        char *p = gg_cstring(path), **names = NULL; size_t count = 0, i; struct dirent *e; DIR *d = opendir(p); free(p);
+        if (!d) return 0;
+        while ((e = readdir(d)) != NULL) {
+            if (e->d_name[0] == '.' && (!e->d_name[1] || (e->d_name[1] == '.' && !e->d_name[2]))) continue;
+            names = realloc(names, (count + 1) * sizeof *names); names[count++] = strdup(e->d_name);
+        }
+        closedir(d);
+        qsort(names, count, sizeof *names, gg_name_order);
+        for (i = 0; i < count; i++) { gg_append(out, names[i], (int64_t)strlen(names[i]), 1); gg_append(out, "\n", 1, 1); free(names[i]); }
+        free(names); return 1;
+    }
+    static uint8_t gs_os_read_line(gg_reference out) {
+        int c = getchar(); int64_t start = out.header->len; uint8_t b;
+        if (c == EOF) return 0;
+        while (c != EOF && c != '\n') { b = (uint8_t)c; gg_append(out, &b, 1, 1); c = getchar(); }
+        if (c == '\n' && out.header->len > start && out.header->base[out.header->len - 1] == '\r') gg_resize(out, out.header->len - 1, 1, NULL);
+        return 1;
+    }
+    static void gs_os_read_stdin(gg_reference out) { unsigned char b[65536]; size_t n; while ((n = fread(b, 1, sizeof b, stdin)) != 0) gg_append(out, b, (int64_t)n, 1); }
+    static uint8_t gs_os_read_stdin_max(gg_reference out, int64_t max) {
+        unsigned char b[65536]; int64_t got = 0; size_t n, want;
+        while (got < max) { want = max - got < (int64_t)sizeof b ? (size_t)(max - got) : sizeof b; n = fread(b, 1, want, stdin); if (!n) break; gg_append(out, b, (int64_t)n, 1); got += (int64_t)n; }
+        return got > 0;
+    }
+    static uint8_t gs_os_getenv(gg_slice name, gg_reference out) { char *n = gg_cstring(name); const char *v = getenv(n); free(n); if (!v) return 0; gg_append(out, v, (int64_t)strlen(v), 1); return 1; }
+    static uint8_t gs_os_resource_dir(gg_reference out) {
+        char b[4096]; ssize_t n = readlink("/proc/self/exe", b, sizeof b);
+        if (n <= 0 || n >= (ssize_t)sizeof b) return 0;
+        while (n > 0 && b[n - 1] != '/') n--;
+        gg_append(out, b, (int64_t)n, 1); return 1;
+    }
+    static int64_t gs_os_time_ns(void) { struct timespec t; clock_gettime(CLOCK_REALTIME, &t); return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
+    static int64_t gs_os_clock_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec; }
+    static void gs_os_sleep_ms(int64_t ms) { struct timespec t; if (ms <= 0) return; t.tv_sec = ms / 1000; t.tv_nsec = (ms % 1000) * 1000000; nanosleep(&t, NULL); }
+    static uint64_t gs_os_random_u64(void) {
+        uint64_t v = 0; FILE *f = fopen("/dev/urandom", "rb");
+        if (!f || fread(&v, sizeof v, 1, f) != 1) v = (uint64_t)gs_os_clock_ns() * 0x9E3779B97F4A7C15ull;
+        if (f) fclose(f); return v;
+    }
+    #endif
     """;
 }
