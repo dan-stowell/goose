@@ -545,6 +545,11 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
         while e >= 0 { c_build(ctx, ctx.edges[e].value, CValue { code: "", ty: elem, address: "", stack: decayed.stack }); emit(ctx, str("  (", decayed.code, ").len++;\n")); e = ctx.edges[e].next; }
         return;
     }
+    if (x.tag == N_ARRAY || x.tag == N_FILL) && dest.ty != 0 && ctx.types[dest.ty].kind == T_SLICE {
+        // A literal viewed as a slice is built in a temporary of its own type.
+        let v = c_expression(ctx, n);
+        emit(ctx, str("  ", dest.code, " = ", c_view(ctx, v), ";\n")); return;
+    }
     if x.tag == N_ARRAY || x.tag == N_FILL {
         let elem = element_type(ctx, dest.ty);
         if ctx.types[dest.ty].size_class == 2 {

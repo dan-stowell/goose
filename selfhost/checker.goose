@@ -324,7 +324,32 @@ fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
         text.append(" -> "); type_text(ctx, target, text);
         error_at(ctx, ctx.nodes[n].token, text);
     }
+    if v.known && ctx.types[v.ty].kind == T_FLOAT && ctx.types[target].kind == T_FLOAT && v.ty != target { retype_float(ctx, n, target); }
     ctx.nodes[n].target = target;
+}
+// A float of literals and the integers they meet is computed at the type it
+// adapts to, throughout (6.3): its operations take that type, and its
+// integer operands convert to it. A float let it names is that let's f64,
+// rounded once at the use.
+recursive fn retype_float(ctx: Compiler&, n: i64, ty: i64) {
+    if n < 0 { return; }
+    let x = ctx.nodes[n];
+    if !x.known || x.ty < 0 || ctx.types[x.ty].kind != T_FLOAT { return; }
+    if x.tag == N_FLOAT { ctx.nodes[n].ty = ty; }
+    else if x.tag == N_UNARY { ctx.nodes[n].ty = ty; retype_float(ctx, x.a, ty); ctx.nodes[x.a].target = ty; }
+    else if x.tag == N_BINARY {
+        ctx.nodes[n].ty = ty;
+        for side in [x.a, x.b] {
+            if ctx.nodes[side].known && ctx.types[ctx.nodes[side].ty].kind == T_FLOAT { retype_float(ctx, side, ty); }
+            ctx.nodes[side].target = ty;
+        }
+    } else if x.tag == N_IF {
+        ctx.nodes[n].ty = ty;
+        retype_float(ctx, x.b, ty); if x.b >= 0 { ctx.nodes[x.b].target = ty; }
+        retype_float(ctx, x.c, ty); if x.c >= 0 { ctx.nodes[x.c].target = ty; }
+    } else if x.tag == N_BLOCK && x.a >= 0 {
+        ctx.nodes[n].ty = ty; retype_float(ctx, x.a, ty); ctx.nodes[x.a].target = ty;
+    }
 }
 fn merge_numeric(ctx: Compiler&, a: Value, b: Value, token: i64) -> i64 {
     if !numeric(ctx, a.ty) || !numeric(ctx, b.ty) { error_at(ctx, token, "numeric operands required"); }

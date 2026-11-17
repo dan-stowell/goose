@@ -22,6 +22,7 @@ codegen_implicit_callees
 compare_order
 const_global_folding
 continue_restores
+const_global_folding
 cycle_holder_results
 cycle_outside_reads_holder
 cycle_return_mixed
@@ -38,6 +39,8 @@ fat_held
 fat_optional
 fieldless_variant_values
 defer_forms
+extern_libm
+extern_symbol_deprecated
 fixed_array_bulk_fill
 float_conversions_unchecked
 float_equality
@@ -53,6 +56,14 @@ holder_param_bounds
 holder_param_exact
 holder_param_readbacks
 holder_variant_argument
+float_conversions_unchecked
+float_literal_spelling
+float_text_digits
+for_sequence_shrinks
+growshrink_literal_views
+growshrink_reach_stores
+holder_param_bounds
+holder_param_own_locals
 inline_nested_calls
 inpool_u16
 integer_match_extremes
