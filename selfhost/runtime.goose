@@ -242,6 +242,33 @@ fn runtime_source() -> const u8[:] {
         if (s.len) memmove((unsigned char *)data + (size_t)n * element, s.data, (size_t)s.len * element);
         gg_lset(l, w, n + s.len);
     }
+    static void gg_builtin_fail(gg_slice message, const char *fallback, const char *location) {
+        if (!message.data) { fprintf(stderr, "goose runtime error: %s%s\n", fallback, location); exit(1); }
+        fputs("goose runtime error: ", stderr);
+        if (message.len) fwrite(message.data, 1, (size_t)message.len, stderr);
+        fprintf(stderr, "%s\n", location); exit(1);
+    }
+    static int64_t gg_check_length(uint64_t n, size_t element, gg_slice message, const char *location) {
+        if (n > (element ? GG_RESERVATION / element : INT64_MAX)) gg_builtin_fail(message, "invalid array length", location);
+        return (int64_t)n;
+    }
+    static int64_t gg_range_index(gg_slice a, gg_slice s, size_t element, gg_slice message, const char *location) {
+        uint64_t offset, index;
+        if (!element) {
+            if ((uint64_t)s.len > (uint64_t)a.len) gg_builtin_fail(message, "slice not within this array", location);
+            return 0;
+        }
+        if (!s.len) return 0;
+        offset = (uintptr_t)s.data - (uintptr_t)a.data;
+        index = offset / element;
+        if (offset % element || index >= (uint64_t)a.len || (uint64_t)s.len > (uint64_t)a.len - index)
+            gg_builtin_fail(message, "slice not within this array", location);
+        return (int64_t)index;
+    }
+    static void gg_pop_n(gg_reference a, uint64_t n, size_t element) {
+        if (n > (uint64_t)a.header->len) gg_fail("pop_n count negative or beyond the array's length");
+        gg_resize(a, a.header->len - (int64_t)n, element, NULL);
+    }
     static int64_t gg_div(int64_t a, int64_t b) { if (!b) gg_fail("division by zero"); if (a==INT64_MIN && b==-1) gg_fail("division overflow"); return a/b; }
     static int64_t gg_mod(int64_t a, int64_t b) {
         int64_t r; if (!b) gg_fail("division by zero"); if (b==-1) return 0;

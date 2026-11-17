@@ -1653,6 +1653,42 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if array_method { ctx.nodes[n].flags |= 256; }
         return check_call(ctx, n, scope);
     }
+    if name == "check_length" || name == "range_index" || name == "pop_n" {
+        if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
+        let count = child_count(ctx, n);
+        if count < 2 || count > 3 || (name == "pop_n" && count != 2) { error_at(ctx, ctx.nodes[n].token, "builtin argument count mismatch"); }
+        var e = ctx.nodes[n].first;
+        let array = decay(ctx, check_expression(ctx, ctx.edges[e].value, scope, -1));
+        let element = element_type(ctx, array.ty);
+        reference_type(ctx, array.ty, false);
+        if element < 0 || ctx.types[array.ty].kind != T_ARRAY { error_at(ctx, ctx.nodes[n].token, "operation requires an array"); }
+        if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[n].token, "operation requires fixed-size elements"); }
+        if name != "range_index" && ctx.types[array.ty].flags < 3 { error_at(ctx, ctx.nodes[n].token, "operation requires a growable array"); }
+        e = ctx.edges[e].next;
+        let arg = ctx.edges[e].value;
+        let v = decay(ctx, check_expression(ctx, arg, scope, -1));
+        if name == "range_index" {
+            if ctx.types[v.ty].kind != T_SLICE || element_type(ctx, v.ty) != element { error_at(ctx, ctx.nodes[arg].token, "range_index requires a slice of the array element type"); }
+            ctx.nodes[n].symbol = -31;
+        } else {
+            if ctx.types[v.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[arg].token, "count must be an integer"); }
+            ctx.nodes[n].symbol = -30;
+        }
+        e = ctx.edges[e].next;
+        if e >= 0 {
+            let msg = ctx.edges[e].value;
+            let text = check_expression(ctx, msg, scope, -1);
+            if ctx.nodes[msg].tag != N_STRING { error_at(ctx, ctx.nodes[msg].token, "abort message must be a string literal"); }
+        }
+        if name == "pop_n" {
+            if array.root >= 0 && ctx.symbols[array.root].flags & 4 != 0 { error_at(ctx, ctx.nodes[n].token, "cannot pop_n reusable pool"); }
+            if !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: shrinking within a larger expression"); }
+            if array.readonly { error_at(ctx, ctx.nodes[n].token, "cannot mutate a read-only array"); }
+            shrink_array(ctx, array, scope, ctx.nodes[n].token, false);
+            ctx.nodes[n].symbol = -32; return Value {};
+        }
+        return Value { ty: default_integer(ctx) };
+    }
     let s = lookup(ctx, callee, scope, 3);
     if s < 0 { error_at(ctx, ctx.nodes[callee].token, str("unknown function '", name, "'")); }
     if ctx.symbols[s].scope != 0 && ctx.symbols[s].state != 2 { error_at(ctx, ctx.nodes[callee].token, "nested function called before its declaration is reached"); }

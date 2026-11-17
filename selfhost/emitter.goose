@@ -953,6 +953,27 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         return no_c_value(ctx);
     }
     if builtin == -40 { return c_dispatch(ctx, n); }
+    if builtin <= -30 && builtin >= -32 {
+        var e = x.first;
+        let original = c_expression(ctx, ctx.edges[e].value);
+        let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, ctx.edges[e].value)).ty, false), address: "", stack: "" });
+        let array = c_decay(ctx, receiver); let element = element_type(ctx, array.ty);
+        e = ctx.edges[e].next;
+        let arg = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.edges[e].value)));
+        e = ctx.edges[e].next;
+        var message = save_text(ctx, "gg_view(NULL, 0)");
+        if e >= 0 { message = c_view(ctx, c_expression(ctx, ctx.edges[e].value)); }
+        if builtin == -32 {
+            emit(ctx, str("  gg_pop_n(", c_reference(ctx, array), ", (uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "));\n"));
+            return no_c_value(ctx);
+        }
+        let token = ctx.tokens[x.token];
+        let location = c_literal(ctx, str(" (", ctx.sources[token.file].path, ":", token.line, ")"));
+        let result = temporary(ctx, x.ty);
+        if builtin == -30 { emit(ctx, str("  ", result, " = gg_check_length((uint64_t)(", arg.code, "), sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
+        else { emit(ctx, str("  ", result, " = gg_range_index(", c_view(ctx, array), ", ", arg.code, ", sizeof(", c_type(ctx, element), "), ", message, ", ", location, ");\n")); }
+        return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
+    }
     let spec = ctx.specializations[builtin]; let decl = ctx.nodes[ctx.symbols[spec.symbol].decl];
     let params = spec.parameters;
     // Borrow once: the watermark and restore share a stable reference path.

@@ -22,6 +22,10 @@ codegen_implicit_callees
 compare_order
 const_global_folding
 continue_restores
+check_length_large
+check_length_message
+check_length_negative
+check_length_unsigned
 cycle_holder_results
 cycle_outside_reads_holder
 cycle_return_mixed
@@ -84,6 +88,9 @@ range_index_extent
 range_index_foreign
 range_index_message
 readback_writable
+pop_n_past_end
+range_index_foreign
+range_index_message
 reassoc_discarded_value
 rebind_chain_loop
 recursive_loop_walk
