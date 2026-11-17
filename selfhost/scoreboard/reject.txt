@@ -13,12 +13,12 @@ errors/match_wildcard_list
 errors/negated_pattern_literal
 errors/param_default_not_trailing
 errors/param_default_untyped
+errors_tc/append_copy_relative
+errors_tc/append_copy_relative_links
 errors_tc/branch_root_block_break
 errors_tc/branch_root_loop_break
 errors_tc/branch_root_match_binder
 errors_tc/break_mismatch
-errors_tc/append_copy_relative
-errors_tc/append_copy_relative_links
 errors_tc/check_length_variable
 errors_tc/const_name_pattern_default
 errors_tc/constant_division_overflow
@@ -60,6 +60,7 @@ errors_tc/root_cross_component_relative
 errors_tc/slice_pool_const
 errors_tc/slice_pool_relative
 errors_tc/slot_pool_const
+errors_tc/slot_pool_relative
 errors_tc/zero_length_capacity
 errors_tc/zero_length_element
 errors_tc/zero_length_field
@@ -71,5 +72,4 @@ errors_tc/zero_size_variant_element
 errors_tc/zero_size_variant_field
 errors_tc/zero_size_variant_payload
 errors_tc/zero_size_variant_slice_element
-errors_tc/slot_pool_relative
 tests/recursive_nonfixed_local
