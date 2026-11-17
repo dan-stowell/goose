@@ -13,11 +13,11 @@ errors/match_wildcard_list
 errors/negated_pattern_literal
 errors/param_default_not_trailing
 errors/param_default_untyped
-errors_tc/check_length_variable
 errors_tc/branch_root_block_break
 errors_tc/branch_root_loop_break
 errors_tc/branch_root_match_binder
 errors_tc/break_mismatch
+errors_tc/check_length_variable
 errors_tc/const_name_pattern_default
 errors_tc/constant_division_overflow
 errors_tc/diverging_initializer
