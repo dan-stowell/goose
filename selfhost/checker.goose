@@ -195,6 +195,7 @@ fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64,
     }
 }
 fn shrink_array(ctx: Compiler&, array: Value, scope: i64, token: i64, balanced: bool) {
+    if array.root >= 0 && ctx.symbols[array.root].flags & 4 != 0 { error_at(ctx, token, "cannot shrink reusable pool"); }
     if ctx.types[array.ty].flags == 2 { return; }
     let element = element_type(ctx, array.ty);
     check_shrink(ctx, array.root, element, scope, token, balanced, false);
@@ -1188,6 +1189,7 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.types[declared].kind == T_REFERENCE { v = raw; }
     if ctx.types[declared].size_class > 0 && !adapts_enum(ctx, decay(ctx, raw).ty, declared) && (raw.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) { error_at(ctx, ctx.nodes[init].token, "nonfixed storage is not copied implicitly; use copy or bind by reference"); }
     require_fit(ctx, init, v, declared);
+    if ctx.nodes[n].flags & 4 != 0 && (ctx.types[declared].kind != T_ARRAY || ctx.types[declared].flags != 3 || ctx.types[ctx.types[declared].element].size_class != 0) { error_at(ctx, ctx.nodes[n].token, "reusable needs a grow-only array of fixed-size elements"); }
     ctx.symbols[s].ty = declared; ctx.symbols[s].state = 2; ctx.symbols[s].root = v.root;
     ctx.symbols[s].held = v.held;
     ctx.symbols[s].fields = raw.fields;
@@ -1563,7 +1565,16 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let member = ctx.nodes[callee].tag == N_MEMBER;
     let name = ctx.tokens[ctx.nodes[callee].token].text;
     var receiver = Value {};
-    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" || name == "check_length" || name == "index_of" || name == "range_index");
+    if !member && name == "pop_n" {
+        if child_count(ctx, n) != 2 { error_at(ctx, ctx.nodes[n].token, "pop_n takes an array and count"); }
+        let first = ctx.nodes[n].first;
+        let method = node(ctx, N_MEMBER, ctx.nodes[callee].token);
+        ctx.nodes[method].a = ctx.edges[first].value; ctx.nodes[method].first = ctx.nodes[callee].first;
+        ctx.nodes[n].a = method; ctx.nodes[n].first = ctx.edges[first].next;
+        return check_call(ctx, n, scope);
+    }
+    if name == "pop_n" && ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
+    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n");
     if array_method { receiver = check_expression(ctx, ctx.nodes[callee].a, scope, -1); }
     // Builtin arguments are checked with their construction destination.
     if member && element_type(ctx, receiver.ty) >= 0 {
@@ -1675,6 +1686,28 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         if array_method { ctx.nodes[n].flags |= 256; }
         return check_call(ctx, n, scope);
     }
+    if name == "free" || name == "alloc_index" || name == "alloc_ref" {
+        if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
+        if child_count(ctx, n) != 2 { error_at(ctx, ctx.nodes[n].token, "pool operation takes a pool and one argument"); }
+        let e = ctx.nodes[n].first; let recv = ctx.edges[e].value;
+        let pool = decay(ctx, check_expression(ctx, recv, scope, -1));
+        let element = element_type(ctx, pool.ty);
+        if element < 0 || ctx.types[pool.ty].kind != T_ARRAY || ctx.types[pool.ty].flags != 3 || pool.root < 0 || pool.inexact { error_at(ctx, ctx.nodes[recv].token, "operation requires an exact reusable pool"); }
+        if ctx.symbols[pool.root].flags & 12 != 4 { error_at(ctx, ctx.nodes[recv].token, "operation exists on reusable slot pools only"); }
+        if pool.readonly { error_at(ctx, ctx.nodes[recv].token, "cannot mutate a read-only pool"); }
+        if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[recv].token, "pool requires fixed-size elements"); }
+        reference_type(ctx, pool.ty, false);
+        let arg = ctx.edges[ctx.edges[e].next].value;
+        if name == "free" {
+            let value = decay(ctx, check_expression(ctx, arg, scope, -1));
+            if ctx.types[value.ty].kind != T_INTEGER { error_at(ctx, ctx.nodes[arg].token, "free requires an integer index"); }
+            ctx.nodes[n].symbol = -46; return Value {};
+        }
+        let value = check_expression(ctx, arg, scope, element); require_fit(ctx, arg, value, element);
+        store_in_array(ctx, received(ctx, value, element), pool, scope, ctx.nodes[n].token);
+        if name == "alloc_index" { ctx.nodes[n].symbol = -47; return Value { ty: default_integer(ctx) }; }
+        ctx.nodes[n].symbol = -48; return Value { ty: reference_type(ctx, element, false), root: pool.root, place: pool.place };
+    }
     if name == "move_from" || name == "index_of" || name == "bytes_of" {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
         let argc = if name == "bytes_of" { 1 } else { 2 };
@@ -1689,6 +1722,11 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             if !image_layout_supported(ctx, element) { error_at(ctx, ctx.nodes[recv].token, "not implemented yet: byte images containing zero-size storage"); }
             if array.root >= 0 && ctx.symbols[array.root].kind == 4 { error_at(ctx, ctx.nodes[recv].token, "bytes_of requires persistent storage"); }
             if array.root >= 0 { ctx.symbols[array.root].byteviewed = true; }
+            if array.inexact {
+                for owner, i in ctx.symbols {
+                    if owner.kind == 2 && root_depth(ctx, i) <= root_depth(ctx, array.root) { ctx.symbols[i].byteviewed = true; }
+                }
+            }
             ctx.nodes[n].symbol = -45;
             return Value { ty: slice_type(ctx, integer_type(ctx, 1, true), true), root: array.root, readonly: true, growshrink: array.growshrink, inexact: array.inexact };
         }
@@ -1709,16 +1747,17 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         reference_type(ctx, array.ty, false); reference_type(ctx, element, false);
         ctx.nodes[n].symbol = -44; return Value { ty: default_integer(ctx) };
     }
-    if name == "check_length" || name == "range_index" || name == "pop_n" {
+    if name == "check_length" || name == "range_index" {
         if ctx.nodes[callee].first >= 0 { error_at(ctx, ctx.nodes[n].token, "builtin takes no type arguments"); }
         let count = child_count(ctx, n);
-        if count < 2 || count > 3 || (name == "pop_n" && count != 2) { error_at(ctx, ctx.nodes[n].token, "builtin argument count mismatch"); }
+        if count < 2 || count > 3 { error_at(ctx, ctx.nodes[n].token, "builtin argument count mismatch"); }
         var e = ctx.nodes[n].first;
         let array = decay(ctx, check_expression(ctx, ctx.edges[e].value, scope, -1));
         let element = element_type(ctx, array.ty);
         reference_type(ctx, array.ty, false);
         if element < 0 || ctx.types[array.ty].kind != T_ARRAY { error_at(ctx, ctx.nodes[n].token, "operation requires an array"); }
         if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[n].token, "operation requires fixed-size elements"); }
+        if name == "range_index" && ctx.types[array.ty].flags == 1 { error_at(ctx, ctx.nodes[n].token, "range_index requires an indexable array"); }
         if name != "range_index" && ctx.types[array.ty].flags < 3 { error_at(ctx, ctx.nodes[n].token, "operation requires a growable array"); }
         e = ctx.edges[e].next;
         let arg = ctx.edges[e].value;
@@ -1735,13 +1774,6 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             let msg = ctx.edges[e].value;
             let text = check_expression(ctx, msg, scope, -1);
             if ctx.nodes[msg].tag != N_STRING { error_at(ctx, ctx.nodes[msg].token, "abort message must be a string literal"); }
-        }
-        if name == "pop_n" {
-            if array.root >= 0 && ctx.symbols[array.root].flags & 4 != 0 { error_at(ctx, ctx.nodes[n].token, "cannot pop_n reusable pool"); }
-            if !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: shrinking within a larger expression"); }
-            if array.readonly { error_at(ctx, ctx.nodes[n].token, "cannot mutate a read-only array"); }
-            shrink_array(ctx, array, scope, ctx.nodes[n].token, false);
-            ctx.nodes[n].symbol = -42; return Value {};
         }
         return Value { ty: default_integer(ctx) };
     }

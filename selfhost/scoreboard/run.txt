@@ -27,6 +27,7 @@ check_length_message
 check_length_negative
 check_length_unsigned
 cnames
+continue_restores
 cycle_holder_results
 cycle_outside_reads_holder
 cycle_return_mixed
@@ -47,6 +48,11 @@ float_equality
 float_literal_spelling
 for_sequence_shrinks
 format_hook_provenance
+free_empty
+free_negative
+free_past_end
+free_u64
+free_valid
 generic_shadowing
 global_optional_flow
 growshrink_literal_views
@@ -78,6 +84,7 @@ optional_loop_callee_assignments
 optional_while_condition_calls
 packed_alignment
 packed_call_abi
+parameter_roots
 polymorphic_recursion
 pop_empty_lim
 pop_empty_limdyn

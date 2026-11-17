@@ -948,6 +948,26 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         return no_c_value(ctx);
     }
     if builtin == -40 { return c_dispatch(ctx, n); }
+    if builtin <= -46 && builtin >= -48 {
+        let e = x.first; let recv = ctx.edges[e].value;
+        let original = c_expression(ctx, recv);
+        let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, recv)).ty, false) });
+        let pool = c_decay(ctx, receiver); let element = element_type(ctx, pool.ty);
+        let arg = ctx.edges[ctx.edges[e].next].value;
+        if builtin == -46 {
+            let value = snapshot(ctx, c_decay(ctx, c_expression(ctx, arg)));
+            emit(ctx, str("  gg_pool_free(", receiver.code, ", (uint64_t)(", value.code, "));\n"));
+            return no_c_value(ctx);
+        }
+        let value = snapshot(ctx, converted(ctx, c_expression(ctx, arg), element));
+        let index = temporary(ctx, default_integer(ctx));
+        emit(ctx, str("  ", index, " = gg_pool_claim(", receiver.code, ", sizeof(", c_type(ctx, element), "));\n"));
+        let address = save_text(ctx, str("((", c_type(ctx, element), " *)(", pool.code, ").base + ", index, ")"));
+        emit(ctx, str("  *", address, " = ", value.code, ";\n"));
+        emit(ctx, str("  gg_pool_finish(", receiver.code, ", ", index, ");\n"));
+        if builtin == -48 { return CValue { code: address, ty: x.ty }; }
+        return CValue { code: index, ty: x.ty, address: save_text(ctx, str("&", index)) };
+    }
     if builtin <= -43 && builtin >= -45 {
         let e = x.first; let recv = ctx.edges[e].value;
         let original = c_expression(ctx, recv);
@@ -1054,6 +1074,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         }
         if ctx.types[dest.ty].size_class == 1 { emit(ctx, str("  ", dest.stack, "->top = 0; ", dest.code, " = ", dest.stack, "->base;\n")); }
         if ctx.types[dest.ty].size_class == 3 && ctx.symbol_slots[symbol] >= 0 { c_root_storage(ctx, symbol, dest); }
+        if ctx.symbols[symbol].flags & 4 != 0 { emit(ctx, str("  gg_reset_pool(", dest.stack, ");\n")); }
         let init = first_child(ctx, x.b); if init >= 0 { c_into(ctx, init, dest); }
         return;
     }

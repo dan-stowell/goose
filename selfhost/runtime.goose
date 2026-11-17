@@ -28,6 +28,8 @@ fn runtime_source() -> const u8[:] {
     #define GG_RESERVATION ((size_t)268435456)
     #define GG_STACK_COUNT 8192
     static gg_stack gg_stacks[GG_STACK_COUNT];
+    static gg_stack gg_slot_stacks[GG_STACK_COUNT];
+    static unsigned char gg_pool_busy[GG_STACK_COUNT];
     static int gg_argc;
     static char **gg_argv;
     #ifndef _WIN32
@@ -50,10 +52,7 @@ fn runtime_source() -> const u8[:] {
     static void gg_fail(const char *message) {
         fflush(stdout); fprintf(stderr, "goose runtime error: %s\n", message); exit(1);
     }
-    static gg_stack *gg_get_stack(int64_t id) {
-        gg_stack *s;
-        if (id < 0 || id >= GG_STACK_COUNT) gg_fail("data stack limit exceeded");
-        s = &gg_stacks[id];
+    static gg_stack *gg_reserve_stack(gg_stack *s) {
         if (!s->base) {
     #ifdef _WIN32
             s->base = VirtualAlloc(NULL, GG_RESERVATION + 65536, MEM_RESERVE, PAGE_NOACCESS);
@@ -64,6 +63,14 @@ fn runtime_source() -> const u8[:] {
             if (!s->base) gg_fail("cannot reserve data stack");
         }
         return s;
+    }
+    static gg_stack *gg_get_stack(int64_t id) {
+        if (id < 0 || id >= GG_STACK_COUNT) gg_fail("data stack limit exceeded");
+        return gg_reserve_stack(&gg_stacks[id]);
+    }
+    static void gg_reset_pool(gg_stack *s) {
+        ptrdiff_t id = s - gg_stacks;
+        gg_slot_stacks[id].top = 0; gg_pool_busy[id] = 0;
     }
     static void *gg_allocate(gg_stack *s, size_t size) {
         size_t end, committed;
@@ -90,10 +97,34 @@ fn runtime_source() -> const u8[:] {
     static int64_t gg_index(int64_t i, int64_t len) { if ((uint64_t)i >= (uint64_t)len) gg_fail("array index out of bounds"); return i; }
     static void gg_append(gg_reference a, const void *p, int64_t n, size_t element) {
         void *to;
+        if (gg_pool_busy[a.stack - gg_stacks]) gg_fail("pool growth during element construction");
         if (n < 0 || (uint64_t)n > GG_RESERVATION / (element ? element : 1)) gg_fail("invalid array size");
         to=gg_allocate(a.stack, (size_t)n * element);
         if (n && element) memmove(to, p, (size_t)n * element);
         a.header->len += n;
+    }
+    static void gg_pool_free(gg_reference a, uint64_t index) {
+        gg_stack *slots;
+        int64_t i = (int64_t)index;
+        if (index >= (uint64_t)a.header->len) {
+            fprintf(stderr, "goose runtime error: index %lld out of bounds (length %lld)\n", (long long)i, (long long)a.header->len); exit(1);
+        }
+        slots = gg_reserve_stack(&gg_slot_stacks[a.stack - gg_stacks]);
+        memcpy(gg_allocate(slots, sizeof i), &i, sizeof i);
+    }
+    static int64_t gg_pool_claim(gg_reference a, size_t element) {
+        ptrdiff_t id = a.stack - gg_stacks;
+        gg_stack *slots = &gg_slot_stacks[id];
+        int64_t index = a.header->len;
+        if (gg_pool_busy[id]) gg_fail("pool growth during element construction");
+        if (slots->top) { slots->top -= sizeof index; memcpy(&index, slots->base + slots->top, sizeof index); }
+        else gg_allocate(a.stack, element);
+        gg_pool_busy[id] = 1;
+        return index;
+    }
+    static void gg_pool_finish(gg_reference a, int64_t index) {
+        if (index == a.header->len) a.header->len++;
+        gg_pool_busy[a.stack - gg_stacks] = 0;
     }
     static void gg_resize(gg_reference a, int64_t n, size_t element, const void *fill) {
         int64_t old=a.header->len, i;
