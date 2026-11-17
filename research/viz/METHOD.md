@@ -69,10 +69,10 @@ Calibration (`trace/calib.c`, random 8-byte reads, 4 M of them): working set 16 
 | self-hosted, W1 | 0.31-0.34 s | 17.8 s | ~55x | 134 MB samples + 54 KB exact | 1.0 MB JSON |
 | C++, W1 | 0.21-0.22 s | 9.3 s | ~43x | 70 MB samples | 0.55 MB JSON |
 | cachegrind, self-hosted | | 14.5 s | ~45x | | totals only |
-| lackey `--trace-mem=yes`, self-hosted `--parse` only (57 M instr) | 0.016 s | 91 s | ~5,700x | see below | |
+| lackey `--trace-mem=yes`, self-hosted `--parse` only (57 M instr) | 0.02 s | 91 s | ~5,000x | 1.17 GB of text | |
 
 Lackey prints a text line per access and per instruction: extrapolated to the full compile (3.9 G
-instructions) that is about 100 minutes and tens of GB of text before any cache model runs, so
+instructions) that is about 100 minutes and about 80 GB of text before any cache model runs, so
 "lackey piped into a model" was rejected in favour of the model inside the tool.
 
 **DynamoRIO.** github.com is reachable from the VM (HTTP 200 on the releases page), so drcachesim
