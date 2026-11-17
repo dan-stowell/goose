@@ -40,3 +40,5 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 feat-enums: value-producing break for loop/block (joined like branches); run 43->44.
 - 2026-11-17 feat-enums: case-function tag dispatch, variable-mode enums (E..), float text per 3.7; run 67->79.
 - 2026-11-17 viz2: before/after pictures (aa0092db vs HEAD, own and same input), cc1 traced on both Cs, ladder over time, regen.sh; front end 0.32 -> 0.13 s on the same input, gcc -O2 10.4 -> 7.6 s.
+- 2026-11-17 research/demo: self-hosted gcc -O0 and fast (TinyCC) rungs, W2/selfhost-pass like-for-like subset, rev on every record.
+- 2026-11-17 LADDER.md and research/runs/20261117T015525Z-92b547b4.json: full run with --before 0aa09be4 (load avg ~15 during it).
