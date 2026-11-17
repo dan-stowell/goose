@@ -692,6 +692,7 @@ fn project_result(ctx: Compiler&, call: i64, index: i64, scope: i64) -> i64 {
         let temporary_scope = scope_new(ctx, scope, ctx.checking_function);
         v.root = ctx.symbols.len;
         ctx.symbols.push(Symbol { token: ctx.nodes[n].token, ns: -1, kind: 4, decl: n, scope: temporary_scope, ty: v.ty, state: 2 });
+        index_symbol(ctx, v.root);
     }
     annotate(ctx, n, v);
     return n;
@@ -819,7 +820,10 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
         if ctx.nodes[x.a].tag != N_NAME { ctx.nodes[x.b].standalone = false; }
         let rhs = check_expression(ctx, x.b, scope, dest.ty);
         if !direct { check_stored_view(ctx, received(ctx, rhs, dest.ty), x.token); }
-        require_fit(ctx, x.b, rhs, dest.ty);
+        // A shift's count is any integer, as for << and >> themselves.
+        let shift = ctx.tokens[x.token].text == "<<=" || ctx.tokens[x.token].text == ">>=";
+        if shift { if ctx.types[dest.ty].kind != T_INTEGER || ctx.types[decay(ctx, rhs).ty].kind != T_INTEGER { error_at(ctx, x.token, "integer shift operands required"); } }
+        else { require_fit(ctx, x.b, rhs, dest.ty); }
         store_lifetime(ctx, received(ctx, rhs, dest.ty), if direct { dest.place } else { dest.root }, x.token);
         if direct && ctx.types[dest.ty].kind == T_SLICE && root_depth(ctx, rhs.root) >= root_depth(ctx, ctx.symbols[dest.place].root) { ctx.symbols[dest.place].root = rhs.root; }
         if direct { ctx.symbols[dest.place].growshrink = ctx.symbols[dest.place].growshrink || rhs.growshrink; }
@@ -1219,8 +1223,9 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         if call < 0 && contains_view(ctx, ty) {
             let own = ctx.symbols.len;
             ctx.symbols.push(Symbol { token: ctx.nodes[param].token, ns: -1, kind: 4, decl: param, scope: 0, ty: ty, state: 2 });
+            index_symbol(ctx, own);
             if ctx.types[ty].kind == T_REFERENCE || ctx.types[ty].kind == T_SLICE { ctx.symbols[s].root = own; }
-            ctx.symbols[s].held = own;
+            else { ctx.symbols[s].held = own; }
         }
         ctx.nodes[param].symbol = s; p = ctx.edges[p].next;
     }
