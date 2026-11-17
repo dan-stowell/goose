@@ -16,3 +16,4 @@ Append-only: one line per commit, a paragraph at each milestone.
 - 2026-11-17 research/demo: the ladder for W1, W2 (sampled or --full), W3, stage by stage, with --before and a JSON record per run.
 - 2026-11-17 LADDER.md and research/runs/20261117T013206Z-de28e5b6.json from a full demo run (W1 4.1/2.6/10.6 s; W2 22.5/2.7 s stock, self-hosted 30/771).
 - 2026-11-17 feat-enums: fixed-mode enums, variant types/constructors/constants, match over enums and integers (coverage, overlap, binders), results generic over constness, instantiation chain limit.
+- 2026-11-17 selfhost shift compound assignments take any integer count; unreached view params rooted without a held bound; index the symbols project_result pushes (tried name-based liveness at shrinks: unsound, it lost 31 rejections, reverted)
