@@ -2,5 +2,7 @@ ffi
 mat
 math
 quat
+slice_pool
 slice_pool_internal
+slot_pool
 vec

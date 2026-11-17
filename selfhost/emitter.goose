@@ -67,11 +67,37 @@ fn c_symbol(ctx: Compiler&, symbol: i64) -> const u8[:] {
     if ctx.return_locals[owner] == symbol { return save_text(ctx, str("(*", c_frame(ctx, owner), "->result.header)")); }
     return save_text(ctx, str(c_frame(ctx, ctx.scopes[ctx.symbols[symbol].scope].function), "->", c_name(ctx, symbol)));
 }
+// The data-stack number of a symbol's (first) slot.
+fn c_slot_index(ctx: Compiler&, symbol: i64) -> const u8[:] {
+    if global_storage(ctx, symbol) { return save_text(ctx, str(ctx.symbol_slots[symbol])); }
+    return save_text(ctx, str(c_frame(ctx, ctx.scopes[ctx.symbols[symbol].scope].function), "->base + ", ctx.symbol_slots[symbol]));
+}
 fn c_stack(ctx: Compiler&, symbol: i64) -> const u8[:] {
     if global_storage(ctx, symbol) { return save_text(ctx, str("gg_get_stack(", ctx.symbol_slots[symbol], ")")); }
     let owner = ctx.scopes[ctx.symbols[symbol].scope].function;
     if ctx.return_locals[owner] == symbol { return save_text(ctx, str(c_frame(ctx, owner), "->result.stack")); }
     return save_text(ctx, str("gg_get_stack(", c_frame(ctx, ctx.scopes[ctx.symbols[symbol].scope].function), "->base + ", ctx.symbol_slots[symbol], ")"));
+}
+fn root_slots(ctx: Compiler&, ty: i64) -> i64 {
+    var e = ctx.types[ty].first; var count = 0;
+    while e >= 0 { if ctx.types[ctx.fielddefs[ctx.edges[e].value].ty].size_class != 0 { count++; } e = ctx.edges[e].next; }
+    return count;
+}
+// Binds a root owner's nonfixed fields to its consecutive slots, empty.
+fn c_root_storage(ctx: Compiler&, symbol: i64, owner: CValue) {
+    let index = c_slot_index(ctx, symbol);
+    var e = ctx.types[owner.ty].first; var k = 0;
+    while e >= 0 {
+        let f = ctx.edges[e].value; let ft = ctx.fielddefs[f].ty;
+        if ctx.types[ft].size_class != 0 {
+            let stack = save_text(ctx, str("gg_get_stack(", index, " + ", k, ")"));
+            emit(ctx, str("  (", owner.code, ").s", f, " = ", stack, "; ", stack, "->top = 0;\n"));
+            if ctx.types[ft].size_class == 2 { emit(ctx, str("  (", owner.code, ").f", f, ".base = ", stack, "->base; (", owner.code, ").f", f, ".len = 0;\n")); }
+            else { emit(ctx, str("  (", owner.code, ").f", f, " = ", stack, "->base;\n")); }
+            k++;
+        }
+        e = ctx.edges[e].next;
+    }
 }
 fn temporary(ctx: Compiler&, ty: i64) -> const u8[:] {
     let id = ctx.c_temporary; ctx.c_temporary++;
@@ -188,9 +214,12 @@ fn field_count(ctx: Compiler&, ty: i64) -> i64 {
 // is found by walking the packed fields before it.
 fn c_field(ctx: Compiler&, ty: i64, base: const u8[:], f: i64) -> CValue {
     let ft = ctx.fielddefs[f].ty;
-    if ctx.types[ty].size_class == 0 {
+    if ctx.types[ty].size_class == 0 || ctx.types[ty].size_class == 3 {
         let field = save_text(ctx, str("(", base, ").f", f));
-        return CValue { code: field, ty: ft, address: save_text(ctx, str("&(", field, ")")), stack: "" };
+        var stack = save_text(ctx, "");
+        if ctx.types[ty].size_class == 3 && ctx.types[ft].size_class != 0 { stack = save_text(ctx, str("(", base, ").s", f)); }
+        if ctx.types[ft].size_class == 1 { return CValue { code: field, ty: ft, address: field, stack: stack }; }
+        return CValue { code: field, ty: ft, address: save_text(ctx, str("&(", field, ")")), stack: stack };
     }
     let at = save_text(ctx, str("gg_at_", ty, "(", base, ", ", field_index(ctx, ty, f), ")"));
     if ctx.types[ft].size_class == 1 { return CValue { code: at, ty: ft, address: at, stack: "" }; }
@@ -218,11 +247,16 @@ recursive fn emit_type(ctx: Compiler&, ty: i64) {
         emit(ctx, str("typedef struct gg_type_", ty, " gg_type_", ty, ";\n"));
         var e = t.first;
         while e >= 0 { emit_type(ctx, ctx.fielddefs[ctx.edges[e].value].ty); e = ctx.edges[e].next; }
-        if t.size_class != 0 { error_at(ctx, ctx.nodes[t.decl].token, "not implemented yet: resizable struct C layout"); }
+        if t.size_class == 2 { error_at(ctx, ctx.nodes[t.decl].token, "not implemented yet: resizable struct C layout"); }
         emit(ctx, str("#pragma pack(push, 1)\nstruct gg_type_", ty, " {\n"));
         e = t.first;
         if e < 0 { emit(ctx, "unsigned char empty;\n"); }
-        while e >= 0 { let f = ctx.edges[e].value; emit(ctx, str("  ", c_type(ctx, ctx.fielddefs[f].ty), " f", f, ";\n")); e = ctx.edges[e].next; }
+        while e >= 0 {
+            let f = ctx.edges[e].value; emit(ctx, str("  ", c_type(ctx, ctx.fielddefs[f].ty), " f", f, ";\n"));
+            // A root's nonfixed field also records the data stack it owns.
+            if t.size_class == 3 && ctx.types[ctx.fielddefs[f].ty].size_class != 0 { emit(ctx, str("  gg_stack *s", f, ";\n")); }
+            e = ctx.edges[e].next;
+        }
         emit(ctx, "};\n#pragma pack(pop)\n");
     } else if t.kind == T_ENUM && (t.flags & 1 != 0 || !t.fixed_ok) {
         // Variable mode is packed bytes; a fixed mode its payloads rule out has no C type.
@@ -248,7 +282,7 @@ recursive fn emit_type(ctx: Compiler&, ty: i64) {
         emit_type(ctx, t.element);
         var extent = t.count; if extent == 0 { extent = 1; }
         emit(ctx, str("#pragma pack(push, 1)\ntypedef struct { uint", limited_width(t.count) * 8, "_t len; ", c_type(ctx, t.element), " e[", extent, "]; } ", c_type(ctx, ty), ";\n#pragma pack(pop)\n"));
-    } else if t.kind == T_REFERENCE && ctx.types[t.element].size_class == 0 {
+    } else if t.kind == T_REFERENCE && (ctx.types[t.element].size_class == 0 || ctx.types[t.element].size_class == 3) {
         emit_type(ctx, t.element); emit(ctx, str("typedef ", c_type(ctx, t.element), " *", c_type(ctx, ty), ";\n"));
     } else if t.kind == T_REFERENCE || t.kind == T_ARRAY || t.kind == T_SLICE { emit_type(ctx, t.element); }
     ctx.c_type_state[ty] = 2;
@@ -373,7 +407,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         }
         let field = c_field(ctx, a.ty, a.code, x.symbol);
         if ctx.types[field.ty].kind == T_VARINT { return CValue { code: save_text(ctx, str("gg_zig_read(", field.code, ")")), ty: x.ty, address: "", stack: "" }; }
-        return CValue { code: field.code, ty: x.ty, address: field.address, stack: "" };
+        return CValue { code: field.code, ty: x.ty, address: field.address, stack: field.stack };
     }
     if tag == N_INDEX || tag == N_SLICE {
         let a = c_expression(ctx, x.a);
@@ -441,7 +475,7 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
                 let code = save_text(ctx, str(payload, ".f", f));
                 field = CValue { code: code, ty: ctx.fielddefs[f].ty, address: save_text(ctx, str("&(", code, ")")), stack: "" };
             }
-            c_into(ctx, ctx.nodes[init].a, CValue { code: field.code, ty: field.ty, address: field.address, stack: dest.stack });
+            c_into(ctx, ctx.nodes[init].a, CValue { code: field.code, ty: field.ty, address: field.address, stack: if field.stack.len > 0 { field.stack } else { dest.stack } });
             e = ctx.edges[e].next;
         }
         if wrapped { emit(ctx, str("  (", dest.code, ").tag = ", ctx.types[x.ty].count, ";\n")); }
@@ -900,6 +934,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
             emit(ctx, str("  ", dest.stack, "->top = 0;\n  ", dest.code, ".base = ", dest.stack, "->base; ", dest.code, ".len = 0;\n"));
         }
         if ctx.types[dest.ty].size_class == 1 { emit(ctx, str("  ", dest.stack, "->top = 0; ", dest.code, " = ", dest.stack, "->base;\n")); }
+        if ctx.types[dest.ty].size_class == 3 && ctx.symbol_slots[symbol] >= 0 { c_root_storage(ctx, symbol, dest); }
         let init = first_child(ctx, x.b); if init >= 0 { c_into(ctx, init, dest); }
         return;
     }
@@ -1083,10 +1118,14 @@ fn prepare_emission(ctx: Compiler&) {
     }
     for s, i in ctx.symbols {
         var slot = -1;
-        let owned_variable = s.kind == 2 && s.ty >= 0 && ctx.types[s.ty].size_class == 1 && s.decl >= 0 && ctx.nodes[s.decl].tag == N_BIND;
-        if owned_variable || (s.kind == 2 && s.ty >= 0 && ctx.types[s.ty].size_class == 2) {
-            if global_storage(ctx, i) { slot = ctx.c_global_slots; ctx.c_global_slots++; }
-            else { let owner = ctx.scopes[s.scope].function; if ctx.return_locals[owner] != i { slot = ctx.function_slots[owner]; ctx.function_slots[owner]++; } }
+        let owned = s.kind == 2 && s.ty >= 0 && s.decl >= 0 && ctx.nodes[s.decl].tag == N_BIND;
+        let owned_variable = owned && ctx.types[s.ty].size_class == 1;
+        // A root owner takes one slot per nonfixed field.
+        var width = 1;
+        if owned && ctx.types[s.ty].size_class == 3 { width = root_slots(ctx, s.ty); }
+        if (owned_variable || (s.kind == 2 && s.ty >= 0 && ctx.types[s.ty].size_class == 2) || (owned && ctx.types[s.ty].size_class == 3)) && width > 0 {
+            if global_storage(ctx, i) { slot = ctx.c_global_slots; ctx.c_global_slots += width; }
+            else { let owner = ctx.scopes[s.scope].function; if ctx.return_locals[owner] != i { slot = ctx.function_slots[owner]; ctx.function_slots[owner] += width; } }
         }
         ctx.symbol_slots.push(slot);
         // Frame fields in symbol order, numbered within their owner.

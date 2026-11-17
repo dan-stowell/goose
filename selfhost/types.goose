@@ -495,13 +495,15 @@ recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
     ctx.types[id].state = 1;
     var offset = 0;
     var size_class = 0;
+    // A root struct (size class 3) owns each field's storage separately.
+    let root = ctx.nodes[decl].tag == N_STRUCT && ctx.nodes[decl].flags & 64 != 0;
     var e = ctx.nodes[decl].first;
     var last = -1;
     while e >= 0 {
         let n = ctx.edges[e].value;
         if ctx.nodes[n].tag == N_PAD { error_at(ctx, ctx.nodes[n].token, "not implemented yet: explicit padding"); }
         let ft = resolve_type(ctx, ctx.nodes[n].a, scope);
-        if size_class == 2 { error_at(ctx, ctx.nodes[n].token, "resizable field must be the final field"); }
+        if size_class == 2 && !root { error_at(ctx, ctx.nodes[n].token, "resizable field must be the final field"); }
         if ctx.types[ft].size_class > size_class { size_class = ctx.types[ft].size_class; }
         let f = ctx.fielddefs.len;
         ctx.fielddefs.push(Field { token: ctx.nodes[n].token, ty: ft, initializer: ctx.nodes[n].b, flags: ctx.nodes[n].flags, offset: offset });
@@ -512,6 +514,7 @@ recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
         e = ctx.edges[e].next;
     }
     if offset == 0 { offset = 1; }
+    if root { size_class = 3; }
     if size_class > 0 { offset = -1; }
     ctx.types[id].bytes = offset; ctx.types[id].size_class = size_class; ctx.types[id].state = 2;
 }

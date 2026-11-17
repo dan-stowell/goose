@@ -561,10 +561,14 @@ fn parse(ctx: Compiler&, file: i64) {
             expect(ctx, ";"); ctx.declarations.push(n); continue;
         }
         had_declaration = true;
+        // root only modifies a following struct; elsewhere it is a name.
+        var is_root = false;
+        if at(ctx, "root") && ahead(ctx, "struct") { ctx.cursor++; is_root = true; }
         if at_function(ctx) { ctx.declarations.push(function_decl(ctx, false)); }
         else if take(ctx, "struct") || take(ctx, "enum") {
             var tag = N_STRUCT; if ctx.tokens[ctx.cursor - 1].text == "enum" { tag = N_ENUM; }
             let n = name_node(ctx, tag);
+            if is_root { ctx.nodes[n].flags |= 64; }
             let old = ctx.current_namespace; ctx.current_namespace = ctx.nodes[n].ns;
             let gen = node(ctx, N_BLOCK, ctx.cursor); ctx.nodes[n].a = gen; generics(ctx, gen);
             if tag == N_STRUCT { fields(ctx, n); }

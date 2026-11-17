@@ -36,4 +36,5 @@ errors_tc/param_default_names_local
 errors_tc/param_default_names_param
 errors_tc/polymorphic_recursion_param
 errors_tc/polymorphic_recursion_type_args
+errors_tc/slot_pool_const
 tests/recursive_nonfixed_local

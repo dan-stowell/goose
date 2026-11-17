@@ -44,3 +44,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 LADDER.md and research/runs/20261117T015525Z-92b547b4.json: full run with --before 0aa09be4 (load avg ~15 during it).
 - 2026-11-17 review triage (M0 skeptic): demo W2 checks expected stderr; stdlib board also emits+compiles a program importing each module.
 - 2026-11-17 feat-storage: optionals (T?, T&?, null, .= rebinding, flow narrowing by if/while/guard/assert/&&/null tests with a persistent fact list), stack-overflow fault report; run 63 -> 72.
+- 2026-11-17 feat-storage: root structs (one data-stack slot per nonfixed field, per-field provenance pseudo-symbols); run 72 -> 87, stdlib 6 -> 8.

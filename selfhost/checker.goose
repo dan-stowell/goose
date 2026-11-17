@@ -39,6 +39,15 @@ struct Specialization {
 struct CheckedCall { node: i64, scope: i64, callee: i64 }
 struct Shrink { root: i64, balanced: bool }
 
+// The pseudo-symbol naming one field's storage of a root owner (kind 6).
+fn root_component(ctx: Compiler&, owner: i64, f: i64) -> i64 {
+    var i = ctx.symbols.len;
+    while i > owner { i--; if ctx.symbols[i].kind == 6 && ctx.symbols[i].root == owner && ctx.symbols[i].decl == f { return i; } }
+    let id = ctx.symbols.len;
+    ctx.symbols.push(Symbol { token: ctx.symbols[owner].token, ns: -1, kind: 6, decl: f, scope: ctx.symbols[owner].scope, ty: ctx.fielddefs[f].ty, state: 2, root: owner });
+    index_symbol(ctx, id);
+    return id;
+}
 fn value_of(ctx: Compiler&, n: i64) -> Value {
     let x = ctx.nodes[n];
     return Value { ty: x.ty, root: x.root, place: x.place, readonly: x.readonly, growshrink: x.growshrink, inexact: x.inexact, known: x.known, bits: x.bits, alt: x.alt, held: x.held, fields: x.fields };
@@ -150,7 +159,7 @@ fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64,
         if s.kind != 2 || s.state != 2 || s.ty < 0 || !scope_contains(ctx, s.scope, scope) { continue; }
         let shape = ctx.types[s.ty];
         let direct_view = (shape.kind == T_SLICE || shape.kind == T_REFERENCE) && shape.element == element;
-        if (direct_view && s.root == root) || (s.held >= 0 && holds_view_of(ctx, s.ty, element) && root_depth(ctx, s.held) >= root_depth(ctx, root)) {
+        if (direct_view && s.root == root) || (s.held >= 0 && (!direct_view || contains_view(ctx, shape.element)) && holds_view_of(ctx, s.ty, element) && root_depth(ctx, s.held) >= root_depth(ctx, root)) {
             error_at(ctx, token, str("shrink may invalidate '", ctx.tokens[s.token].text, "'; this checker conservatively keeps views live to scope exit"));
         }
     }
@@ -450,6 +459,8 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             let f = find_field(ctx, a.ty, x.token);
             if f < 0 { error_at(ctx, x.token, "unknown field"); }
             ctx.nodes[n].symbol = f; v.ty = ctx.fielddefs[f].ty; v.root = a.root; v.place = a.place; v.readonly = a.readonly || ctx.fielddefs[f].flags & 2 != 0;
+            // Each nonfixed field of a root owner is storage of its own.
+            if ctx.types[a.ty].size_class == 3 && ctx.types[v.ty].size_class != 0 && a.root >= 0 { v.root = root_component(ctx, a.root, f); }
             // A varint field reads as an i64 and is written only at construction.
             if ctx.types[v.ty].kind == T_VARINT { v.ty = default_integer(ctx); v.place = -1; }
             v.held = a.held;
