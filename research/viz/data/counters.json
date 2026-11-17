@@ -1,0 +1,1199 @@
+{
+ "uptime": [
+  "02:01:03 up 53 min,  0 user,  load average: 8.69, 9.76, 7.17",
+  "02:05:17 up 57 min,  0 user,  load average: 13.43, 10.53, 8.02"
+ ],
+ "runs": 5,
+ "jobs": {
+  "fe_before": {
+   "parse": {
+    "duration_time": [
+     9379986.0,
+     12602562.0,
+     62230776.0
+    ],
+    "instructions": [
+     57137112.0,
+     57137118.0,
+     57137157.0
+    ],
+    "cycles": [
+     18815620.0,
+     19432026.0,
+     29226637.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     15562118.0,
+     16250336.0,
+     16358884.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     8724945.0,
+     9439065.0,
+     9499493.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     117404.0,
+     125494.0,
+     277797.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     32204.0,
+     32844.0,
+     90149.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     1218.0,
+     1860.0,
+     2133.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     178.0,
+     785.0,
+     1580.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     377611.0,
+     383315.0,
+     455543.0
+    ]
+   },
+   "check": {
+    "duration_time": [
+     259581958.0,
+     283005347.0,
+     1104644082.0
+    ],
+    "instructions": [
+     3497029631.0,
+     3497029985.0,
+     3497030170.0
+    ],
+    "cycles": [
+     898098661.0,
+     903492107.0,
+     1142505490.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     849729121.0,
+     852167737.0,
+     852565869.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     87059313.0,
+     87524746.0,
+     88317878.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     351695992.0,
+     352648431.0,
+     389029481.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     217007196.0,
+     273159724.0,
+     277702416.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     1251794.0,
+     2289726.0,
+     4167491.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     71668.0,
+     100155.0,
+     388838.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     352181347.0,
+     354288078.0,
+     397830770.0
+    ]
+   },
+   "emit": {
+    "duration_time": [
+     304157647.0,
+     323338602.0,
+     1227487987.0
+    ],
+    "instructions": [
+     3839861130.0,
+     3839861562.0,
+     3839862062.0
+    ],
+    "cycles": [
+     1022309580.0,
+     1041856251.0,
+     1742021734.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     952788981.0,
+     953129679.0,
+     953722617.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     132896939.0,
+     134607650.0,
+     134982347.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     363756013.0,
+     364307892.0,
+     422245661.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     212316382.0,
+     274636152.0,
+     282578594.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     1967553.0,
+     5037215.0,
+     6669714.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     106122.0,
+     172072.0,
+     327267.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     364813481.0,
+     379211193.0,
+     388613730.0
+    ]
+   }
+  },
+  "fe_after": {
+   "parse": {
+    "duration_time": [
+     14214977.0,
+     32953518.0,
+     38422141.0
+    ],
+    "instructions": [
+     88187573.0,
+     88187575.0,
+     88187659.0
+    ],
+    "cycles": [
+     29279409.0,
+     29600585.0,
+     45618264.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     24469611.0,
+     25508120.0,
+     25524863.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     13370021.0,
+     14306420.0,
+     14335573.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     162271.0,
+     166827.0,
+     318673.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     38863.0,
+     42136.0,
+     129033.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     1688.0,
+     2163.0,
+     3133.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     410.0,
+     984.0,
+     1643.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     559415.0,
+     575699.0,
+     740838.0
+    ]
+   },
+   "check": {
+    "duration_time": [
+     123612778.0,
+     133035827.0,
+     177685925.0
+    ],
+    "instructions": [
+     810206636.0,
+     810206763.0,
+     810206859.0
+    ],
+    "cycles": [
+     358597602.0,
+     371597126.0,
+     427981709.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     361617798.0,
+     371186994.0,
+     371591193.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     103897603.0,
+     108704439.0,
+     109331260.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     65309900.0,
+     65545187.0,
+     66099405.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     40730121.0,
+     40855413.0,
+     42702158.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     4129922.0,
+     4168086.0,
+     4280247.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     78697.0,
+     85681.0,
+     287685.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     66647226.0,
+     66747531.0,
+     67505915.0
+    ]
+   },
+   "emit": {
+    "duration_time": [
+     179608287.0,
+     190389484.0,
+     289445475.0
+    ],
+    "instructions": [
+     1374493096.0,
+     1374493361.0,
+     1374496169.0
+    ],
+    "cycles": [
+     532823304.0,
+     544500675.0,
+     732543122.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     495198997.0,
+     507038157.0,
+     509063461.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     194377776.0,
+     201521213.0,
+     201897160.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     69771608.0,
+     69973156.0,
+     72118868.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     41288177.0,
+     43220555.0,
+     44838266.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     3369361.0,
+     3980233.0,
+     4312602.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     128703.0,
+     157285.0,
+     226701.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     71694216.0,
+     71905534.0,
+     73288006.0
+    ]
+   }
+  },
+  "fe_after_on_before": {
+   "parse": {
+    "duration_time": [
+     10108372.0,
+     11283743.0,
+     22302019.0
+    ],
+    "instructions": [
+     58109454.0,
+     58109458.0,
+     58109525.0
+    ],
+    "cycles": [
+     19429399.0,
+     19611021.0,
+     20218461.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     16883403.0,
+     16906192.0,
+     17178335.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     9450078.0,
+     9477991.0,
+     9638545.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     106006.0,
+     110977.0,
+     111375.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     25941.0,
+     28776.0,
+     64608.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     1302.0,
+     2180.0,
+     2934.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     323.0,
+     843.0,
+     929.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     381296.0,
+     384855.0,
+     390712.0
+    ]
+   },
+   "check": {
+    "duration_time": [
+     54216073.0,
+     62638598.0,
+     82267162.0
+    ],
+    "instructions": [
+     328720257.0,
+     328720384.0,
+     328720524.0
+    ],
+    "cycles": [
+     137182892.0,
+     145910827.0,
+     170183013.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     140138392.0,
+     142374909.0,
+     142748768.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     51112807.0,
+     52390672.0,
+     52562353.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     20939231.0,
+     21019194.0,
+     21204850.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     12742647.0,
+     15371624.0,
+     16410184.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     821289.0,
+     1019494.0,
+     1188945.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     18414.0,
+     65064.0,
+     82314.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     21691636.0,
+     21973620.0,
+     22747297.0
+    ]
+   },
+   "emit": {
+    "duration_time": [
+     90861433.0,
+     124731302.0,
+     144771932.0
+    ],
+    "instructions": [
+     682454411.0,
+     682454491.0,
+     682454865.0
+    ],
+    "cycles": [
+     249579024.0,
+     328739389.0,
+     375342384.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     220770732.0,
+     221429572.0,
+     229119382.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     106454466.0,
+     106713372.0,
+     110964069.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     23845350.0,
+     24984776.0,
+     26011497.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     16475776.0,
+     17774750.0,
+     18475600.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     827827.0,
+     1101531.0,
+     1319159.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     57493.0,
+     94262.0,
+     99109.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     25040082.0,
+     25046773.0,
+     25371382.0
+    ]
+   }
+  },
+  "cpp_after": {
+   "parse": {
+    "duration_time": [
+     26843088.0,
+     48419710.0,
+     83378438.0
+    ],
+    "instructions": [
+     109137476.0,
+     109137785.0,
+     109138081.0
+    ],
+    "cycles": [
+     41502370.0,
+     42627373.0,
+     74616663.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     26503898.0,
+     27762979.0,
+     27862057.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     13604429.0,
+     14378859.0,
+     14451037.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     922618.0,
+     926954.0,
+     1124600.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     389101.0,
+     456485.0,
+     629270.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     65607.0,
+     80389.0,
+     88016.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     11919.0,
+     12125.0,
+     42954.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     1370080.0,
+     1444832.0,
+     1648570.0
+    ]
+   },
+   "check": {
+    "duration_time": [
+     269196257.0,
+     311044866.0,
+     408201856.0
+    ],
+    "instructions": [
+     1721816457.0,
+     1721829296.0,
+     1721837097.0
+    ],
+    "cycles": [
+     758913942.0,
+     893120320.0,
+     1075442807.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     582961085.0,
+     593919951.0,
+     598516324.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     360945851.0,
+     370180589.0,
+     372895468.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     26844044.0,
+     27131188.0,
+     33178396.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     13157094.0,
+     13681024.0,
+     18541276.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     1369901.0,
+     1471957.0,
+     1731019.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     571363.0,
+     632240.0,
+     1321185.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     29373045.0,
+     30101140.0,
+     41227204.0
+    ]
+   },
+   "emit": {
+    "duration_time": [
+     325727089.0,
+     362452559.0,
+     549905571.0
+    ],
+    "instructions": [
+     2079718743.0,
+     2079734452.0,
+     2079748099.0
+    ],
+    "cycles": [
+     947307290.0,
+     966791145.0,
+     1626949466.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     683394128.0,
+     706868088.0,
+     709169084.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     419660277.0,
+     436024803.0,
+     437331932.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     30508345.0,
+     31001074.0,
+     39352342.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     15042960.0,
+     15115793.0,
+     16030938.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     1286503.0,
+     1686185.0,
+     1759728.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     670407.0,
+     694954.0,
+     1474570.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     33142282.0,
+     33265780.0,
+     35021069.0
+    ]
+   }
+  },
+  "cpp_before": {
+   "parse": {
+    "duration_time": [
+     13551217.0,
+     21594362.0,
+     33810446.0
+    ],
+    "instructions": [
+     62266795.0,
+     62267306.0,
+     62278029.0
+    ],
+    "cycles": [
+     27066090.0,
+     30115161.0,
+     32824994.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     17598466.0,
+     17652913.0,
+     17932622.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     9758663.0,
+     9789814.0,
+     9957205.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     571749.0,
+     594115.0,
+     627586.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     230378.0,
+     283246.0,
+     309623.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     43303.0,
+     44757.0,
+     50910.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     6679.0,
+     13420.0,
+     23214.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     874234.0,
+     935224.0,
+     1030424.0
+    ]
+   },
+   "check": {
+    "duration_time": [
+     169870401.0,
+     179773466.0,
+     194291485.0
+    ],
+    "instructions": [
+     920120131.0,
+     920128986.0,
+     920145986.0
+    ],
+    "cycles": [
+     414267232.0,
+     444930312.0,
+     484354263.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     321422900.0,
+     321776027.0,
+     324150163.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     203078250.0,
+     203384620.0,
+     204666219.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     15075768.0,
+     15105634.0,
+     15280173.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     7309350.0,
+     7404316.0,
+     10016647.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     810766.0,
+     853666.0,
+     1086018.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     260903.0,
+     316683.0,
+     653787.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     16284355.0,
+     16437195.0,
+     24044158.0
+    ]
+   },
+   "emit": {
+    "duration_time": [
+     186869805.0,
+     207162657.0,
+     330412191.0
+    ],
+    "instructions": [
+     1137897575.0,
+     1137902861.0,
+     1137907898.0
+    ],
+    "cycles": [
+     523532578.0,
+     531335171.0,
+     798372413.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     377927525.0,
+     389390317.0,
+     394069622.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     234826389.0,
+     243071273.0,
+     245785440.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     17046999.0,
+     17228382.0,
+     19720822.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     8451941.0,
+     8746521.0,
+     9794107.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     983082.0,
+     1042076.0,
+     1106951.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     275600.0,
+     371708.0,
+     655630.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     18616760.0,
+     19009711.0,
+     21861135.0
+    ]
+   }
+  },
+  "gcc_before": {
+   "cc": {
+    "duration_time": [
+     9682832618.0,
+     10433930247.0,
+     11909481446.0
+    ],
+    "instructions": [
+     72589651214.0,
+     72591255124.0,
+     72592660303.0
+    ],
+    "cycles": [
+     33703369242.0,
+     35906891606.0,
+     40093568448.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     25887558268.0,
+     26187289221.0,
+     26336517509.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     12398495921.0,
+     12543631608.0,
+     12607061158.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     1228272296.0,
+     1246992605.0,
+     1299509739.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     604720596.0,
+     659266109.0,
+     707245278.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     109987155.0,
+     118131913.0,
+     119828286.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     14133734.0,
+     19182146.0,
+     31128311.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     1240339770.0,
+     1335230612.0,
+     1432547158.0
+    ]
+   }
+  },
+  "gcc_after": {
+   "cc": {
+    "duration_time": [
+     7094267852.0,
+     7612766299.0,
+     12434940729.0
+    ],
+    "instructions": [
+     52921690157.0,
+     52922569213.0,
+     52928066711.0
+    ],
+    "cycles": [
+     24630796294.0,
+     26275789632.0,
+     32934261242.0
+    ],
+    "ls_dispatch.ld_dispatch": [
+     18571544550.0,
+     19074286998.0,
+     19322123859.0
+    ],
+    "ls_dispatch.store_dispatch": [
+     8891885427.0,
+     9124339066.0,
+     9238766953.0
+    ],
+    "ls_any_fills_from_sys.all": [
+     901215691.0,
+     921368927.0,
+     1021257501.0
+    ],
+    "ls_dmnd_fills_from_sys.local_l2": [
+     439152540.0,
+     452773128.0,
+     545665735.0
+    ],
+    "ls_dmnd_fills_from_sys.local_ccx": [
+     81191139.0,
+     83242212.0,
+     91986803.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_near": [
+     7971369.0,
+     13467123.0,
+     25677290.0
+    ],
+    "ls_dmnd_fills_from_sys.dram_io_far": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "l2_request_g1.all_dc": [
+     904908664.0,
+     953024856.0,
+     1086204030.0
+    ]
+   }
+  }
+ },
+ "stages": {
+  "fe_before": {
+   "parse": {
+    "duration_time": 12602562.0,
+    "instructions": 57137118.0,
+    "cycles": 19432026.0,
+    "ls_dispatch.ld_dispatch": 16250336.0,
+    "ls_dispatch.store_dispatch": 9439065.0,
+    "ls_any_fills_from_sys.all": 125494.0,
+    "ls_dmnd_fills_from_sys.local_l2": 32844.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 1860.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 785.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 383315.0
+   },
+   "check": {
+    "duration_time": 270402785.0,
+    "instructions": 3439892867.0,
+    "cycles": 884060081.0,
+    "ls_dispatch.ld_dispatch": 835917401.0,
+    "ls_dispatch.store_dispatch": 78085681.0,
+    "ls_any_fills_from_sys.all": 352522937.0,
+    "ls_dmnd_fills_from_sys.local_l2": 273126880.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 2287866.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 99370.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 353904763.0
+   },
+   "emit": {
+    "duration_time": 40333255.0,
+    "instructions": 342831577.0,
+    "cycles": 138364144.0,
+    "ls_dispatch.ld_dispatch": 100961942.0,
+    "ls_dispatch.store_dispatch": 47082904.0,
+    "ls_any_fills_from_sys.all": 11659461.0,
+    "ls_dmnd_fills_from_sys.local_l2": 1476428.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 2747489.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 71917.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 24923115.0
+   }
+  },
+  "fe_after": {
+   "parse": {
+    "duration_time": 32953518.0,
+    "instructions": 88187575.0,
+    "cycles": 29600585.0,
+    "ls_dispatch.ld_dispatch": 25508120.0,
+    "ls_dispatch.store_dispatch": 14306420.0,
+    "ls_any_fills_from_sys.all": 166827.0,
+    "ls_dmnd_fills_from_sys.local_l2": 42136.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 2163.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 984.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 575699.0
+   },
+   "check": {
+    "duration_time": 100082309.0,
+    "instructions": 722019188.0,
+    "cycles": 341996541.0,
+    "ls_dispatch.ld_dispatch": 345678874.0,
+    "ls_dispatch.store_dispatch": 94398019.0,
+    "ls_any_fills_from_sys.all": 65378360.0,
+    "ls_dmnd_fills_from_sys.local_l2": 40813277.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 4165923.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 84697.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 66171832.0
+   },
+   "emit": {
+    "duration_time": 57353657.0,
+    "instructions": 564286598.0,
+    "cycles": 172903549.0,
+    "ls_dispatch.ld_dispatch": 135851163.0,
+    "ls_dispatch.store_dispatch": 92816774.0,
+    "ls_any_fills_from_sys.all": 4427969.0,
+    "ls_dmnd_fills_from_sys.local_l2": 2365142.0,
+    "ls_dmnd_fills_from_sys.local_ccx": -187853.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 71604.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 5158003.0
+   }
+  },
+  "fe_after_on_before": {
+   "parse": {
+    "duration_time": 11283743.0,
+    "instructions": 58109458.0,
+    "cycles": 19611021.0,
+    "ls_dispatch.ld_dispatch": 16906192.0,
+    "ls_dispatch.store_dispatch": 9477991.0,
+    "ls_any_fills_from_sys.all": 110977.0,
+    "ls_dmnd_fills_from_sys.local_l2": 28776.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 2180.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 843.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 384855.0
+   },
+   "check": {
+    "duration_time": 51354855.0,
+    "instructions": 270610926.0,
+    "cycles": 126299806.0,
+    "ls_dispatch.ld_dispatch": 125468717.0,
+    "ls_dispatch.store_dispatch": 42912681.0,
+    "ls_any_fills_from_sys.all": 20908217.0,
+    "ls_dmnd_fills_from_sys.local_l2": 15342848.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 1017314.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 64221.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 21588765.0
+   },
+   "emit": {
+    "duration_time": 62092704.0,
+    "instructions": 353734107.0,
+    "cycles": 182828562.0,
+    "ls_dispatch.ld_dispatch": 79054663.0,
+    "ls_dispatch.store_dispatch": 54322700.0,
+    "ls_any_fills_from_sys.all": 3965582.0,
+    "ls_dmnd_fills_from_sys.local_l2": 2403126.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 82037.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 29198.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 3073153.0
+   }
+  },
+  "cpp_after": {
+   "parse": {
+    "duration_time": 48419710.0,
+    "instructions": 109137785.0,
+    "cycles": 42627373.0,
+    "ls_dispatch.ld_dispatch": 27762979.0,
+    "ls_dispatch.store_dispatch": 14378859.0,
+    "ls_any_fills_from_sys.all": 926954.0,
+    "ls_dmnd_fills_from_sys.local_l2": 456485.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 80389.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 12125.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 1444832.0
+   },
+   "check": {
+    "duration_time": 262625156.0,
+    "instructions": 1612691511.0,
+    "cycles": 850492947.0,
+    "ls_dispatch.ld_dispatch": 566156972.0,
+    "ls_dispatch.store_dispatch": 355801730.0,
+    "ls_any_fills_from_sys.all": 26204234.0,
+    "ls_dmnd_fills_from_sys.local_l2": 13224539.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 1391568.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 620115.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 28656308.0
+   },
+   "emit": {
+    "duration_time": 51407693.0,
+    "instructions": 357905156.0,
+    "cycles": 73670825.0,
+    "ls_dispatch.ld_dispatch": 112948137.0,
+    "ls_dispatch.store_dispatch": 65844214.0,
+    "ls_any_fills_from_sys.all": 3869886.0,
+    "ls_dmnd_fills_from_sys.local_l2": 1434769.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 214228.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 62714.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 3164640.0
+   }
+  },
+  "cpp_before": {
+   "parse": {
+    "duration_time": 21594362.0,
+    "instructions": 62267306.0,
+    "cycles": 30115161.0,
+    "ls_dispatch.ld_dispatch": 17652913.0,
+    "ls_dispatch.store_dispatch": 9789814.0,
+    "ls_any_fills_from_sys.all": 594115.0,
+    "ls_dmnd_fills_from_sys.local_l2": 283246.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 44757.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 13420.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 935224.0
+   },
+   "check": {
+    "duration_time": 158179104.0,
+    "instructions": 857861680.0,
+    "cycles": 414815151.0,
+    "ls_dispatch.ld_dispatch": 304123114.0,
+    "ls_dispatch.store_dispatch": 193594806.0,
+    "ls_any_fills_from_sys.all": 14511519.0,
+    "ls_dmnd_fills_from_sys.local_l2": 7121070.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 808909.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 303263.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 15501971.0
+   },
+   "emit": {
+    "duration_time": 27389191.0,
+    "instructions": 217773875.0,
+    "cycles": 86404859.0,
+    "ls_dispatch.ld_dispatch": 67614290.0,
+    "ls_dispatch.store_dispatch": 39686653.0,
+    "ls_any_fills_from_sys.all": 2122748.0,
+    "ls_dmnd_fills_from_sys.local_l2": 1342205.0,
+    "ls_dmnd_fills_from_sys.local_ccx": 188410.0,
+    "ls_dmnd_fills_from_sys.dram_io_near": 55025.0,
+    "ls_dmnd_fills_from_sys.dram_io_far": 0.0,
+    "l2_request_g1.all_dc": 2572516.0
+   }
+  }
+ }
+}

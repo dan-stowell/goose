@@ -90,3 +90,11 @@ drcachesim only if we need prefetcher models or a 10x faster trace.
   built `-no-pie`; its instruction count is within 0.7% of sh2's.
 - Time on the x axis is data accesses, not seconds; seconds per stage come from the counters.
 - An access spanning two lines is counted once, at the farther level.
+
+## cc1 (added with the before/after pictures, 2026-11-17)
+
+cc1 (gcc 13.3) is stripped, so it is traced as one stage, with the cc1 command line that
+`gcc -O2 -c` runs (from `gcc -###`; `as` is not traced). Under bytemove at one sample in 1024:
+576 s for the before C (3.66 MB; 73.6 G instructions, 31.6 G data accesses) and 451 s for the after C
+(2.10 MB; 53.7 G, 23.1 G), about 55-60x. The counters agree on the work: `gcc -O2 -c` measured 72.6 G
+and 52.9 G user instructions (median of 5; driver and `as` included).
