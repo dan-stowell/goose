@@ -753,6 +753,10 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
     }
     if x.tag == N_ASSIGN {
         let raw = c_expression(ctx, x.a); let dest = c_decay(ctx, raw); let op = ctx.tokens[x.token].text;
+        if op == "=" && ctx.types[dest.ty].kind == T_ARRAY && ctx.types[dest.ty].flags == 2 && ctx.types[dest.ty].count < 0 {
+            let v = c_decay(ctx, c_expression(ctx, x.b));
+            emit(ctx, str("  gg_dyn_assign(", dest.code, ", ", c_view(ctx, v), ", ", c_element_size(ctx, ctx.types[dest.ty].element), ");\n")); return;
+        }
         if op == "=" { c_into(ctx, x.b, dest); return; }
         if op == ".=" { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_reference(ctx, rhs), ";\n")); return; }
         let old = snapshot(ctx, dest);

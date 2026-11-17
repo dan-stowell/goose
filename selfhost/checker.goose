@@ -1014,7 +1014,10 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.types[raw.ty].kind == T_SLICE && (ctx.nodes[x.a].tag == N_MEMBER || ctx.nodes[x.a].tag == N_INDEX) { slice_slot = !ctx.nodes[ctx.nodes[x.a].a].readonly; }
     if dest.readonly && !direct && !slice_slot { error_at(ctx, x.token, "cannot write through read-only storage"); }
     if direct && ctx.symbols[dest.place].flags & 1 == 0 { error_at(ctx, x.token, "cannot reassign a let binding"); }
-    if ctx.types[dest.ty].size_class == 1 { error_at(ctx, x.token, "cannot replace a variable-size value"); }
+    // A runtime-capacity limited array keeps its capacity; assignment copies
+    // elements into it. Other variable-size values are frozen.
+    let dynamic = ctx.types[dest.ty].kind == T_ARRAY && ctx.types[dest.ty].flags == 2;
+    if ctx.types[dest.ty].size_class == 1 && !dynamic && ctx.tokens[x.token].text != ".=" { error_at(ctx, x.token, "cannot replace a variable-size value"); }
     if ctx.tokens[x.token].text == ".=" {
         if ctx.types[raw.ty].kind != T_REFERENCE { error_at(ctx, x.token, ".= rebinds references only"); }
         error_at(ctx, x.token, "not implemented yet: reference rebinding analysis");
@@ -1133,7 +1136,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             let shrinking = name == "resize" || name == "clear" || name == "pop" || name == "pop_n";
             // References into a limited array stay valid across shrinks.
             let limited = ctx.types[array.ty].kind == T_ARRAY && ctx.types[array.ty].flags == 2;
-            if shrinking && ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[callee].token, str(".", name, " needs fixed-size elements: the array is sequential")); }
+            if (name == "pop" || name == "pop_n" || name == "resize") && ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[callee].token, str(".", name, " needs fixed-size elements: the array is sequential")); }
             if shrinking && !limited && !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: shrinking within a larger expression"); }
             if array.readonly { error_at(ctx, ctx.nodes[callee].token, "cannot mutate a read-only array"); }
             if ctx.types[array.ty].kind != T_ARRAY || ctx.types[array.ty].flags < 2 { error_at(ctx, ctx.nodes[callee].token, "operation requires a growable array"); }

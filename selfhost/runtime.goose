@@ -116,6 +116,11 @@ fn runtime_source() -> const u8[:] {
     static int64_t gg_len_size(const uint8_t *p, int w) { return w ? w : gg_uleb_size(p); }
     static gg_slice gg_frozen_view(uint8_t *p, int w) { return gg_view(p + gg_len_size(p, w), gg_len_read(p, w)); }
     static gg_slice gg_dyn_view(uint8_t *p) { return gg_view(p + 8, *(uint32_t *)(p + 4)); }
+    static void gg_dyn_assign(uint8_t *p, gg_slice s, size_t element) {
+        if (s.len > (int64_t)*(uint32_t *)p) gg_fail("limited array capacity exceeded");
+        if (s.len) memmove(p + 8, s.data, (size_t)s.len * element);
+        *(uint32_t *)(p + 4) = (uint32_t)s.len;
+    }
     static void gg_push(gg_stack *s, const void *p, size_t n) { void *to = gg_allocate(s, n); if (n) memmove(to, p, n); }
     static void gg_push_uleb(gg_stack *s, uint64_t v) {
         uint8_t b[10]; int n = 0;
