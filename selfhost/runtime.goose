@@ -48,7 +48,7 @@ fn runtime_source() -> const u8[:] {
     }
     #endif
     static void gg_fail(const char *message) {
-        fprintf(stderr, "goose runtime error: %s\n", message); exit(1);
+        fflush(stdout); fprintf(stderr, "goose runtime error: %s\n", message); exit(1);
     }
     static gg_stack *gg_get_stack(int64_t id) {
         gg_stack *s;
@@ -106,6 +106,17 @@ fn runtime_source() -> const u8[:] {
             for (i=0; i<n-old; i++) if(element) memcpy(p+(size_t)i*element, fill, element);
         } else { a.stack->top = (size_t)(a.header->base-a.stack->base) + (size_t)n*element; }
         a.header->len=n;
+    }
+    static int64_t gg_check_length(int64_t n, size_t element, const char *message) {
+        if (n < 0 || (uint64_t)n > GG_RESERVATION / (element ? element : 1)) gg_fail(message ? message : "invalid array length");
+        return n;
+    }
+    static int64_t gg_range_index(gg_slice a, gg_slice s, size_t element, const char *message) {
+        uintptr_t off;
+        if (!s.len) return 0;
+        off = (uintptr_t)s.data - (uintptr_t)a.data;
+        if ((uintptr_t)s.data < (uintptr_t)a.data || (element && off % element) || (element && (int64_t)(off / element) + s.len > a.len)) gg_fail(message ? message : "slice not within this array");
+        return element ? (int64_t)(off / element) : 0;
     }
     static void gg_rpop_n(gg_reference a, int64_t k, size_t element) {
         if (k < 0 || k > a.header->len) gg_fail("pop_n count negative or beyond the array's length");

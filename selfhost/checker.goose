@@ -1465,11 +1465,31 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let member = ctx.nodes[callee].tag == N_MEMBER;
     let name = ctx.tokens[ctx.nodes[callee].token].text;
     var receiver = Value {};
-    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n");
+    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" || name == "check_length" || name == "index_of" || name == "range_index");
     if array_method { receiver = check_expression(ctx, ctx.nodes[callee].a, scope, -1); }
     // Builtin arguments are checked with their construction destination.
     if member && element_type(ctx, receiver.ty) >= 0 {
         let array = decay(ctx, receiver); let element = element_type(ctx, array.ty);
+        if name == "check_length" || name == "index_of" || name == "range_index" {
+            if ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[callee].token, str(".", name, " needs fixed-size elements")); }
+            if name == "check_length" && (ctx.types[array.ty].kind != T_ARRAY || ctx.types[array.ty].flags < 3) { error_at(ctx, ctx.nodes[callee].token, ".check_length needs a grow-only or grow-shrink array"); }
+            let count = child_count(ctx, n);
+            if count < 1 || count > 2 || (name == "index_of" && count != 1) { error_at(ctx, ctx.nodes[n].token, str(".", name, " argument count mismatch")); }
+            let arg = first_child(ctx, n);
+            if name == "check_length" { require_fit(ctx, arg, decay(ctx, check_expression(ctx, arg, scope, -1)), default_integer(ctx)); ctx.nodes[n].symbol = -16; }
+            else if name == "range_index" { require_fit(ctx, arg, check_expression(ctx, arg, scope, -1), slice_type(ctx, element, true)); ctx.nodes[n].symbol = -17; }
+            else {
+                let r = check_expression(ctx, arg, scope, -1);
+                if r.place < 0 && ctx.types[r.ty].kind != T_REFERENCE { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference into the array"); }
+                if decay(ctx, r).ty != element { error_at(ctx, ctx.nodes[arg].token, "index_of needs a reference to an element"); }
+                ctx.nodes[n].symbol = -18;
+            }
+            if count == 2 {
+                let message = ctx.edges[ctx.edges[ctx.nodes[n].first].next].value;
+                if ctx.nodes[message].tag != N_STRING { error_at(ctx, ctx.nodes[message].token, "the message must be a string literal"); }
+            }
+            return Value { ty: default_integer(ctx) };
+        }
         if name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" {
             let shrinking = name == "resize" || name == "clear" || name == "pop" || name == "pop_n";
             // References into a limited array stay valid across shrinks.

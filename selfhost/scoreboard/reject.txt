@@ -12,6 +12,7 @@ errors/match_list_wildcard
 errors/match_wildcard_list
 errors/param_default_not_trailing
 errors/param_default_untyped
+errors_tc/check_length_variable
 errors_tc/const_name_pattern_default
 errors_tc/constant_division_overflow
 errors_tc/diverging_initializer
@@ -36,5 +37,7 @@ errors_tc/param_default_names_local
 errors_tc/param_default_names_param
 errors_tc/polymorphic_recursion_param
 errors_tc/polymorphic_recursion_type_args
+errors_tc/range_index_variable
+errors_tc/slice_pool_const
 errors_tc/slot_pool_const
 tests/recursive_nonfixed_local

@@ -775,6 +775,29 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     let x = ctx.nodes[n];
     let callee = ctx.nodes[x.a];
     let builtin = x.symbol;
+    if builtin <= -16 && builtin >= -18 {
+        let array = c_decay(ctx, c_expression(ctx, callee.a)); let element = element_type(ctx, array.ty);
+        let view = raw_temporary(ctx, "gg_slice"); emit(ctx, str("  ", view, " = ", c_view(ctx, array), ";\n"));
+        let arg = first_child(ctx, n);
+        var message = save_text(ctx, "NULL");
+        if child_count(ctx, n) == 2 {
+            // A given message names where the program asked for the check.
+            let m = ctx.edges[ctx.edges[x.first].next].value; let t = ctx.tokens[ctx.nodes[m].token];
+            message = c_literal(ctx, save_text(ctx, str(t.text, " (", ctx.sources[t.file].path, ":", t.line, ")")));
+        }
+        let result = raw_temporary(ctx, "int64_t");
+        if builtin == -16 {
+            let count = snapshot(ctx, converted(ctx, c_expression(ctx, arg), default_integer(ctx)));
+            emit(ctx, str("  ", result, " = gg_check_length(", count.code, ", ", c_element_size(ctx, element), ", ", message, ");\n"));
+        } else if builtin == -17 {
+            let s = snapshot(ctx, converted(ctx, c_expression(ctx, arg), slice_type(ctx, element, true)));
+            emit(ctx, str("  ", result, " = gg_range_index(", view, ", ", s.code, ", ", c_element_size(ctx, element), ", ", message, ");\n"));
+        } else {
+            let r = c_expression(ctx, arg);
+            emit(ctx, str("  ", result, " = gg_range_index(", view, ", gg_view((void *)", c_reference(ctx, r), ", 1), ", c_element_size(ctx, element), ", \"index_of: the reference is not into this array\");\n"));
+        }
+        return CValue { code: result, ty: x.ty, address: "", stack: "" };
+    }
     if builtin <= -10 && builtin >= -15 && ctx.types[decay(ctx, value_of(ctx, callee.a)).ty].flags == 2 { return c_limited_call(ctx, n); }
     if builtin <= -10 && builtin >= -15 {
         let original = c_expression(ctx, callee.a);
