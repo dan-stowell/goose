@@ -46,3 +46,15 @@ What Goose made easy, forced, or could not express while writing the compiler.
   (`park_control`/`control_destination`): integers in the container, views rebuilt on use. Same
   lesson as above: inside recursion, containers hold indices, never views.
 - A `for` loop's input is evaluated before the loop catches breaks, in both checker and emitter.
+
+## Case functions, variable-mode enums, float text (2026-11-17)
+
+- Tag dispatch (§8.2) is tried when no overload takes the enum argument as is; each case is checked
+  as a call whose dispatched argument is a synthesized payload value. The emitter evaluates every
+  argument once, then switches on the tag.
+- Variable mode (`E..`) is a second T_ENUM (flags 1, element = the fixed E) sharing E's variants;
+  its value is a `uint8_t *` to `[tag][payload packed]`, fitting the storage builder's variable-size
+  machinery (`gg_size_`, data-stack builds). `c_tag`/`c_payload` hide the two layouts from match,
+  dispatch, equality and rendering. An empty payload `V {}` takes no bytes behind the tag.
+- Float text (§3.7) was the last difference on several enum fixtures: shortest round-trip digits
+  (an f32's own), `%g` layout at max(15, digits), `.0` on whole numbers, nan/inf spelled out.

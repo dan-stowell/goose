@@ -38,6 +38,19 @@ fn c_layout_helpers(ctx: Compiler&) {
             }
             emit(ctx, "  return p;\n}\n");
             emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p) { return gg_at_", id, "(p, ", i, ") - p; }\n"));
+        } else if t.kind == T_ENUM {
+            // The tag byte, then exactly its variant's payload.
+            emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p) { switch (*p) {"));
+            var e = t.first;
+            while e >= 0 {
+                let vt = ctx.edges[e].value;
+                if stored_payload(ctx, vt) {
+                    emit(ctx, str(" case ", ctx.types[vt].count, ": return 1 + "));
+                    if ctx.types[vt].size_class == 1 { emit(ctx, str("gg_size_", vt, "(p + 1);")); } else { emit(ctx, str("(int64_t)sizeof(", c_type(ctx, vt), ");")); }
+                }
+                e = ctx.edges[e].next;
+            }
+            emit(ctx, " } return 1; }\n");
         } else if t.kind == T_VARINT {
             emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p) { return gg_uleb_size(p); }\n"));
         } else if t.kind == T_ARRAY && t.flags == 2 {
@@ -74,23 +87,35 @@ fn c_format_helpers(ctx: Compiler&) {
     c_layout_helpers(ctx);
     emit(ctx, "static void gg_quote(gg_reference out,gg_slice text) { int64_t i; unsigned char c; gg_append(out,\"\\\"\",1,1); for(i=0;i<text.len;i++){c=((unsigned char*)text.data)[i]; if(c=='\\\"'||c=='\\\\'){gg_append(out,\"\\\\\",1,1);gg_append(out,&c,1,1);} else if(c=='\\n')gg_append(out,\"\\\\n\",2,1);else if(c=='\\r')gg_append(out,\"\\\\r\",2,1);else if(c=='\\t')gg_append(out,\"\\\\t\",2,1);else gg_append(out,&c,1,1);}gg_append(out,\"\\\"\",1,1);}\n");
     for t, id in ctx.types {
-        if t.kind == T_VOID || t.kind == T_BOTTOM { continue; }
+        if t.kind == T_VOID || t.kind == T_BOTTOM || (t.kind == T_ENUM && t.flags & 1 == 0 && !t.fixed_ok) { continue; }
         emit(ctx, str("static uint8_t gg_eq_", id, "(", c_type(ctx, id), " a, ", c_type(ctx, id), " b);\n"));
         emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a, gg_slice b);\n"));
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value);\n"));
         if t.formatter >= 0 { emit(ctx, str("static void gg_format_", id, "(gg_reference out, ", c_type(ctx, id), " value, int64_t base);\n")); }
-        if is_variant(ctx, id) {
+        if is_variant(ctx, id) && ctx.types[t.element].fixed_ok {
             let owner = c_type(ctx, t.element);
             emit(ctx, str("static ", owner, " gg_wrap_", id, "(", c_type(ctx, id), " v) { ", owner, " e; memset(&e, 0, sizeof(e)); e.tag = ", t.count, ";"));
             if has_payload(ctx, id) { emit(ctx, str(" e.u.v", t.count, " = v;")); } else { emit(ctx, " (void)v;"); }
             emit(ctx, " return e; }\n");
+        }
+        // A variable-mode value read into the fixed mode copies its payload out.
+        if t.kind == T_ENUM && t.flags & 1 != 0 && ctx.types[t.element].fixed_ok {
+            let fixed = c_type(ctx, t.element);
+            emit(ctx, str("static ", fixed, " gg_fix_", id, "(uint8_t *p) { ", fixed, " e; memset(&e, 0, sizeof(e)); e.tag = *p; switch (e.tag) {"));
+            var e = t.first;
+            while e >= 0 {
+                let k = ctx.types[ctx.edges[e].value].count;
+                if stored_payload(ctx, ctx.edges[e].value) { emit(ctx, str(" case ", k, ": memcpy(&e.u.v", k, ", p + 1, sizeof(e.u.v", k, ")); break;")); }
+                e = ctx.edges[e].next;
+            }
+            emit(ctx, " } return e; }\n");
         }
     }
 }
 // Bodies follow the function prototypes, since an overload renders a type.
 fn c_format_bodies(ctx: Compiler&) {
     for t, id in ctx.types {
-        if t.kind == T_VOID || t.kind == T_BOTTOM { continue; }
+        if t.kind == T_VOID || t.kind == T_BOTTOM || (t.kind == T_ENUM && t.flags & 1 == 0 && !t.fixed_ok) { continue; }
         if t.size_class == 1 {
             // Variable-size elements sit back to back: walk them pairwise.
             emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a,gg_slice b) {int64_t i; uint8_t *p=a.data,*q=b.data; if(a.len!=b.len)return 0;for(i=0;i<a.len;i++){if(!gg_eq_", id, "(p,q))return 0;p+=gg_size_", id, "(p);q+=gg_size_", id, "(q);}return 1;}\n"));
@@ -109,11 +134,12 @@ fn c_format_bodies(ctx: Compiler&) {
             }
             emit(ctx, "return 1;\n");
         } else if t.kind == T_ENUM {
-            emit(ctx, "if(a.tag!=b.tag)return 0;\nswitch(a.tag){\n");
+            let a = CValue { code: "a", ty: id }; let b = CValue { code: "b", ty: id };
+            emit(ctx, str("if(", c_tag(ctx, a), "!=", c_tag(ctx, b), ")return 0;\nswitch(", c_tag(ctx, a), "){\n"));
             var e = t.first;
             while e >= 0 {
                 let vt = ctx.edges[e].value;
-                if has_payload(ctx, vt) { emit(ctx, str("case ", ctx.types[vt].count, ": return gg_eq_", vt, "(a.u.v", ctx.types[vt].count, ",b.u.v", ctx.types[vt].count, ");\n")); }
+                if has_payload(ctx, vt) { emit(ctx, str("case ", ctx.types[vt].count, ": return gg_eq_", vt, "(", c_payload(ctx, a, vt, false), ",", c_payload(ctx, b, vt, false), ");\n")); }
                 e = ctx.edges[e].next;
             }
             emit(ctx, "}\nreturn 1;\n");
@@ -126,7 +152,7 @@ fn c_format_bodies(ctx: Compiler&) {
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value) {\n"));
         if t.formatter >= 0 { render_overload(ctx, id); }
         else if t.kind == T_INTEGER { emit(ctx, str(if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(out,value);\n")); }
-        else if t.kind == T_FLOAT { emit(ctx, "gg_float(out,value);\n"); }
+        else if t.kind == T_FLOAT { emit(ctx, if t.bytes == 4 { "gg_float(out,value,1);\n" } else { "gg_float(out,value,0);\n" }); }
         else if t.kind == T_BOOL { emit(ctx, "gg_bool(out,value);\n"); }
         else if t.kind == T_VARINT { emit(ctx, "gg_integer(out,gg_zig_read(value));\n"); }
         else if t.kind == T_REFERENCE {
@@ -135,17 +161,18 @@ fn c_format_bodies(ctx: Compiler&) {
             if ctx.types[t.element].size_class == 1 { target = "value"; }
             emit(ctx, str("gg_render_", t.element, "(out,", target, ");\n"));
         } else if t.kind == T_ENUM {
-            emit(ctx, "switch(value.tag){\n");
+            let value = CValue { code: "value", ty: id };
+            emit(ctx, str("switch(", c_tag(ctx, value), "){\n"));
             var e = t.first;
             while e >= 0 {
                 let vt = ctx.edges[e].value;
                 emit(ctx, str("case ", ctx.types[vt].count, ": "));
-                if has_payload(ctx, vt) { emit(ctx, str("gg_render_", vt, "(out,value.u.v", ctx.types[vt].count, ");")); }
+                if stored_payload(ctx, vt) { emit(ctx, str("gg_render_", vt, "(out,", c_payload(ctx, value, vt, false), ");")); }
                 else { render_constant(ctx, vt); }
                 emit(ctx, " break;\n"); e = ctx.edges[e].next;
             }
             emit(ctx, "}\n");
-        } else if is_variant(ctx, id) && !has_payload(ctx, id) { render_constant(ctx, id); emit(ctx, "\n"); }
+        } else if is_variant(ctx, id) && !stored_payload(ctx, id) { render_constant(ctx, id); emit(ctx, "\n"); }
         else if t.kind == T_STRUCT {
             let name = ctx.tokens[ctx.nodes[t.decl].token].text;
             let prefix = save_text(ctx, str(name, " { "));

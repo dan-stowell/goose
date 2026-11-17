@@ -203,7 +203,37 @@ fn runtime_source() -> const u8[:] {
     static void gg_text(gg_reference out, gg_slice v) { gg_append(out,v.data,v.len,1); }
     static void gg_integer(gg_reference out,int64_t n) { char b[32]; int k=snprintf(b,sizeof b,"%lld",(long long)n);gg_append(out,b,k,1); }
     static void gg_unsigned(gg_reference out,uint64_t n) { char b[32]; int k=snprintf(b,sizeof b,"%llu",(unsigned long long)n);gg_append(out,b,k,1); }
-    static void gg_float(gg_reference out,double n) { char b[64];int k=snprintf(b,sizeof b,"%.15g",n);if(strtod(b,NULL)!=n)k=snprintf(b,sizeof b,"%.17g",n);gg_append(out,b,k,1); }
+    /* The shortest digits that read back to the value of its own type (an f32's
+       as an f32), laid out as %g lays them out at a precision of max(15, digits);
+       a whole number keeps a .0, and nan and inf are spelled here (spec 3.7). */
+    static void gg_float(gg_reference out,double v,int single) {
+        char e[48], dig[24], b[64]; int p, n = 0, x, i, k = 0; char *q;
+        if (v != v) { gg_append(out,"nan",3,1); return; }
+        if (isinf(v)) { if (v > 0) gg_append(out,"inf",3,1); else gg_append(out,"-inf",4,1); return; }
+        if (signbit(v)) { b[k++] = '-'; v = -v; }
+        if (v == 0) { b[k++] = '0'; b[k++] = '.'; b[k++] = '0'; gg_append(out,b,k,1); return; }
+        for (p = 1; p < 17; p++) {
+            double r; snprintf(e, sizeof e, "%.*e", p - 1, v); r = strtod(e, NULL);
+            if (single ? (float)r == (float)v : r == v) break;
+        }
+        snprintf(e, sizeof e, "%.*e", p - 1, v);
+        for (q = e; *q && *q != 'e'; q++) if (*q >= '0' && *q <= '9') dig[n++] = *q;
+        x = atoi(q + 1);
+        while (n > 1 && dig[n - 1] == '0') n--;
+        if (x < -4 || x >= (n > 15 ? n : 15)) {
+            b[k++] = dig[0]; if (n > 1) b[k++] = '.';
+            for (i = 1; i < n; i++) b[k++] = dig[i];
+            k += snprintf(b + k, sizeof b - k, "e%c%02d", x < 0 ? '-' : '+', x < 0 ? -x : x);
+        } else if (x < 0) {
+            b[k++] = '0'; b[k++] = '.';
+            for (i = -1; i > x; i--) b[k++] = '0';
+            for (i = 0; i < n; i++) b[k++] = dig[i];
+        } else {
+            for (i = 0; i < n || i <= x; i++) { if (i == x + 1) b[k++] = '.'; b[k++] = i < n ? dig[i] : '0'; }
+            if (n <= x + 1) { b[k++] = '.'; b[k++] = '0'; }
+        }
+        gg_append(out,b,k,1);
+    }
     static void gg_bool(gg_reference out,uint8_t n) { gg_append(out,n?"true":"false",n?4:5,1); }
     static void gg_write(FILE *file,gg_slice text) { if(text.len && fwrite(text.data,1,(size_t)text.len,file)!=(size_t)text.len)gg_fail("write failed"); }
     static char *gg_cstring(gg_slice path) {

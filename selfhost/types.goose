@@ -31,6 +31,8 @@ struct Type {
     // The user format overload's specialization that renders this type: -2
     // undecided, -1 none (structural rendering).
     formatter: i64 = -2,
+    // An enum usable in fixed mode: every payload is fixed-size.
+    fixed_ok: bool = true,
 }
 struct Field {
     token: i64,
@@ -305,7 +307,9 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
         ty = find_variant(ctx, owner, syntax.token);
         if ty < 0 { error_at(ctx, syntax.token, str("enum ", ctx.tokens[ctx.nodes[ctx.types[owner].decl].token].text, " has no variant named ", ctx.tokens[syntax.token].text)); }
     } else if syntax.tag == N_TYPE_MODE {
-        error_at(ctx, syntax.token, "not implemented yet: variable-mode enums");
+        let base = resolve_type_at(ctx, syntax.a, scope, reference_target);
+        if ctx.types[base].kind != T_ENUM || ctx.types[base].flags & 1 != 0 { error_at(ctx, syntax.token, "only an enum type has a variable mode (T..)"); }
+        ty = varmode_type(ctx, base);
     } else if syntax.tag == N_TYPE_ARRAY {
         let element = resolve_type(ctx, syntax.a, scope);
         var count = -1;
@@ -421,7 +425,8 @@ recursive fn enum_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
         let vt = intern_type(ctx, Type { kind: T_STRUCT, element: id, count: count, decl: v });
         ctx.types[vt].scope = ctx.types[id].scope;
         layout_fields(ctx, vt, v, scope);
-        if ctx.types[vt].size_class > 0 { error_at(ctx, ctx.nodes[v].token, "not implemented yet: variable-size variant payloads"); }
+        if ctx.types[vt].size_class == 2 { error_at(ctx, ctx.nodes[v].token, "not implemented yet: resizable variant payloads"); }
+        if ctx.types[vt].size_class == 1 { ctx.types[id].fixed_ok = false; }
         if ctx.types[vt].first >= 0 && ctx.types[vt].bytes > payload { payload = ctx.types[vt].bytes; }
         let edge = ctx.edges.len; ctx.edges.push(Edge { value: vt });
         if last < 0 { ctx.types[id].first = edge; } else { ctx.edges[last].next = edge; }
@@ -430,7 +435,32 @@ recursive fn enum_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
     }
     var tag = 1; if count > 256 { tag = 2; }
     ctx.types[id].bytes = tag + payload; ctx.types[id].state = 2;
+    for t, i in ctx.types { if t.kind == T_ENUM && t.flags & 1 != 0 && t.element == id { ctx.types[i].first = ctx.types[id].first; } }
     return id;
+}
+// Variable mode (E..) gives each value exactly its variant's bytes: a tag,
+// then the payload packed. It shares its variants with the fixed type E,
+// its element; one named while E is still being laid out (through a
+// reference in a payload) gets them when E is finished.
+fn varmode_type(ctx: Compiler&, base: i64) -> i64 {
+    let id = intern_type(ctx, Type { kind: T_ENUM, element: base, flags: 1, decl: ctx.types[base].decl });
+    if ctx.types[id].state == 0 {
+        ctx.types[id].state = 2; ctx.types[id].size_class = 1; ctx.types[id].bytes = -1;
+        ctx.types[id].first = ctx.types[base].first; ctx.types[id].scope = ctx.types[base].scope;
+        ctx.types[id].template = ctx.types[base].template; ctx.types[id].arguments = ctx.types[base].arguments;
+    }
+    return id;
+}
+fn enum_base(ctx: Compiler&, ty: i64) -> i64 {
+    if ctx.types[ty].kind == T_ENUM && ctx.types[ty].flags & 1 != 0 { return ctx.types[ty].element; }
+    return ty;
+}
+// A variant or an enum in its other mode constructs a new value of the enum.
+fn adapts_enum(ctx: Compiler&, from: i64, to: i64) -> bool {
+    if from == to || ctx.types[to].kind != T_ENUM { return false; }
+    let f = ctx.types[from];
+    if f.kind == T_STRUCT && f.element >= 0 { return f.element == enum_base(ctx, to); }
+    return f.kind == T_ENUM && enum_base(ctx, from) == enum_base(ctx, to) && (ctx.types[to].flags & 1 != 0 || ctx.types[to].fixed_ok);
 }
 // The count is not stored on the type: it is part of the interning key.
 fn enum_tag_bytes(ctx: Compiler&, ty: i64) -> i64 {
@@ -446,6 +476,8 @@ fn find_variant(ctx: Compiler&, ty: i64, token: i64) -> i64 {
 }
 fn is_variant(ctx: Compiler&, ty: i64) -> bool { ctx.types[ty].kind == T_STRUCT && ctx.types[ty].element >= 0 }
 fn has_payload(ctx: Compiler&, ty: i64) -> bool { ctx.nodes[ctx.types[ty].decl].flags & 1 != 0 }
+// Bytes behind the tag in variable mode: an empty payload `V {}` takes none.
+fn stored_payload(ctx: Compiler&, ty: i64) -> bool { ctx.types[ty].first >= 0 }
 recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
     ctx.types[id].state = 1;
     var offset = 0;

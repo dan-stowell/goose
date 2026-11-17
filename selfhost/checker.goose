@@ -220,7 +220,7 @@ fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
     let a = ctx.types[v.ty]; let b = ctx.types[target];
     if v.ty == target { return true; }
     // A variant value constructs its enum; the tag is static.
-    if b.kind == T_ENUM && a.kind == T_STRUCT && a.element == target { return true; }
+    if adapts_enum(ctx, v.ty, target) { return true; }
     if a.kind == T_INTEGER && b.kind == T_INTEGER {
         if v.known { return constant_fits(ctx, a, v.bits, b, target) && constant_fits(ctx, a, v.alt, b, target); }
         return (a.flags & 2 == b.flags & 2 && a.bytes <= b.bytes) || (a.flags & 2 != 0 && b.flags & 2 == 0 && a.bytes < b.bytes);
@@ -415,7 +415,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         let spelled = ctx.tokens[ctx.nodes[ctx.types[owner].decl].token].text;
         if vt < 0 { error_at(ctx, x.token, str("enum ", spelled, " has no variant named ", ctx.tokens[x.token].text)); }
         if has_payload(ctx, vt) { error_at(ctx, x.token, str("variant ", spelled, ".", ctx.tokens[x.token].text, " has a payload; construct it with ", spelled, ".", ctx.tokens[x.token].text, " { ... }")); }
-        ctx.nodes[n].symbol = vt; ctx.nodes[n].flags |= 1024; v.ty = owner;
+        ctx.nodes[n].symbol = vt; ctx.nodes[n].flags |= 1024; v.ty = if ctx.types[owner].fixed_ok { owner } else { varmode_type(ctx, owner) };
     } else if tag == N_MEMBER {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1));
         if element_type(ctx, a.ty) >= 0 && (ctx.tokens[x.token].text == "len" || ctx.tokens[x.token].text == "cap") {
@@ -696,10 +696,15 @@ recursive fn check_match(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
             let vt = ctx.nodes[first_child(ctx, arm)].symbol;
             let variant = ctx.tokens[ctx.nodes[first_child(ctx, arm)].token].text;
             if !has_payload(ctx, vt) { error_at(ctx, ctx.nodes[binder].token, str("variant ", variant, " has no payload to bind")); }
-            if ctx.nodes[arm].flags & 1 != 0 { error_at(ctx, ctx.nodes[binder].token, str("cannot bind the payload of fixed-mode ", ctx.tokens[ctx.nodes[st.decl].token].text, " by reference (§3.5); bind by value: ", variant, " ", ctx.tokens[ctx.nodes[binder].token].text)); }
-            // A payload copy that cannot be written, as a by-value for binding.
-            let b = register_symbol(ctx, ctx.nodes[binder].token, -1, 2, arm, inner, 32);
-            ctx.symbols[b].ty = vt; ctx.symbols[b].state = 2; ctx.symbols[b].root = s.root; ctx.symbols[b].held = s.held;
+            let by_reference = ctx.nodes[arm].flags & 1 != 0;
+            if by_reference && st.flags & 1 == 0 { error_at(ctx, ctx.nodes[binder].token, str("cannot bind the payload of fixed-mode ", ctx.tokens[ctx.nodes[st.decl].token].text, " by reference (§3.5); bind by value: ", variant, " ", ctx.tokens[ctx.nodes[binder].token].text)); }
+            if !by_reference && ctx.types[vt].size_class != 0 { error_at(ctx, ctx.nodes[binder].token, "not implemented yet: a by-value binder of a variable-size payload"); }
+            // A payload copy that cannot be written, as a by-value for binding;
+            // in variable mode &b refers into the payload where it lies.
+            let b = register_symbol(ctx, ctx.nodes[binder].token, -1, 2, arm, inner, if by_reference { 0 } else { 32 });
+            ctx.symbols[b].ty = if by_reference { reference_type(ctx, vt, s.readonly) } else { vt };
+            ctx.symbols[b].state = 2; ctx.symbols[b].root = s.root; ctx.symbols[b].held = s.held;
+            ctx.symbols[b].readonly = by_reference && s.readonly;
             ctx.nodes[binder].symbol = b;
         }
         let body = ctx.nodes[arm].c;
@@ -1071,7 +1076,7 @@ recursive fn check_binding(ctx: Compiler&, n: i64, scope: i64) {
         if ctx.nodes[n].flags & 16 != 0 || ((v.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) && ctx.types[v.ty].size_class > 0) || (ctx.nodes[init].tag == N_UNARY && ctx.tokens[ctx.nodes[init].token].text == "&") { declared = reference_type(ctx, v.ty, v.readonly); }
     }
     if ctx.types[declared].kind == T_REFERENCE { v = raw; }
-    if ctx.types[declared].size_class > 0 && (raw.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) { error_at(ctx, ctx.nodes[init].token, "nonfixed storage is not copied implicitly; use copy or bind by reference"); }
+    if ctx.types[declared].size_class > 0 && !adapts_enum(ctx, decay(ctx, raw).ty, declared) && (raw.place >= 0 || ctx.types[raw.ty].kind == T_REFERENCE) { error_at(ctx, ctx.nodes[init].token, "nonfixed storage is not copied implicitly; use copy or bind by reference"); }
     require_fit(ctx, init, v, declared);
     ctx.symbols[s].ty = declared; ctx.symbols[s].state = 2; ctx.symbols[s].root = v.root;
     ctx.symbols[s].held = v.held;
@@ -1190,7 +1195,7 @@ fn check_result(ctx: Compiler&, n: i64, raw: Value, spec: i64, result: i64, toke
     }
     let target = ctx.nodes[result].ty;
     if ctx.types[target].kind != T_REFERENCE { v = decay(ctx, v); }
-    if ctx.types[target].size_class > 0 && v.place >= 0 && !own_local { error_at(ctx, token, "returning nonfixed storage by value requires an explicit copy"); }
+    if ctx.types[target].size_class > 0 && !adapts_enum(ctx, decay(ctx, v).ty, target) && v.place >= 0 && !own_local { error_at(ctx, token, "returning nonfixed storage by value requires an explicit copy"); }
     let decl = ctx.symbols[ctx.specializations[spec].symbol].decl;
     if ctx.specializations[spec].in_cycle && ctx.nodes[decl].b < 0 && ctx.types[target].kind == T_REFERENCE { error_at(ctx, token, "a recursive cycle needs an explicit reference result type"); }
     if n >= 0 {
@@ -1363,7 +1368,7 @@ recursive fn check_dispatch(ctx: Compiler&, n: i64, scope: i64) -> Value {
             if i == place {
                 let enumerated = decay(ctx, value_of(ctx, arg));
                 let payload = node(ctx, N_NAME, ctx.nodes[arg].token);
-                annotate(ctx, payload, Value { ty: resolve_type(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.symbols[symbol].scope), root: enumerated.root, held: enumerated.held });
+                annotate(ctx, payload, Value { ty: resolve_type(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.symbols[symbol].scope), root: enumerated.root, place: enumerated.place, readonly: enumerated.readonly, held: enumerated.held });
                 arg = payload;
             }
             child(ctx, call, arg);
@@ -1483,7 +1488,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
             let v = if first_default >= 0 && index >= first_default { check_default(ctx, arg, symbol, parameter, caller_scope, expected, ctx.nodes[call].token) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
             require_fit(ctx, arg, v, parameter_destination(ctx, expected, ctx.nodes[decl].flags & 2 != 0));
             ctx.nodes[arg].target = expected;
-            if ctx.types[expected].size_class > 0 && v.place >= 0 { error_at(ctx, ctx.nodes[arg].token, "nonfixed value parameter needs a fresh value or explicit copy"); }
+            if ctx.types[expected].size_class > 0 && !adapts_enum(ctx, decay(ctx, v).ty, expected) && v.place >= 0 { error_at(ctx, ctx.nodes[arg].token, "nonfixed value parameter needs a fresh value or explicit copy"); }
             actual = ctx.edges[actual].next;
         }
         p = ctx.edges[p].next; index++;

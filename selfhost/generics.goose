@@ -196,7 +196,7 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
 // non-generic overload taking that variant type in the argument's place,
 // the other arguments fitting as for any call. The call's b is the place
 // and its c the overloads in variant order (specializations once checked).
-fn case_overload(ctx: Compiler&, selected: i64, call: i64, place: i64, vt: i64) -> i64 {
+fn case_overload(ctx: Compiler&, selected: i64, call: i64, place: i64, vt: i64, varmode: bool) -> i64 {
     var found = -1;
     var c = ctx.symbol_buckets[symbol_hash(ctx, ctx.symbols[selected].scope, ctx.symbols[selected].token)];
     while c >= 0 {
@@ -208,7 +208,8 @@ fn case_overload(ctx: Compiler&, selected: i64, call: i64, place: i64, vt: i64) 
                 if syntax < 0 { applies = false; }
                 else {
                     let declared = resolve_type(ctx, syntax, ctx.symbols[c].scope);
-                    if i == place { applies = declared == vt; }
+                    // A variable-mode payload may also be taken by reference.
+                    if i == place { applies = declared == vt || (varmode && ctx.types[declared].kind == T_REFERENCE && ctx.types[declared].element == vt); }
                     else { applies = fits(ctx, value_of(ctx, ctx.edges[e].value), parameter_destination(ctx, declared, decl.flags & 2 != 0)); }
                 }
                 p = ctx.edges[p].next; e = ctx.edges[e].next; i++;
@@ -227,7 +228,7 @@ fn tag_dispatch(ctx: Compiler&, selected: i64, call: i64) -> bool {
             var cases = -1; var last = -1; var complete = true;
             var v = ctx.types[arg.ty].first;
             while v >= 0 && complete {
-                let found = case_overload(ctx, selected, call, place, ctx.edges[v].value);
+                let found = case_overload(ctx, selected, call, place, ctx.edges[v].value, ctx.types[arg.ty].flags & 1 != 0);
                 if found < 0 { complete = false; }
                 else {
                     let edge = ctx.edges.len; ctx.edges.push(Edge { value: found });

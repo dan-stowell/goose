@@ -117,7 +117,8 @@ fn c_adapt(ctx: Compiler&, v: CValue, target: i64) -> const u8[:] {
     if ctx.types[target].kind == T_REFERENCE { return c_reference(ctx, v); }
     let a = c_decay(ctx, v);
     if ctx.types[target].kind == T_SLICE { return c_view(ctx, a); }
-    if ctx.types[target].kind == T_ENUM && is_variant(ctx, a.ty) { return save_text(ctx, str("gg_wrap_", a.ty, "(", a.code, ")")); }
+    if ctx.types[target].kind == T_ENUM && ctx.types[target].flags & 1 == 0 && is_variant(ctx, a.ty) { return save_text(ctx, str("gg_wrap_", a.ty, "(", a.code, ")")); }
+    if ctx.types[target].kind == T_ENUM && ctx.types[target].flags & 1 == 0 && ctx.types[a.ty].kind == T_ENUM && a.ty != target { return save_text(ctx, str("gg_fix_", a.ty, "(", a.code, ")")); }
     if numeric(ctx, target) { return save_text(ctx, str("((", c_type(ctx, target), ")(", a.code, "))")); }
     if limited_fixed(ctx, target) && a.ty != target { return save_text(ctx, str("gg_limit_", target, "(", c_view(ctx, a), ")")); }
     return a.code;
@@ -202,6 +203,10 @@ recursive fn emit_type(ctx: Compiler&, ty: i64) {
         if e < 0 { emit(ctx, "unsigned char empty;\n"); }
         while e >= 0 { let f = ctx.edges[e].value; emit(ctx, str("  ", c_type(ctx, ctx.fielddefs[f].ty), " f", f, ";\n")); e = ctx.edges[e].next; }
         emit(ctx, "};\n#pragma pack(pop)\n");
+    } else if t.kind == T_ENUM && (t.flags & 1 != 0 || !t.fixed_ok) {
+        // Variable mode is packed bytes; a fixed mode its payloads rule out has no C type.
+        var e = t.first;
+        while e >= 0 { emit_type(ctx, ctx.edges[e].value); e = ctx.edges[e].next; }
     } else if t.kind == T_ENUM {
         // A tag and a union of the payloads; payload-less variants take no room.
         emit(ctx, str("typedef struct gg_type_", ty, " gg_type_", ty, ";\n"));
@@ -275,7 +280,7 @@ fn c_render(ctx: Compiler&, out: CValue, v: CValue) {
         emit(ctx, str("  gg_render_", a.ty, "(", dst, ",", a.code, ");\n"));
     }
     else if t.kind == T_INTEGER { emit(ctx, str("  ", if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(", dst, ", ", a.code, ");\n")); }
-    else if t.kind == T_FLOAT { emit(ctx, str("  gg_float(", dst, ", ", a.code, ");\n")); }
+    else if t.kind == T_FLOAT { emit(ctx, str("  gg_float(", dst, ", ", a.code, ", ", if t.bytes == 4 { "1" } else { "0" }, ");\n")); }
     else if t.kind == T_BOOL { emit(ctx, str("  gg_bool(", dst, ", ", a.code, ");\n")); }
     else if element_type(ctx, a.ty) == integer_type(ctx, 1, true) { emit(ctx, str("  gg_text(", dst, ", ", c_view(ctx, a), ");\n")); }
 }
@@ -474,9 +479,10 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
 // the top of dest.stack: built in place wherever the expression allows.
 recursive fn c_build(ctx: Compiler&, n: i64, dest: CValue) {
     let x = ctx.nodes[n]; let t = ctx.types[dest.ty]; let stack = dest.stack;
-    if x.tag == N_IF || x.tag == N_BLOCK { c_into(ctx, n, dest); return; }
+    if x.tag == N_IF || x.tag == N_BLOCK || x.tag == N_MATCH || x.tag == N_LOOP || x.tag == N_EARLY { c_into(ctx, n, dest); return; }
     if x.tag == N_UNARY && ctx.tokens[x.token].text == "(" { c_build(ctx, x.a, dest); return; }
     if x.tag == N_CALL && x.ty == dest.ty && x.symbol >= 0 { c_into(ctx, n, dest); return; }
+    if t.kind == T_ENUM { c_build_enum(ctx, n, dest); return; }
     if t.kind == T_VARINT {
         let v = snapshot(ctx, converted(ctx, c_expression(ctx, n), default_integer(ctx)));
         emit(ctx, str("  gg_push_zig(", stack, ", ", v.code, ");\n")); return;
@@ -526,13 +532,63 @@ recursive fn c_append_value(ctx: Compiler&, n: i64, ty: i64, stack: const u8[:])
     emit(ctx, str("  gg_push(", stack, ", &", name, ", sizeof(", name, "));\n"));
 }
 
+// A fixed-mode enum is a C struct; a variable-mode one points at its tag
+// byte, its payload packed right behind it.
+fn c_tag(ctx: Compiler&, v: CValue) -> const u8[:] {
+    if ctx.types[v.ty].flags & 1 != 0 { return save_text(ctx, str("(*(uint8_t *)(", v.code, "))")); }
+    return save_text(ctx, str("(", v.code, ").tag"));
+}
+fn c_payload(ctx: Compiler&, v: CValue, vt: i64, by_reference: bool) -> const u8[:] {
+    let k = ctx.types[vt].count;
+    if ctx.types[v.ty].flags & 1 == 0 {
+        if !has_payload(ctx, vt) { return save_text(ctx, str("(", c_type(ctx, vt), "){0}")); }
+        return save_text(ctx, str("(", v.code, ").u.v", k));
+    }
+    if ctx.types[vt].size_class == 1 { return save_text(ctx, str("((uint8_t *)(", v.code, ") + 1)")); }
+    if by_reference { return save_text(ctx, str("((", c_type(ctx, vt), " *)((uint8_t *)(", v.code, ") + 1))")); }
+    if !stored_payload(ctx, vt) { return save_text(ctx, str("(", c_type(ctx, vt), "){0}")); }
+    return save_text(ctx, str("(*(", c_type(ctx, vt), " *)((uint8_t *)(", v.code, ") + 1))"));
+}
+fn push_tag(ctx: Compiler&, stack: const u8[:], vt: i64) {
+    emit(ctx, str("  gg_push(", stack, ", &(uint8_t){", ctx.types[vt].count, "}, 1);\n"));
+}
+// Builds a variable-mode enum at the top of dest's stack: from a variant
+// literal or value, a payload-less constant, or the enum in either mode.
+recursive fn c_build_enum(ctx: Compiler&, n: i64, dest: CValue) {
+    let x = ctx.nodes[n]; let stack = dest.stack;
+    if x.tag == N_CONSTRUCT && is_variant(ctx, x.ty) {
+        push_tag(ctx, stack, x.ty);
+        if stored_payload(ctx, x.ty) { c_append_value(ctx, n, x.ty, stack); }
+        return;
+    }
+    if x.tag == N_MEMBER && x.flags & 1024 != 0 { push_tag(ctx, stack, x.symbol); return; }
+    let v = c_decay(ctx, c_expression(ctx, n));
+    if v.ty == dest.ty { emit(ctx, str("  gg_push(", stack, ", ", v.code, ", (size_t)gg_size_", dest.ty, "(", v.code, "));\n")); return; }
+    if is_variant(ctx, v.ty) {
+        push_tag(ctx, stack, v.ty);
+        if ctx.types[v.ty].size_class == 1 { emit(ctx, str("  gg_push(", stack, ", ", v.code, ", (size_t)gg_size_", v.ty, "(", v.code, "));\n")); }
+        else if stored_payload(ctx, v.ty) { let s = snapshot(ctx, v); emit(ctx, str("  gg_push(", stack, ", &", s.code, ", sizeof(", s.code, "));\n")); }
+        return;
+    }
+    // The fixed mode: the tag selects how many payload bytes follow.
+    let s = snapshot(ctx, v);
+    emit(ctx, str("  switch ((", s.code, ").tag) {\n"));
+    var e = ctx.types[v.ty].first;
+    while e >= 0 {
+        let vt = ctx.edges[e].value;
+        emit(ctx, str("  case ", ctx.types[vt].count, ":")); push_tag(ctx, stack, vt);
+        if stored_payload(ctx, vt) { emit(ctx, str("  gg_push(", stack, ", &(", s.code, ").u.v", ctx.types[vt].count, ", sizeof((", s.code, ").u.v", ctx.types[vt].count, "));\n")); }
+        emit(ctx, "  break;\n"); e = ctx.edges[e].next;
+    }
+    emit(ctx, "  }\n");
+}
 // An enum match switches on the tag and copies a bound payload; an integer
 // match tests its arms in order, each pattern a value or a half-open range.
 recursive fn c_match(ctx: Compiler&, n: i64, dest: CValue) {
     let x = ctx.nodes[n];
     let s = snapshot(ctx, c_decay(ctx, c_expression(ctx, x.a)));
     let enumerated = ctx.types[s.ty].kind == T_ENUM;
-    if enumerated { emit(ctx, str("  switch ((", s.code, ").tag) {\n")); }
+    if enumerated { emit(ctx, str("  switch (", c_tag(ctx, s), ") {\n")); }
     var e = x.first; var first = true;
     while e >= 0 {
         let arm = ctx.nodes[ctx.edges[e].value];
@@ -541,7 +597,7 @@ recursive fn c_match(ctx: Compiler&, n: i64, dest: CValue) {
             var p = arm.first;
             while p >= 0 { emit(ctx, str("  case ", ctx.types[ctx.nodes[ctx.edges[p].value].symbol].count, ":")); p = ctx.edges[p].next; }
             emit(ctx, " {\n");
-            if arm.b >= 0 { emit(ctx, str("  ", c_symbol(ctx, ctx.nodes[arm.b].symbol), " = (", s.code, ").u.v", ctx.types[ctx.nodes[first_child(ctx, ctx.edges[e].value)].symbol].count, ";\n")); }
+            if arm.b >= 0 { emit(ctx, str("  ", c_symbol(ctx, ctx.nodes[arm.b].symbol), " = ", c_payload(ctx, s, ctx.nodes[first_child(ctx, ctx.edges[e].value)].symbol, arm.flags & 1 != 0), ";\n")); }
             c_into(ctx, arm.c, dest);
             emit(ctx, "  break; }\n");
         } else {
@@ -607,6 +663,11 @@ recursive fn c_limited_call(ctx: Compiler&, n: i64) -> CValue {
     }
     return no_c_value(ctx);
 }
+fn dispatched_parameter(ctx: Compiler&, params: i64, place: i64) -> i64 {
+    var p = ctx.nodes[params].first;
+    for i in place { p = ctx.edges[p].next; }
+    return p;
+}
 // Every argument is evaluated once, then the tag selects the case, which is
 // given the payload in the dispatched argument's place.
 recursive fn c_dispatch(ctx: Compiler&, n: i64) -> CValue {
@@ -625,7 +686,7 @@ recursive fn c_dispatch(ctx: Compiler&, n: i64) -> CValue {
         e = ctx.edges[e].next; p = ctx.edges[p].next; i++;
     }
     let ret = if first.result != 0 { temporary(ctx, first.result) } else { "" };
-    emit(ctx, str("  switch ((", scrutinee.code, ").tag) {\n"));
+    emit(ctx, str("  switch (", c_tag(ctx, scrutinee), ") {\n"));
     var cases = x.c; var variant = ctx.types[scrutinee.ty].first;
     while cases >= 0 {
         let id = ctx.edges[cases].value; let vt = ctx.edges[variant].value;
@@ -635,7 +696,7 @@ recursive fn c_dispatch(ctx: Compiler&, n: i64) -> CValue {
         emit_ref(ctx, "gg_function_", id); emit(ctx, "(");
         for k in argument_mark..arguments.len {
             if k > argument_mark { emit(ctx, ", "); }
-            if k - argument_mark == x.b { emit(ctx, if has_payload(ctx, vt) { save_text(ctx, str("(", scrutinee.code, ").u.v", ctx.types[vt].count)) } else { save_text(ctx, str("(", c_type(ctx, vt), "){0}")) }); }
+            if k - argument_mark == x.b { emit(ctx, c_payload(ctx, scrutinee, vt, ctx.types[ctx.symbols[ctx.nodes[ctx.edges[dispatched_parameter(ctx, spec.parameters, x.b)].value].symbol].ty].kind == T_REFERENCE)); }
             else { emit(ctx, arguments[k]); }
         }
         if argument_mark < arguments.len { emit(ctx, ", "); }

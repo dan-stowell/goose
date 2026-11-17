@@ -3,6 +3,7 @@ append_references
 array_length_boundaries
 array_length_overflow_runtime
 bce_function_state
+branch_roots
 byte_run_equality
 byteview_global_lists
 byteview_global_stores
@@ -12,14 +13,23 @@ call_array_capacity
 call_location
 cnames
 codegen_implicit_callees
+const_global_folding
 continue_restores
 cycle_holder_results
 cycle_threaded_before_join
 cycle_threaded_results
 cycle_threaded_slices
+dispatch_whole_adt_int_float
 diverging_values
+extern_libm
+extern_symbol_deprecated
 fat_held
+fieldless_variant_values
 fixed_array_bulk_fill
+float_conversions_unchecked
+float_equality
+float_literal_spelling
+for_sequence_shrinks
 format_hook_provenance
 generic_shadowing
 growshrink_literal_views
@@ -34,6 +44,7 @@ limited_assign_sources
 limited_string_literals
 local_name_suffixes
 match_overlaps
+match_variant_lists
 namespace_comparisons
 namespace_type_precedence
 namespaces_lib
@@ -51,6 +62,7 @@ print_variable_size_elements
 reassoc_discarded_value
 rebind_chain_loop
 recursive_loop_walk
+redundant_casts
 reftops_call_sync
 rendered_pools
 resize_negative
