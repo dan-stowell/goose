@@ -14,21 +14,22 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 64px; }
+main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
 h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
-h2 { font-size: 18px; margin: 40px 0 6px; }
-h3 { font-size: 15px; margin: 22px 0 6px; color: var(--text-2); font-weight: 600; }
-p { margin: 6px 0; color: var(--text-2); max-width: 80ch; }
+h2 { font-size: 19px; margin: 44px 0 6px; }
+h3 { font-size: 15px; margin: 20px 0 6px; color: var(--text-2); font-weight: 600; }
+p { margin: 6px 0; color: var(--text-2); max-width: 86ch; }
 .sub { color: var(--muted); font-size: 13px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-top: 14px; }
-.tldr { font-size: 17px; color: var(--text); }
-.tldr li { margin: 4px 0; }
+.tldr { font-size: 17px; color: var(--text); padding-left: 20px; margin: 4px 0; }
+.tldr li { margin: 5px 0; }
 .tldr b { font-variant-numeric: tabular-nums; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; font-size: 13px; color: var(--text-2); }
 .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 4px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 10px 0 4px; }
+.seg { display: inline-flex; }
 .seg button { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--line); padding: 4px 10px;
-  font: inherit; font-size: 13px; cursor: pointer; }
+  font: inherit; font-size: 13px; cursor: pointer; margin-left: -1px; }
 .seg button:first-child { border-radius: 6px 0 0 6px; } .seg button:last-child { border-radius: 0 6px 6px 0; }
 .seg button.on { background: #3a3935; color: var(--text); }
 .scroll { overflow-x: auto; }
@@ -38,56 +39,78 @@ th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--lin
 th { color: var(--muted); font-weight: 500; }
 td:first-child, th:first-child { text-align: left; }
 td.name { color: var(--text); } td.member { color: var(--text-2); padding-left: 22px; }
-.bar { display: inline-block; height: 10px; border-radius: 0 3px 3px 0; vertical-align: -1px; }
+td.good { color: #5fd39a; } td.bad { color: var(--mem); }
+.bar { display: inline-block; height: 10px; vertical-align: -1px; }
 #tip { position: fixed; pointer-events: none; background: #2b2a27; border: 1px solid #4a4943; border-radius: 8px;
-  padding: 8px 10px; font-size: 12px; line-height: 1.45; color: var(--text); display: none; z-index: 10; max-width: 320px;
+  padding: 8px 10px; font-size: 12px; line-height: 1.45; color: var(--text); display: none; z-index: 10; max-width: 340px;
   box-shadow: 0 4px 16px rgba(0,0,0,.5); }
 #tip .k { color: var(--muted); }
 .placeholder { color: var(--muted); font-style: italic; }
 code { font-family: var(--mono); font-size: 12.5px; color: var(--text-2); }
-a { color: #7fb2f0; }
-svg text { fill: var(--text-2); font-size: 12px; }
+svg text { fill: var(--text-2); font-size: 12px; font-family: system-ui, sans-serif; }
+.nums { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 8px 0 10px; }
+.num { background: var(--surface-2); border-radius: 8px; padding: 8px 10px; }
+.num .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.num .k { font-size: 12px; color: var(--muted); }
+.num .d { font-size: 12px; color: #5fd39a; }
 </style>
 </head>
 <body>
 <main>
-<h1>Bytes moving through the caches: Goose front ends compiling W1</h1>
+<h1>Bytes moving through the caches: Goose compiling Goose</h1>
 <div class="sub" id="meta"></div>
 
 <div class="card">
   <h3 style="margin-top:0">TL;DR</h3>
   <ul class="tldr" id="tldr"></ul>
-  <h3>The ladder</h3>
-  <div id="ladder" class="scroll"></div>
 </div>
 
-<h2>The address space over a compile</h2>
-<p>Each strip is one data structure of the self-hosted compiler (each Goose table lives on a data stack of its own),
-drawn as the bytes it actually used, stacked top to bottom; time runs left to right. Every pixel is a group of memory accesses, colored by
-the cache level that served them in the simulation, and brighter where there are more of them.</p>
+<h2>The ladder over time</h2>
+<p>Source to program, per rung, for each run of <code>research/demo --ladder</code> (median of its runs; whiskers are min and max).
+W1: front end + C compiler (stock fast: front end, TinyCC and the run, in one process). W2: wall time of the fixture suite, 8 jobs.
+A hollow mark is a rung whose outputs did not all check.</p>
+<div id="ladder" class="card scroll"></div>
+
+<h2>Before and after: the self-hosted front end</h2>
+<p>Each strip is one data structure of the self-hosted compiler (every Goose table is on a data stack of its own), drawn as the bytes
+it used; time runs left to right on one scale for both, so a shorter picture is a faster compile. Every pixel is a group of accesses,
+colored by the cache level that served them in the simulation, brighter where there are more. Before, the checker scanned the whole
+symbol table for each name: a green wedge growing with the table. After, a (scope, name) hash looks in one bucket.</p>
 <div class="controls">
   <div class="legend" id="legend"></div>
   <span style="flex:1"></span>
-  <div class="seg" id="mode"><button data-m="all" class="on">every access</button><button data-m="miss">misses only (L2, L3, memory)</button></div>
+  <label class="sub">after compiles
+    <select id="aftersel" style="background:var(--surface-2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 6px;font:inherit;font-size:13px">
+      <option value="fe_after_on_before">the before selfhost (like for like)</option>
+      <option value="fe_after">its own selfhost</option>
+    </select></label>
+  <div class="seg" id="scale"><button data-v="shared" class="on">one time scale</button><button data-v="own">each its own length</button></div>
+  <div class="seg" id="mode"><button data-v="all" class="on">every access</button><button data-v="miss">misses only</button></div>
 </div>
-<div id="strips"></div>
+<div id="ba"></div>
+
+<h2>The C compiler is where the seconds are</h2>
+<p>gcc's cc1 at -O2 compiling the C each front end wrote for W1 (cc1 is stripped, so its time is one stage; its memory is
+its machine stack, the heap where GCC keeps trees and RTL, and its image).</p>
+<div id="cc1nums"></div>
+<div id="cc1"></div>
 
 <h2>Bytes moved per stage</h2>
-<p>Bytes brought into L1 from each level (64 bytes per line filled), per stage, for both front ends on the same input.
-The bars share one scale. Bold numbers on the left are L1 hits, which move nothing.</p>
+<p>Bytes brought into L1 from each level (64 bytes per line filled), per stage. One scale for all front ends.
+Bold numbers on the left are L1 hits, which move nothing.</p>
 <div id="stagebars" class="card scroll"></div>
 <div id="measured" class="card scroll"></div>
 
-<h2>Where the self-hosted compiler's bytes go</h2>
-<p>Every access of the whole compile, by data structure (exact counts, not sampled).</p>
+<h2>Where the self-hosted compiler's bytes go, before and after</h2>
+<p>Every access of the whole compile by data structure (exact counts, not sampled), on the same input.</p>
 <div id="regions" class="card scroll"></div>
 
 <h2>How this was measured</h2>
-<p>Hardware counters (perf, AMD Zen 4 <code>ls_dmnd_fills_from_sys.*</code>, 5 runs) give real totals; a Valgrind tool,
-<code>research/viz/trace/bytemove.c</code>, replays every load and store through a model of this CPU's caches
+<p>Hardware counters (perf, Zen 4 <code>ls_dmnd_fills_from_sys.*</code>, 5 interleaved runs) give real totals and seconds; a Valgrind
+tool, <code>research/viz/trace/bytemove.c</code>, replays every load and store through a model of this CPU's caches
 (L1 32 KB 8-way, L2 1 MB 8-way, L3 32 MB 16-way victim cache, 64-byte lines, LRU, no prefetcher) and records which level served it.
-The simulation agrees with cachegrind on L1 misses to within 0.1% and with the counters to within the prefetchers' share.
-Details and evidence: <code>research/viz/METHOD.md</code>. Regenerate: <code>research/viz/trace/run.sh</code>.</p>
+It matches cachegrind's L1 misses to 0.03% and the counters to within the prefetchers' share. Evidence: <code>research/viz/METHOD.md</code>.
+Regenerate everything: <code>research/viz/regen.sh</code>.</p>
 </main>
 <div id="tip"></div>
 <script>
@@ -97,161 +120,224 @@ const css = getComputedStyle(document.documentElement);
 const LCOL = ['--l1', '--l2', '--l3', '--mem'].map(v => css.getPropertyValue(v).trim());
 const RGB = LCOL.map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
 const BG = [26, 26, 25];
-const fmt = (n, d = 1) => n >= 1e9 ? (n / 1e9).toFixed(d) + ' G' : n >= 1e6 ? (n / 1e6).toFixed(d) + ' M' : n >= 1e3 ? (n / 1e3).toFixed(d) + ' K' : String(Math.round(n));
-const fmtB = n => n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? (n / 1e3).toFixed(0) + ' KB' : n + ' B';
+const RUNG_COL = { 'stock optimized': '#3987e5', 'stock fast': '#199e70', 'self-hosted': '#c98500', 'ours': '#e66767' };
+const fmt = (n, d = 1) => n == null ? '–' : Math.abs(n) >= 1e9 ? (n / 1e9).toFixed(d) + ' G' : Math.abs(n) >= 1e6 ? (n / 1e6).toFixed(d) + ' M' : Math.abs(n) >= 1e3 ? (n / 1e3).toFixed(d) + ' K' : String(Math.round(n));
+const fmtB = n => n == null ? '–' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(2) + ' MB' : n >= 1e3 ? (n / 1e3).toFixed(0) + ' KB' : Math.round(n) + ' B';
+const fmtS = s => s == null ? '–' : s >= 1 ? s.toFixed(2) + ' s' : (s * 1000).toFixed(0) + ' ms';
 const tip = document.getElementById('tip');
 function showTip(e, html) { tip.innerHTML = html; tip.style.display = 'block';
   const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
   tip.style.left = x + 'px'; tip.style.top = y + 'px'; }
 function hideTip() { tip.style.display = 'none'; }
+function sum4(o) { const t = [0, 0, 0, 0]; for (const k in o) for (let i = 0; i < 4; i++) t[i] += o[k][i]; return t; }
+function totals(t) { const a = [0, 0, 0, 0]; for (const s in t.stage_totals) t.stage_totals[s].acc.forEach((v, i) => a[i] += v); return a; }
+const fills = t => { const a = totals(t); return a[1] + a[2] + a[3]; };
+const J = (COUNTERS && COUNTERS.jobs) || {};
+const med = (job, mode, ev) => J[job]?.[mode]?.[ev]?.[1];
+const secs = (job, mode) => { const v = J[job]?.[mode]?.duration_time; return v ? v.map(x => x / 1e9) : null; };
+const C = COMPARE || {};
+const ratio = (a, b) => a && b ? (a / b >= 10 ? (a / b).toFixed(0) : (a / b).toFixed(1)) + 'x' : '–';
 
 document.getElementById('meta').textContent =
-  `Built ${META.built} from commit ${META.commit}. W1: selfhost/main.goose and its 13 modules, 3,321 lines. Generated by research/viz/build.py from real runs.`;
+  `Built ${META.built} from commit ${META.commit}. Before = ${C.before || '?'}, after = ${C.after || '?'}. Input W1: selfhost/main.goose and its modules. Generated by research/viz/regen.sh from real runs.`;
 document.getElementById('legend').innerHTML = LEVELS.map((l, i) =>
   `<span><span class="sw" style="background:${LCOL[i]}"></span>${l === 'memory' ? 'memory (DRAM)' : l}</span>`).join('');
 
-// ---------------------------------------------------------------- TL;DR + ladder
-function sum4(o) { const t = [0, 0, 0, 0]; for (const k in o) for (let i = 0; i < 4; i++) t[i] += o[k][i]; return t; }
-const T = Object.fromEntries(TRACES.map(t => [t.kind, t]));
-const tl = [];
-if (LADDER.length) {
-  const by = {};
-  for (const r of LADDER) { (by[r.workload] ??= {})[r.rung] = (by[r.workload][r.rung] || 0) + r.median; }
-  for (const w in by) tl.push(`<li>${w}: ` + Object.entries(by[w]).map(([r, s]) => `${r} <b>${s.toFixed(2)} s</b>`).join(', ') + ' (median, all stages)</li>');
-}
-if (T.goose && T.cpp) {
-  const tot = t => { const a = [0, 0, 0, 0]; for (const s in t.stage_totals) t.stage_totals[s].acc.forEach((v, i) => a[i] += v); return a; };
-  const g = tot(T.goose), c = tot(T.cpp);
-  const gm = (g[1] + g[2] + g[3]) * 64, cm = (c[1] + c[2] + c[3]) * 64;
-  tl.push(`<li>Compiling W1 to C, the self-hosted front end brings <b>${fmtB(gm)}</b> into L1 from the levels below; the C++ front end brings <b>${fmtB(cm)}</b> (<b>${(gm / cm).toFixed(0)}x</b> less), for ${fmt(T.goose.c_bytes_out)}B and ${fmt(T.cpp.c_bytes_out)}B of C out.</li>`);
-  const ch = T.goose.stage_totals.check;
-  if (ch) tl.push(`<li>The checker is <b>${(100 * ch.acc.reduce((a, b) => a + b) / g.reduce((a, b) => a + b)).toFixed(0)}%</b> of the self-hosted compiler's accesses and <b>${(100 * (ch.acc[1] + ch.acc[2] + ch.acc[3]) / (g[1] + g[2] + g[3])).toFixed(0)}%</b> of its L1 misses.</li>`);
-  const mem = [];
-  for (const r of T.goose.regions) for (const [m, v] of r.members) mem.push([m, v[1] + v[2] + v[3]]);
-  mem.sort((a, b) => b[1] - a[1]);
-  const all = g[1] + g[2] + g[3];
-  tl.push(`<li>Most of those misses are rereads of small tables bigger than L1: ` + mem.slice(0, 4).map(([m, v]) => `<b>${m}</b> ${(100 * v / all).toFixed(0)}%`).join(', ') + `. They come back from L2, not memory: whole-table scans, not scattered sparks.</li>`);
-}
-if (COUNTERS) {
-  const s = COUNTERS.modes.sh2?.emit, c = COUNTERS.modes.cpp?.emit;
-  if (s && c) tl.push(`<li>Measured on the hardware (median of 5): self-hosted <b>${(s.duration_time[1] / 1e6).toFixed(0)} ms</b>, ${fmt(s['ls_dmnd_fills_from_sys.local_l2'][1])} L1 fills from L2; C++ <b>${(c.duration_time[1] / 1e6).toFixed(0)} ms</b>, ${fmt(c['ls_dmnd_fills_from_sys.local_l2'][1])}.</li>`);
-}
-if (!LADDER.length) tl.push('<li class="placeholder">The ladder (source to running program, per rung) appears here once research/runs/*.json exist.</li>');
-document.getElementById('tldr').innerHTML = tl.join('');
-if (LADDER.length) {
-  document.getElementById('ladder').innerHTML = '<table><tr><th>workload</th><th>rung</th><th>stage</th><th>runs</th><th>min s</th><th>median s</th><th>max s</th><th>bytes out</th><th>peak RSS</th><th>check</th></tr>' +
-    LADDER.map(r => `<tr><td>${r.workload}</td><td>${r.rung}</td><td>${r.stage}</td><td>${r.n}</td><td>${r.min.toFixed(3)}</td><td>${r.median.toFixed(3)}</td><td>${r.max.toFixed(3)}</td><td>${r.bytes_out != null ? fmtB(r.bytes_out) : ''}</td><td>${r.peak_rss_kb ? fmtB(r.peak_rss_kb * 1024) : ''}</td><td>${r.ok ? 'ok' : 'FAIL'} ${r.check || ''}</td></tr>`).join('') + '</table>';
-} else document.getElementById('ladder').innerHTML = '<p class="placeholder">No ladder runs yet (research/runs/*.json).</p>';
+// ---------------------------------------------------------------- TL;DR
+(function () {
+  const tl = [];
+  const fb = TR.fe_before, fa = TR.fe_after_on_before, fo = TR.fe_after;
+  if (C.before_c) tl.push(`<li>The self-hosted compiler's C for W1: <b>${fmtB(C.before_c)} → ${fmtB(C.after_c)}</b> (each on its own source); on the same input, <b>${fmtB(C.before_c)} → ${fmtB(C.after_on_before_c)}</b>.</li>`);
+  const gb = secs('gcc_before', 'cc'), ga = secs('gcc_after', 'cc');
+  if (gb && ga) tl.push(`<li>gcc -O2 on that C: <b>${fmtS(gb[1])} → ${fmtS(ga[1])}</b> (median of ${COUNTERS.runs}; ${fmt(med('gcc_before', 'cc', 'instructions'))} → ${fmt(med('gcc_after', 'cc', 'instructions'))} instructions). That is where W1's seconds are.</li>`);
+  const sb = secs('fe_before', 'emit'), sa = secs('fe_after_on_before', 'emit'), so = secs('fe_after', 'emit'), cpp = secs('cpp_before', 'emit');
+  if (sb && sa) tl.push(`<li>Self-hosted front end, same input: <b>${fmtS(sb[1])} → ${fmtS(sa[1])}</b>; ${fmt(med('fe_before', 'emit', 'instructions'))} → ${fmt(med('fe_after_on_before', 'emit', 'instructions'))} instructions; L1 fills from L2 <b>${fmt(med('fe_before', 'emit', 'ls_dmnd_fills_from_sys.local_l2'))} → ${fmt(med('fe_after_on_before', 'emit', 'ls_dmnd_fills_from_sys.local_l2'))}</b>${cpp ? ` (the C++ front end: ${fmtS(cpp[1])})` : ''}.</li>`);
+  if (fb && fa) tl.push(`<li>In the simulation, bytes into L1 from below: <b>${fmtB(fills(fb) * 64)} → ${fmtB(fills(fa) * 64)}</b> (${ratio(fills(fb), fills(fa))} fewer); the symbol and scope scans that were most of it are gone.</li>`);
+  const last = HISTORY.at(-1);
+  if (last) {
+    const g = w => last.rows.filter(r => r.workload === w).map(r => `${r.rung} <b>${fmtS(r.median)}</b>${r.ok ? '' : ' (not all outputs check)'}`).join(', ');
+    tl.push(`<li>Ladder at ${last.commit} (${last.utc.slice(0, 16).replace('T', ' ')}): W1 ${g('W1')}.</li>`);
+    tl.push(`<li>W2 (fixture suite, wall): ${g('W2')}.</li>`);
+  } else tl.push('<li class="placeholder">No ladder runs yet (research/runs/*.json).</li>');
+  document.getElementById('tldr').innerHTML = tl.join('');
+})();
+
+// ---------------------------------------------------------------- ladder over time
+(function () {
+  const host = document.getElementById('ladder');
+  if (!HISTORY.length) { host.innerHTML = '<p class="placeholder">No ladder runs yet.</p>'; return; }
+  const W = Math.max(host.clientWidth - 34, 640);
+  let s = '';
+  for (const wl of ['W1', 'W2']) {
+    const rungs = [...new Set(HISTORY.flatMap(h => h.rows.filter(r => r.workload === wl).map(r => r.rung)))];
+    if (!rungs.length) continue;
+    const H = 210, L = 64, R = 170, T = 14, B = 40, PW = W - L - R, PH = H - T - B;
+    const ymax = Math.max(...HISTORY.flatMap(h => h.rows.filter(r => r.workload === wl).map(r => r.max))) * 1.1;
+    const n = HISTORY.length, xs = i => L + (n === 1 ? PW / 2 : i / (n - 1) * PW), ys = v => T + PH - v / ymax * PH;
+    s += `<h3 style="margin-top:${wl === 'W1' ? 0 : 18}px">${wl === 'W1' ? 'W1: the compiler compiling itself' : 'W2: the fixture suite'}</h3><svg width="${W}" height="${H}">`;
+    for (let i = 0; i <= 4; i++) { const v = ymax * i / 4, y = ys(v);
+      s += `<line x1="${L}" x2="${L + PW}" y1="${y}" y2="${y}" stroke="#2c2b28"/><text x="${L - 8}" y="${y + 4}" text-anchor="end" style="fill:var(--muted)">${v.toFixed(v < 10 ? 1 : 0)} s</text>`; }
+    HISTORY.forEach((h, i) => s += `<text x="${xs(i)}" y="${H - B + 18}" text-anchor="middle" style="fill:var(--muted)">${h.commit}</text><text x="${xs(i)}" y="${H - B + 32}" text-anchor="middle" style="fill:var(--muted);font-size:11px">${h.utc.slice(5, 16).replace('T', ' ')}</text>`);
+    rungs.forEach((rung, ri) => {
+      const col = RUNG_COL[rung] || '#9085e9';
+      const pts = HISTORY.map((h, i) => [i, h.rows.find(r => r.workload === wl && r.rung === rung)]).filter(p => p[1]);
+      if (pts.length > 1) s += `<polyline fill="none" stroke="${col}" stroke-width="2" points="${pts.map(([i, r]) => xs(i) + ',' + ys(r.median)).join(' ')}"/>`;
+      const off = (ri - (rungs.length - 1) / 2) * 10;
+      for (const [i, r] of pts) {
+        const x = xs(i) + (n === 1 ? off : 0);
+        s += `<line x1="${x}" x2="${x}" y1="${ys(r.min)}" y2="${ys(r.max)}" stroke="${col}" stroke-width="2"/>`;
+        s += `<circle cx="${x}" cy="${ys(r.median)}" r="5" fill="${r.ok ? col : 'var(--surface)'}" stroke="${col}" stroke-width="2"><title>${rung} at ${HISTORY[i].commit}: median ${fmtS(r.median)} (${fmtS(r.min)}–${fmtS(r.max)}, ${r.n} runs)${r.ok ? '' : ' — not all outputs check: ' + r.check.join('; ')}</title></circle>`;
+      }
+      const lastp = pts.at(-1);
+      if (lastp) s += `<text x="${L + PW + 14}" y="${T + 14 + ri * 18}" style="fill:${col}">● <tspan style="fill:var(--text-2)">${rung} ${fmtS(lastp[1].median)}</tspan></text>`;
+    });
+    s += '</svg>';
+  }
+  const last = HISTORY.at(-1);
+  s += `<h3>Latest run: ${last.commit}, ${last.utc.slice(0, 19).replace('T', ' ')} UTC, <span class="sub">${last.uptime}</span></h3><table><tr><th>workload</th><th>rung</th><th>runs</th><th>min</th><th>median</th><th>max</th><th style="text-align:left">check</th></tr>` +
+    last.rows.map(r => `<tr><td>${r.workload}</td><td>${r.rung}</td><td>${r.n}</td><td>${fmtS(r.min)}</td><td>${fmtS(r.median)}</td><td>${fmtS(r.max)}</td><td style="text-align:left" class="${r.ok ? 'good' : 'bad'}">${r.ok ? 'ok' : 'FAIL'} ${r.check.join('; ')}</td></tr>`).join('') + '</table>';
+  host.innerHTML = s;
+})();
 
 // ---------------------------------------------------------------- strips
-let MODE = 'all';
-const STAGE_TONE = { start: '#2a2a27', lex: '#3b3a36', parse: '#33322e', check: '#2a2a27', optimize: '#33322e', emit: '#3b3a36', write: '#2a2a27' };
+const REGION_ORDER = ['source text', 'tokens', 'nodes + edges', 'types + symbols', 'checker tables', 'emitter tables', 'C text out', 'temporaries', 'C stack', 'C stacks', 'heap', 'binary + libraries', 'binary, libc, heap', 'other'];
+const STAGE_TONE = { start: '#2a2a27', lex: '#3b3a36', parse: '#33322e', check: '#2a2a27', optimize: '#33322e', emit: '#3b3a36', write: '#2a2a27', 'cc1 -O2': '#2a2a27' };
+let MODE = 'all', SCALE = 'shared';
 function stageAt(t, f) { for (const s of t.stage_segments) if (f >= s[1] && f < s[2]) return s[0]; return t.stage_segments.at(-1)?.[0]; }
-function stripHeight(r) { return Math.max(40, Math.min(96, 22 + 9 * Math.log2(r.chunks + 1))); }
 
-function drawTrace(t, host) {
-  const wrap = document.createElement('div'); wrap.className = 'card';
-  const ins = t.instructions, acc = t.accesses;
-  wrap.innerHTML = `<h3 style="margin-top:0">${t.name}</h3><p class="sub">${fmt(acc)} data accesses, ${fmt(ins)} instructions, ${fmtB(t.c_bytes_out)} of C written; one access in ${t.sample_rate} drawn.</p>`;
-  const sc = document.createElement('div'); sc.className = 'scroll'; wrap.appendChild(sc);
-  const cv = document.createElement('canvas'); sc.appendChild(cv); host.appendChild(wrap);
-  const LW = 190, TOP = 30, BOT = 44, GAP = 6;
-  const regs = t.regions.filter(r => r.cells.length);
-  const heights = regs.map(stripHeight);
-  const H = TOP + heights.reduce((a, b) => a + b + GAP, 0) + BOT;
-  const lookup = regs.map(r => { const m = new Map(); for (let i = 0; i < r.cells.length; i += 6) m.set(r.cells[i] * t.ybins + r.cells[i + 1], r.cells.slice(i + 2, i + 6)); return m; });
-  // global brightness scale per mode
-  function maxv(mode) { let mx = 1; for (const r of regs) for (let i = 0; i < r.cells.length; i += 6) {
-      const c = r.cells; const v = mode === 'all' ? c[i + 2] + c[i + 3] + c[i + 4] + c[i + 5] : c[i + 3] + c[i + 4] + c[i + 5]; if (v > mx) mx = v; } return mx; }
-  const MAX = { all: maxv('all'), miss: maxv('miss') };
-  const imgs = {};
-  function image(ri, mode) {
-    const key = ri + mode; if (imgs[key]) return imgs[key];
-    const r = regs[ri], oc = document.createElement('canvas'); oc.width = t.xbins; oc.height = t.ybins;
-    const ctx = oc.getContext('2d'), id = ctx.createImageData(t.xbins, t.ybins), px = id.data;
-    for (let p = 0; p < px.length; p += 4) { px[p] = BG[0]; px[p + 1] = BG[1]; px[p + 2] = BG[2]; px[p + 3] = 255; }
-    const lmax = Math.log1p(MAX[mode]);
-    const c = r.cells;
-    for (let i = 0; i < c.length; i += 6) {
-      const x = c[i], y = t.ybins - 1 - c[i + 1];
-      const w = mode === 'all' ? [c[i + 2], c[i + 3], c[i + 4], c[i + 5]] : [0, c[i + 3], c[i + 4], c[i + 5]];
-      const tot = w[0] + w[1] + w[2] + w[3]; if (!tot) continue;
-      const k = 0.18 + 0.82 * Math.log1p(tot) / lmax;
-      const p = (y * t.xbins + x) * 4;
-      for (let ch = 0; ch < 3; ch++) {
-        let v = 0; for (let l = 0; l < 4; l++) v += w[l] * RGB[l][ch];
-        v /= tot; px[p + ch] = BG[ch] + (v - BG[ch]) * k;
+// A set of traces drawn with aligned strips: same regions, same heights, optionally one time scale.
+function stripSet(host, list, opts = {}) {
+  const names = REGION_ORDER.filter(n => list.some(t => t.regions.some(r => r.name === n && r.cells.length)));
+  const heights = names.map(n => { const ch = Math.max(...list.map(t => (t.regions.find(r => r.name === n) || { chunks: 1 }).chunks));
+    return Math.max(opts.minH || 38, Math.min(opts.maxH || 92, 20 + 9 * Math.log2(ch + 1))); });
+  const accMax = Math.max(...list.map(t => t.accesses));
+  const views = list.map(t => {
+    const wrap = document.createElement('div'); wrap.className = 'card';
+    const nums = opts.nums ? opts.nums(t) : '';
+    wrap.innerHTML = `<h3 style="margin-top:0">${t.name}</h3>${nums}`;
+    const sc = document.createElement('div'); sc.className = 'scroll'; wrap.appendChild(sc);
+    const cv = document.createElement('canvas'); sc.appendChild(cv); host.appendChild(wrap);
+    const regs = names.map(n => t.regions.find(r => r.name === n) || { name: n, cells: [], bounds: [], chunks: 0, bytes_spanned: 0, note: '' });
+    const lookup = regs.map(r => { const m = new Map(); for (let i = 0; i < r.cells.length; i += 6) m.set(r.cells[i] * t.ybins + r.cells[i + 1], r.cells.slice(i + 2, i + 6)); return m; });
+    const MAX = {};
+    for (const mode of ['all', 'miss']) { let mx = 1; for (const r of regs) { const c = r.cells; for (let i = 0; i < c.length; i += 6) {
+      const v = mode === 'all' ? c[i + 2] + c[i + 3] + c[i + 4] + c[i + 5] : c[i + 3] + c[i + 4] + c[i + 5]; if (v > mx) mx = v; } } MAX[mode] = mx; }
+    const imgs = {};
+    function image(ri, mode) {
+      const key = ri + mode; if (imgs[key]) return imgs[key];
+      const r = regs[ri], oc = document.createElement('canvas'); oc.width = t.xbins; oc.height = t.ybins;
+      const ctx = oc.getContext('2d'), id = ctx.createImageData(t.xbins, t.ybins), px = id.data;
+      for (let p = 0; p < px.length; p += 4) { px[p] = BG[0]; px[p + 1] = BG[1]; px[p + 2] = BG[2]; px[p + 3] = 255; }
+      const lmax = Math.log1p(MAX[mode]), c = r.cells;
+      for (let i = 0; i < c.length; i += 6) {
+        const x = c[i], y = t.ybins - 1 - c[i + 1];
+        const w = mode === 'all' ? [c[i + 2], c[i + 3], c[i + 4], c[i + 5]] : [0, c[i + 3], c[i + 4], c[i + 5]];
+        const tot = w[0] + w[1] + w[2] + w[3]; if (!tot) continue;
+        const k = 0.2 + 0.8 * Math.log1p(tot) / lmax, p = (y * t.xbins + x) * 4;
+        for (let ch = 0; ch < 3; ch++) { let v = 0; for (let l = 0; l < 4; l++) v += w[l] * RGB[l][ch]; v /= tot; px[p + ch] = BG[ch] + (v - BG[ch]) * k; }
       }
+      ctx.putImageData(id, 0, 0); return imgs[key] = oc;
     }
-    ctx.putImageData(id, 0, 0); return imgs[key] = oc;
-  }
-  function render() {
-    const W = Math.max(sc.clientWidth, 760), PW = W - LW - 12, dpr = devicePixelRatio || 1;
-    cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
-    const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    g.fillStyle = css.getPropertyValue('--surface'); g.fillRect(0, 0, W, H);
-    // stage bands along the top
-    g.font = '12px system-ui, sans-serif'; g.textBaseline = 'middle';
-    for (const s of t.stage_segments) {
-      const x0 = LW + s[1] * PW, x1 = LW + s[2] * PW;
-      g.fillStyle = STAGE_TONE[s[0]] || '#2a2a27'; g.fillRect(x0, 4, Math.max(1, x1 - x0), 20);
+    const LW = 180, TOP = 30, GAP = 6, BOT = 44;
+    const H = TOP + heights.reduce((a, b) => a + b + GAP, 0) + BOT;
+    function render() {
+      const W = Math.max(sc.clientWidth, 720), FULL = W - LW - 12, dpr = devicePixelRatio || 1;
+      const frac = SCALE === 'shared' && !opts.own ? t.accesses / accMax : 1, PW = FULL * frac;
+      cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+      const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = '#1a1a19'; g.fillRect(0, 0, W, H);
+      g.font = '12px system-ui, sans-serif'; g.textBaseline = 'middle';
+      for (const s of t.stage_segments) { const x0 = LW + s[1] * PW, x1 = LW + s[2] * PW; g.fillStyle = STAGE_TONE[s[0]] || '#2a2a27'; g.fillRect(x0, 4, Math.max(1, x1 - x0), 20); }
+      const spans = {}; for (const s of t.stage_segments) { const k = s[0] === 'lex' ? 'parse' : s[0]; spans[k] ??= [s[1], s[2]]; spans[k][0] = Math.min(spans[k][0], s[1]); spans[k][1] = Math.max(spans[k][1], s[2]); }
+      for (const k in spans) { const [a, b] = spans[k], x0 = LW + a * PW, x1 = LW + b * PW, label = k === 'parse' && t.kind === 'goose' ? 'lex + parse' : k;
+        if (x1 - x0 > g.measureText(label).width + 8) { g.fillStyle = '#c3c2b7'; g.fillText(label, x0 + 5, 14); }
+        g.strokeStyle = '#55544e'; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(x0) + .5, 4); g.lineTo(Math.round(x0) + .5, H - BOT + 4); g.stroke(); }
+      g.fillStyle = '#8d8c84'; g.fillText('↑ address in the structure', 8, 14);
+      let y = TOP; g.imageSmoothingEnabled = false;
+      regs.forEach((r, ri) => {
+        const h = heights[ri];
+        if (r.cells.length) g.drawImage(image(ri, MODE), LW, y, PW, h);
+        g.fillStyle = r.cells.length ? '#f0efec' : '#5d5c56'; g.font = '600 13px system-ui, sans-serif'; g.textBaseline = 'top';
+        g.fillText(r.name, 8, y + 2);
+        g.fillStyle = '#8d8c84'; g.font = '12px system-ui, sans-serif';
+        g.fillText(r.cells.length ? fmtB(r.bytes_spanned) + ' touched' : 'not used', 8, y + 19);
+        g.strokeStyle = '#34332f'; g.strokeRect(LW - .5, y - .5, FULL + 1, h + 1);
+        r._y = y; r._h = h; y += h + GAP;
+      });
+      g.fillStyle = '#8d8c84'; g.textBaseline = 'top';
+      const span = SCALE === 'shared' && !opts.own ? accMax : t.accesses, ticks = 8;
+      for (let i = 0; i <= ticks; i++) { const x = LW + i / ticks * FULL; g.fillRect(Math.round(x), y - 2, 1, 5);
+        const lab = fmt(span * i / ticks, 0); const w = g.measureText(lab).width; g.fillText(lab, Math.min(x - w / 2, W - w - 2), y + 6); }
+      if (frac < 1) { g.fillStyle = '#c3c2b7'; g.fillText('◂ done', LW + PW + 4, TOP + 2); }
+      g.fillStyle = '#c3c2b7'; g.fillText('data accesses so far (time runs left to right)', LW, y + 24);
+      cv._layout = { LW, PW };
     }
-    // labels for stages merged across consecutive segments of the same stage family
-    const spans = {}; for (const s of t.stage_segments) { const k = s[0] === 'lex' ? 'parse' : s[0]; (spans[k] ??= [s[1], s[2]]); spans[k][0] = Math.min(spans[k][0], s[1]); spans[k][1] = Math.max(spans[k][1], s[2]); }
-    for (const k in spans) { const [a, b] = spans[k], x0 = LW + a * PW, x1 = LW + b * PW;
-      const label = k === 'parse' && t.kind === 'goose' ? 'lex + parse' : k;
-      if (x1 - x0 > g.measureText(label).width + 8) { g.fillStyle = '#c3c2b7'; g.fillText(label, x0 + 5, 14); }
-      g.strokeStyle = '#55544e'; g.lineWidth = 1; g.beginPath(); g.moveTo(Math.round(x0) + .5, 4); g.lineTo(Math.round(x0) + .5, H - BOT + 4); g.stroke(); }
-    let y = TOP;
-    g.imageSmoothingEnabled = false;
-    regs.forEach((r, ri) => {
-      const h = heights[ri];
-      g.drawImage(image(ri, MODE), LW, y, PW, h);
-      g.fillStyle = '#f0efec'; g.font = '600 13px system-ui, sans-serif'; g.textBaseline = 'top';
-      g.fillText(r.name, 8, y + 2);
-      g.fillStyle = '#8d8c84'; g.font = '12px system-ui, sans-serif';
-      g.fillText(fmtB(r.bytes_spanned) + ' touched', 8, y + 19);
-      g.strokeStyle = '#34332f'; g.strokeRect(LW - .5, y - .5, PW + 1, h + 1);
-      r._y = y; r._h = h; y += h + GAP;
+    cv.addEventListener('mousemove', e => {
+      const rect = cv.getBoundingClientRect(), mx = e.clientX - rect.left, my = e.clientY - rect.top, L = cv._layout;
+      if (!L || mx < L.LW || mx > L.LW + L.PW) return hideTip();
+      const ri = regs.findIndex(r => my >= r._y && my < r._y + r._h); if (ri < 0 || !regs[ri].cells.length) return hideTip();
+      const r = regs[ri], f = (mx - L.LW) / L.PW, x = Math.min(t.xbins - 1, Math.floor(f * t.xbins));
+      const yb = Math.min(t.ybins - 1, Math.floor((1 - (my - r._y) / r._h) * t.ybins));
+      let c = [0, 0, 0, 0]; for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const v = lookup[ri].get((x + dx) * t.ybins + yb + dy); if (v) c = c.map((a, i) => a + v[i]); }
+      const member = r.bounds.find(b => yb >= b.y0 && yb < b.y1), tot = c.reduce((a, b) => a + b, 0);
+      showTip(e, `<b>${r.name}</b>${member ? ' · ' + member.name : ''}<br><span class="k">stage</span> ${stageAt(t, f)} · <span class="k">at</span> ${fmt(f * t.accesses)} accesses<br>` +
+        (tot ? LEVELS.map((l, i) => `<span class="sw" style="background:${LCOL[i]}"></span>${l}: ${fmt(c[i] * t.sample_rate)} (${(100 * c[i] / tot).toFixed(0)}%)`).join('<br>') + '<br><span class="k">accesses near here, scaled from the sample</span>' : '<span class="k">no accesses here</span>') +
+        `<br><span class="k">${r.note}</span>`);
     });
-    // x axis: accesses
-    g.fillStyle = '#8d8c84'; g.textBaseline = 'top'; g.font = '12px system-ui, sans-serif';
-    const ticks = 8;
-    for (let i = 0; i <= ticks; i++) { const x = LW + i / ticks * PW; g.fillRect(Math.round(x), y - 2, 1, 5);
-      const lab = fmt(acc * i / ticks, 0); const w = g.measureText(lab).width; g.fillText(lab, Math.min(x - w / 2, W - w - 2), y + 6); }
-    g.fillStyle = '#c3c2b7'; g.fillText('compile progress: data accesses so far (time runs left to right)', LW, y + 24);
-    g.fillStyle = '#8d8c84'; g.textBaseline = 'middle'; g.fillText('↑ address in the structure', 8, 14);
-    cv._layout = { LW, PW };
-  }
-  cv.addEventListener('mousemove', e => {
-    const rect = cv.getBoundingClientRect(), mx = e.clientX - rect.left, my = e.clientY - rect.top, L = cv._layout;
-    if (!L || mx < L.LW || mx > L.LW + L.PW) return hideTip();
-    const ri = regs.findIndex(r => my >= r._y && my < r._y + r._h); if (ri < 0) return hideTip();
-    const r = regs[ri], f = (mx - L.LW) / L.PW, x = Math.min(t.xbins - 1, Math.floor(f * t.xbins));
-    const yb = Math.min(t.ybins - 1, Math.floor((1 - (my - r._y) / r._h) * t.ybins));
-    let c = [0, 0, 0, 0]; for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const v = lookup[ri].get((x + dx) * t.ybins + yb + dy); if (v) c = c.map((a, i) => a + v[i]); }
-    const member = r.bounds.find(b => yb >= b.y0 && yb < b.y1);
-    const tot = c.reduce((a, b) => a + b, 0);
-    showTip(e, `<b>${r.name}</b>${member ? ' · ' + member.name : ''}<br><span class="k">stage</span> ${stageAt(t, f)} · <span class="k">at</span> ${fmt(f * acc)} accesses<br>` +
-      (tot ? LEVELS.map((l, i) => `<span class="sw" style="background:${LCOL[i]}"></span>${l}: ${fmt(c[i] * t.sample_rate)} (${(100 * c[i] / tot).toFixed(0)}%)`).join('<br>') + '<br><span class="k">accesses in this 3x3 neighbourhood, scaled from the sample</span>' : '<span class="k">no accesses here</span>') +
-      `<br><span class="k">${r.note}</span>`);
+    cv.addEventListener('mouseleave', hideTip);
+    render();
+    return { render };
   });
-  cv.addEventListener('mouseleave', hideTip);
-  render(); addEventListener('resize', render);
-  return { render };
+  return views;
 }
-const views = TRACES.map(t => drawTrace(t, document.getElementById('strips')));
-document.querySelectorAll('#mode button').forEach(b => b.onclick = () => {
-  MODE = b.dataset.m; document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('on', x === b)); views.forEach(v => v.render()); });
 
-// ---------------------------------------------------------------- stage bars (simulation)
+let allViews = [];
+function feNums(t, job) {
+  const a = totals(t), s = secs(job, 'emit');
+  const box = (k, v, d = '') => `<div class="num"><div class="k">${k}</div><div class="v">${v}</div>${d ? `<div class="d">${d}</div>` : ''}</div>`;
+  return `<div class="nums">${box('seconds (perf, median)', s ? fmtS(s[1]) : '–', s ? `${fmtS(s[0])} – ${fmtS(s[2])}` : '')}` +
+    box('instructions', fmt(t.instructions)) + box('data accesses', fmt(t.accesses)) +
+    box('L1 fills (simulated)', fmt(a[1] + a[2] + a[3]), `${fmtB((a[1] + a[2] + a[3]) * 64)} into L1`) +
+    box('L1 fills from L2 (perf)', fmt(med(job, 'emit', 'ls_dmnd_fills_from_sys.local_l2'))) +
+    box('C written', fmtB(t.c_bytes_out)) + '</div>';
+}
+function drawBA() {
+  const host = document.getElementById('ba'); host.innerHTML = '';
+  const sel = document.getElementById('aftersel').value;
+  const list = [TR.fe_before, TR[sel]].filter(Boolean), jobs = ['fe_before', sel];
+  allViews = allViews.filter(v => !v.ba).concat(stripSet(host, list, { nums: t => feNums(t, jobs[list.indexOf(t)]) }).map(v => (v.ba = true, v)));
+}
+drawBA();
+document.getElementById('aftersel').onchange = drawBA;
+
+// ---------------------------------------------------------------- cc1
+(function () {
+  const list = [TR.cc1_before, TR.cc1_after].filter(Boolean);
+  const nh = document.getElementById('cc1nums');
+  const gb = J.gcc_before?.cc, ga = J.gcc_after?.cc;
+  if (gb && ga) {
+    const row = (k, ev, f = fmt) => `<tr><td>${k}</td><td>${f(gb[ev][1])}</td><td>${f(ga[ev][1])}</td><td>${ratio(gb[ev][1], ga[ev][1])}</td><td class="sub">${f(gb[ev][0])} – ${f(gb[ev][2])}</td><td class="sub">${f(ga[ev][0])} – ${f(ga[ev][2])}</td></tr>`;
+    nh.innerHTML = `<div class="card scroll"><h3 style="margin-top:0">gcc -O2 -c, whole runs, measured (median of ${COUNTERS.runs}, interleaved)</h3><table><tr><th></th><th>before C (${fmtB(C.before_c)})</th><th>after C (${fmtB(C.after_c)})</th><th>before / after</th><th>before min – max</th><th>after min – max</th></tr>` +
+      row('seconds', 'duration_time', v => fmtS(v / 1e9)) + row('instructions', 'instructions') + row('cycles', 'cycles') + row('loads dispatched', 'ls_dispatch.ld_dispatch') +
+      row('L1 demand fills from L2', 'ls_dmnd_fills_from_sys.local_l2') + row('… from L3 (this CCX)', 'ls_dmnd_fills_from_sys.local_ccx') + row('… from DRAM', 'ls_dmnd_fills_from_sys.dram_io_near') +
+      row('all L1 fills (incl. prefetch)', 'ls_any_fills_from_sys.all') + `</table><p class="sub">Load during the counter runs: ${(COUNTERS.uptime || []).map(u => u.split('load average:')[1]).join(' → ')}.${C.cc1_traced_seconds ? ` Traced under bytemove: ${C.cc1_traced_seconds.map(s => s ? s.toFixed(0) + ' s' : '–').join(' and ')}.` : ''}</p></div>`;
+  }
+  if (list.length) allViews = allViews.concat(stripSet(document.getElementById('cc1'), list, { minH: 50, maxH: 110,
+    nums: t => { const a = totals(t); return `<div class="nums"><div class="num"><div class="k">instructions</div><div class="v">${fmt(t.instructions)}</div></div><div class="num"><div class="k">data accesses</div><div class="v">${fmt(t.accesses)}</div></div>` +
+      LEVELS.slice(1).map((l, i) => `<div class="num"><div class="k">from ${l} (simulated)</div><div class="v">${fmtB(a[i + 1] * 64)}</div></div>`).join('') + '</div>'; } }));
+})();
+document.querySelectorAll('.seg').forEach(seg => seg.querySelectorAll('button').forEach(b => b.onclick = () => {
+  seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  if (seg.id === 'mode') MODE = b.dataset.v; else SCALE = b.dataset.v;
+  allViews.forEach(v => v.render()); }));
+addEventListener('resize', () => allViews.forEach(v => v.render()));
+
+// ---------------------------------------------------------------- stage bars
 function stackedBars(host, title, groups, note) {
-  // groups: [{label, rows:[{label, hits, bytes:[L2,L3,MEM]}]}]
   let max = 1; for (const g of groups) for (const r of g.rows) max = Math.max(max, r.bytes[0] + r.bytes[1] + r.bytes[2]);
   const W = Math.max(host.clientWidth - 34, 680), LW = 210, RW = 110, PW = W - LW - RW, RH = 22;
   let h = 30; for (const g of groups) h += 26 + g.rows.length * (RH + 4);
-  let s = `<h3 style="margin-top:0">${title}</h3><svg width="${W}" height="${h + 26}" role="img">`;
-  let y = 8;
+  let s = `<h3 style="margin-top:0">${title}</h3><svg width="${W}" height="${h + 26}" role="img">`, y = 8;
   for (const g of groups) {
     s += `<text x="0" y="${y + 14}" style="fill:var(--text);font-weight:600;font-size:13px">${g.label}</text>`; y += 24;
     for (const r of g.rows) {
@@ -271,38 +357,43 @@ function stackedBars(host, title, groups, note) {
   host.innerHTML = s;
 }
 const ORDER = ['start', 'lex', 'parse', 'check', 'optimize', 'emit', 'write'];
+const FE_JOBS = [['fe_before', 'self-hosted before'], ['fe_after_on_before', 'self-hosted after, same input'], ['fe_after', 'self-hosted after, own input'], ['cpp_before', 'C++, before input'], ['cpp_after', 'C++, after input']];
 function drawStageBars() {
   stackedBars(document.getElementById('stagebars'), 'Simulated: bytes into L1 per stage',
-    TRACES.map(t => ({ label: t.name, rows: ORDER.filter(s => t.stage_totals[s]).map(s => {
-      const a = t.stage_totals[s].acc; return { label: s, hits: a[0], bytes: [a[1] * 64, a[2] * 64, a[3] * 64] }; }) })),
-    '"start" is process start-up and teardown outside the compile proper; for the C++ compiler it includes loading libstdc++ and the embedded runtime text.');
-  if (COUNTERS) {
-    const names = { sh2: 'self-hosted (sh2), measured', cpp: 'C++ (build/goose), measured' };
+    FE_JOBS.filter(([k]) => TR[k]).map(([k]) => ({ label: TR[k].name, rows: ORDER.filter(s => TR[k].stage_totals[s]).map(s => {
+      const a = TR[k].stage_totals[s].acc; return { label: s, hits: a[0], bytes: [a[1] * 64, a[2] * 64, a[3] * 64] }; }) })),
+    '"start" is process start-up and teardown outside the compile proper.');
+  if (COUNTERS?.stages) {
     const lab = { parse: 'parse (lex + parse)', check: 'check (C++: + optimize + bce)', emit: 'emit + write' };
-    stackedBars(document.getElementById('measured'), 'Measured with perf: demand fills into L1 per stage (median of 5 runs)',
-      Object.keys(COUNTERS.stages).map(fe => ({ label: names[fe] || fe, rows: ['parse', 'check', 'emit'].map(m => {
-        const e = COUNTERS.stages[fe][m];
-        return { label: lab[m], hits: null, bytes: [e['ls_dmnd_fills_from_sys.local_l2'] * 64, e['ls_dmnd_fills_from_sys.local_ccx'] * 64, (e['ls_dmnd_fills_from_sys.dram_io_near'] + e['ls_dmnd_fills_from_sys.dram_io_far']) * 64] }; }) })),
-      `Each stage is the difference between cumulative runs (--parse, --check, -o out.c). L3 here is any fill from this CCX's L3; hardware prefetchers bring in lines the simulation counts as demand misses. Load average during the runs: ${(COUNTERS.uptime || []).map(u => u.split('load average:')[1]).join(' → ')}.`);
+    stackedBars(document.getElementById('measured'), `Measured with perf: demand fills into L1 per stage (median of ${COUNTERS.runs} runs)`,
+      FE_JOBS.filter(([k]) => COUNTERS.stages[k]).map(([k, name]) => ({ label: name + `, ${fmtS(secs(k, 'emit')?.[1])} in all`, rows: ['parse', 'check', 'emit'].map(m => {
+        const e = COUNTERS.stages[k][m];
+        return { label: lab[m], hits: null, bytes: [e['ls_dmnd_fills_from_sys.local_l2'] * 64, e['ls_dmnd_fills_from_sys.local_ccx'] * 64, (e['ls_dmnd_fills_from_sys.dram_io_near'] + (e['ls_dmnd_fills_from_sys.dram_io_far'] || 0)) * 64] }; }) })),
+      'Each stage is the difference between cumulative runs (--parse, --check, -o out.c). Hardware prefetchers bring in lines the simulation counts as demand misses.');
   }
 }
 drawStageBars(); addEventListener('resize', drawStageBars);
 
-// ---------------------------------------------------------------- per data structure
-if (T.goose) {
-  const t = T.goose; let rows = [], maxb = 1;
-  for (const r of t.regions) { const v = sum4(r.by_stage); maxb = Math.max(maxb, (v[1] + v[2] + v[3]) * 64); }
-  let s = '<table><tr><th>data structure</th><th>accesses</th><th>L1 hits</th><th>from L2</th><th>from L3</th><th>from memory</th><th style="text-align:left">bytes into L1</th></tr>';
-  const regs = [...t.regions].sort((a, b) => { const x = sum4(a.by_stage), y = sum4(b.by_stage); return (y[1] + y[2] + y[3]) - (x[1] + x[2] + x[3]); });
-  const row = (cls, name, v) => { const b = [v[1] * 64, v[2] * 64, v[3] * 64], tot = b[0] + b[1] + b[2];
-    return `<tr><td class="${cls}">${name}</td><td>${fmt(v[0] + v[1] + v[2] + v[3])}</td><td>${fmt(v[0])}</td><td>${fmtB(b[0])}</td><td>${fmtB(b[1])}</td><td>${fmtB(b[2])}</td><td style="text-align:left;min-width:260px">` +
-      b.map((x, i) => `<span class="bar" style="width:${x / maxb * 240}px;background:${LCOL[i + 1]}"></span>`).join('') + `</td></tr>`; };
-  for (const r of regs) {
-    s += row('name', r.name, sum4(r.by_stage));
-    if (r.members.length > 1 && r.name !== 'temporaries') for (const [m, v] of r.members.slice(0, 6)) s += row('member', m, v);
+// ---------------------------------------------------------------- per data structure, before vs after
+(function () {
+  const b = TR.fe_before, a = TR.fe_after_on_before; if (!b || !a) return;
+  const names = REGION_ORDER.filter(n => b.regions.some(r => r.name === n) || a.regions.some(r => r.name === n));
+  const get = (t, n) => t.regions.find(r => r.name === n);
+  const mtot = (t, n, m) => { const r = get(t, n); const e = r && r.members.find(x => x[0] === m); return e ? e[1] : null; };
+  let maxb = 1; for (const t of [b, a]) for (const r of t.regions) { const v = sum4(r.by_stage); maxb = Math.max(maxb, (v[1] + v[2] + v[3]) * 64); }
+  const bars = v => v ? [v[1], v[2], v[3]].map((x, i) => `<span class="bar" style="width:${x * 64 / maxb * 200}px;background:${LCOL[i + 1]}"></span>`).join('') : '';
+  const cell = v => v ? `<td>${fmt(v[0] + v[1] + v[2] + v[3])}</td><td>${fmtB((v[1] + v[2] + v[3]) * 64)}</td><td style="text-align:left;min-width:210px">${bars(v)}</td>` : '<td>–</td><td>–</td><td></td>';
+  let s = `<table><tr><th>data structure</th><th colspan="3" style="text-align:center">before (${C.before})</th><th colspan="3" style="text-align:center">after (${C.after}), same input</th></tr><tr><th></th><th>accesses</th><th>into L1</th><th></th><th>accesses</th><th>into L1</th><th></th></tr>`;
+  for (const n of names) {
+    const rb = get(b, n), ra = get(a, n);
+    s += `<tr><td class="name">${n}</td>${cell(rb && sum4(rb.by_stage))}${cell(ra && sum4(ra.by_stage))}</tr>`;
+    if (n === 'temporaries') continue;
+    const ms = [...new Set([...(rb?.members || []), ...(ra?.members || [])].map(x => x[0]))];
+    const big = ms.map(m => [m, Math.max(...[mtot(b, n, m), mtot(a, n, m)].map(v => v ? v[0] + v[1] + v[2] + v[3] : 0))]).sort((x, y) => y[1] - x[1]).slice(0, 8);
+    if (ms.length > 1) for (const [m] of big) s += `<tr><td class="member">${m}</td>${cell(mtot(b, n, m))}${cell(mtot(a, n, m))}</tr>`;
   }
   document.getElementById('regions').innerHTML = s + '</table>';
-}
+})();
 </script>
 </body>
 </html>
