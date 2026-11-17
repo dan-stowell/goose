@@ -6,7 +6,7 @@ L3 32 MB (one CCD visible), 64-byte lines. Workload W1: each front end compiling
 
 ## The method
 
-1. **Counters for real totals** (`trace/counters.sh`, `data/counters.json`). Five interleaved runs
+1. **Counters for real totals** (`trace/measure.py`, `data/counters.json`). Five interleaved runs
    per front end and per cumulative mode (`--parse`, `--check`, `-o out.c`); a stage is the
    difference between modes. Three groups of at most six events each, so nothing is multiplexed.
 2. **A simulation for per-access attribution** (`trace/bytemove.c`, a Valgrind tool of our own).
@@ -32,7 +32,7 @@ L3 32 MB (one CCD visible), 64-byte lines. Workload W1: each front end compiling
    rest sticky. C++: `ParseProgram`, `ResolveTypeNames` (check), `Optimizer`/`BCE::RunAll`
    (optimize), `CodeGen::CodeGen` (emit), `WriteFileMakingDirs` (write), all sticky.
 
-`trace/run.sh` does all of it from source and rebuilds `index.html` (about 2 minutes).
+`research/viz/regen.sh` does all of it from source (before and after commits, both front ends, cc1) and rebuilds `index.html`; counters now come from `trace/measure.py`.
 
 ## Evidence
 

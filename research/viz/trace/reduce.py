@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Reduce a bytemove trace directory to the compact JSON the pictures use.
 
-usage: reduce.py goose TRACE_DIR OUT_C NAME OUT.json   (the self-hosted compiler)
-       reduce.py cpp   TRACE_DIR OUT_C NAME OUT.json   (the C++ compiler)
+usage: reduce.py goose TRACE_DIR OUT_C NAME OUT.json CONTEXT.goose  (the self-hosted compiler)
+       reduce.py cpp   TRACE_DIR OUT_C NAME OUT.json   (the C++ compiler; also gcc's cc1)
+
+CONTEXT.goose is the traced compiler's selfhost/context.goose: the order of
+its owned_* tables in run_compilation is the order of their data stacks.
 
 OUT_C is the C file the traced run wrote (its size finds the self-hosted
 compiler's c_final data stack, which anchors the other tables). Plain
 Python, no numpy: the samples are reduced per 64 KB chunk.
 """
-import json, os, struct, sys
+import json, os, re, struct, sys
 from array import array
 from bisect import bisect_right
 
@@ -37,6 +40,11 @@ for e in events:
     elif t == 'totals':
         totals = {e[i]: int(e[i + 1]) for i in range(1, len(e) - 1, 2)}
 
+# cc1 is stripped: no stage marks, the whole run is one stage.
+def rn(st): return 'cc1 -O2' if kind == 'gcc' and st == 'start' else st
+stage_ev = [(rn(a), b, c, d) for a, b, c, d in stage_ev]
+stage_totals = {rn(k): v for k, v in stage_totals.items()}
+
 # ---------------------------------------------------------------- regions
 # A region is a list of (start, end, member) intervals; classify() maps an
 # address to (region index, member index).
@@ -52,10 +60,12 @@ def add(rname, member, lo, hi, note=''):
     r['ivals'].append((lo, hi, r['members'].index(member)))
 
 out_len = os.path.getsize(out_c)
-GOOSE_TABLES = ['function_instances', 'checked_calls', 'shrinks', 'specializations', 'global_order',
-                'c_output', 'c_declarations', 'symbol_slots', 'c_type_state', 'function_slots',
-                'return_locals', 'c_final', 'c_controls', 'c_arguments', 'text_storage', 'sources',
-                'tokens', 'nodes', 'edges', 'declarations', 'types', 'fielddefs', 'scopes', 'symbols']
+GOOSE_TABLES = []
+if kind == 'goose':
+    ctx_src = open(sys.argv[6]).read()
+    body = ctx_src[ctx_src.index('fn run_compilation'):]
+    body = body[:body.index('var ctx')]
+    GOOSE_TABLES = re.findall(r'var owned_(\w+)\s*:', body)
 GROUPS = [('source text', ['text_storage', 'sources']),
           ('tokens', ['tokens']),
           ('nodes + edges', ['nodes', 'edges', 'declarations']),
@@ -63,12 +73,19 @@ GROUPS = [('source text', ['text_storage', 'sources']),
           ('checker tables', ['function_instances', 'checked_calls', 'shrinks', 'specializations']),
           ('emitter tables', ['global_order', 'symbol_slots', 'c_type_state', 'function_slots',
                               'return_locals', 'c_controls']),
-          ('C text out', ['c_output', 'c_declarations', 'c_final', 'c_arguments'])]
+          ('C text out', ['c_output', 'c_declarations', 'c_final', 'c_arguments', 'c_specs'])]
+def group_of(t):
+    for g, ms in GROUPS:
+        if t in ms: return g
+    if 'symbol' in t or 'scope' in t or 'type' in t or 'field' in t: return 'types + symbols'
+    if t.startswith('c_') or 'local' in t or 'slot' in t or 'stack' in t: return 'emitter tables'
+    return 'checker tables'
+
 NOTES = {'source text': 'text_storage (the files read, plus interned strings) and sources',
          'tokens': 'Token[] from the lexer',
          'nodes + edges': 'the tree: Node[], Edge[] and the declaration list',
-         'types + symbols': 'Type[], Field[], Scope[], Symbol[]',
-         'checker tables': 'specializations, checked calls, function instances, shrinks',
+         'types + symbols': 'Type[], Field[], Scope[], Symbol[] (and the symbol hash index, once it exists)',
+         'checker tables': 'specializations, checked calls, function instances, shrinks, call graph',
          'emitter tables': 'slots, type state, global order, control stack',
          'C text out': 'C being written: c_output, c_declarations, then c_final',
          'temporaries': 'every other data stack: the values functions build and drop',
@@ -86,10 +103,10 @@ if kind == 'goose':
     assert len(cfinal) == 1, cfinal
     B = cfinal[0] - GOOSE_TABLES.index('c_final')
     assert stacks[B + GOOSE_TABLES.index('sources')][1] > 0
-    for gname, members in GROUPS:
-        for m in members:
-            s = stacks[B + GOOSE_TABLES.index(m)]
-            add(gname, m, s[0], s[0] + RESERVE, NOTES[gname])
+    order = [g for g, _ in GROUPS]
+    for t in sorted(GOOSE_TABLES, key=lambda t: order.index(group_of(t))):
+        s = stacks[B + GOOSE_TABLES.index(t)]
+        add(group_of(t), t, s[0], s[0] + RESERVE, NOTES[group_of(t)])
     for i, s in enumerate(stacks):
         if s[0] and not (B <= i < B + len(GOOSE_TABLES)):
             add('temporaries', 'stack %d' % i, s[0], s[0] + RESERVE, NOTES['temporaries'])
@@ -98,7 +115,7 @@ if kind == 'goose':
 else:
     for tid, (lo, hi) in sorted(thread_sp.items()):
         add('C stacks', 'thread %d' % tid, lo - (1 << 20), hi + 65536,
-            'the machine stacks: main thread and the compile thread')
+            'the machine stacks of each thread')
     # File-backed segments, and the anonymous segment right after one (its
     # .bss), are the image; every other anonymous mapping and the brk range
     # is malloc's (glibc's main and per-thread arenas).
@@ -147,7 +164,7 @@ reg_stage = [dict() for _ in regions]       # region -> stage -> [L1..MEM access
 member_tot = [dict() for _ in regions]      # region -> member -> [L1..MEM]
 for line in open(os.path.join(tdir, 'agg.tsv')):
     f = line.split('\t')
-    st, chunk = f[0], int(f[1], 16) >> 16
+    st, chunk = rn(f[0]), int(f[1], 16) >> 16
     v = [int(x) for x in f[2:10]]
     acc = [v[2 * l] + v[2 * l + 1] for l in range(4)]
     ri, mi = chunk_of(chunk)
