@@ -76,6 +76,10 @@ recursive fn contains_view(ctx: Compiler&, ty: i64) -> bool {
         var e = t.first;
         while e >= 0 { if contains_view(ctx, ctx.fielddefs[ctx.edges[e].value].ty) { return true; } e = ctx.edges[e].next; }
     }
+    if t.kind == T_ENUM {
+        var e = t.first;
+        while e >= 0 { if contains_view(ctx, ctx.edges[e].value) { return true; } e = ctx.edges[e].next; }
+    }
     return false;
 }
 fn store_lifetime(ctx: Compiler&, v: Value, destination: i64, token: i64) {
@@ -104,11 +108,15 @@ recursive fn holds_view_walk(ctx: Compiler&, ty: i64, element: i64, visit: i64) 
     ctx.types[ty].view_visit = visit;
     let t = ctx.types[ty];
     if t.kind == T_SLICE { return t.element == element; }
-    if t.kind == T_REFERENCE { return t.element == element || (ctx.types[t.element].kind == T_STRUCT && holds_view_walk(ctx, t.element, element, visit)); }
+    if t.kind == T_REFERENCE { return t.element == element || ((ctx.types[t.element].kind == T_STRUCT || ctx.types[t.element].kind == T_ENUM) && holds_view_walk(ctx, t.element, element, visit)); }
     if t.kind == T_ARRAY { return holds_view_walk(ctx, t.element, element, visit); }
     if t.kind == T_STRUCT {
         var e = t.first;
         while e >= 0 { if holds_view_walk(ctx, ctx.fielddefs[ctx.edges[e].value].ty, element, visit) { return true; } e = ctx.edges[e].next; }
+    }
+    if t.kind == T_ENUM {
+        var e = t.first;
+        while e >= 0 { if holds_view_walk(ctx, ctx.edges[e].value, element, visit) { return true; } e = ctx.edges[e].next; }
     }
     return false;
 }
@@ -210,6 +218,8 @@ fn fits(ctx: Compiler&, v: Value, target: i64) -> bool {
 fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
     let a = ctx.types[v.ty]; let b = ctx.types[target];
     if v.ty == target { return true; }
+    // A variant value constructs its enum; the tag is static.
+    if b.kind == T_ENUM && a.kind == T_STRUCT && a.element == target { return true; }
     if a.kind == T_INTEGER && b.kind == T_INTEGER {
         if v.known { return constant_fits(ctx, a, v.bits, b, target) && constant_fits(ctx, a, v.alt, b, target); }
         return (a.flags & 2 == b.flags & 2 && a.bytes <= b.bytes) || (a.flags & 2 != 0 && b.flags & 2 == 0 && a.bytes < b.bytes);
@@ -396,6 +406,14 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             // A float constant keeps no integer bits to fold.
             v.known = false; v.bits = 0;
         }
+    } else if tag == N_MEMBER && variant_owner(ctx, x.a, scope) >= 0 {
+        // A payload-less variant names a constant of its enum's type.
+        let owner = variant_owner(ctx, x.a, scope);
+        let vt = find_variant(ctx, owner, x.token);
+        let spelled = ctx.tokens[ctx.nodes[ctx.types[owner].decl].token].text;
+        if vt < 0 { error_at(ctx, x.token, str("enum ", spelled, " has no variant named ", ctx.tokens[x.token].text)); }
+        if has_payload(ctx, vt) { error_at(ctx, x.token, str("variant ", spelled, ".", ctx.tokens[x.token].text, " has a payload; construct it with ", spelled, ".", ctx.tokens[x.token].text, " { ... }")); }
+        ctx.nodes[n].symbol = vt; ctx.nodes[n].flags |= 1024; v.ty = owner;
     } else if tag == N_MEMBER {
         let a = decay(ctx, check_expression(ctx, x.a, scope, -1));
         if element_type(ctx, a.ty) >= 0 && (ctx.tokens[x.token].text == "len" || ctx.tokens[x.token].text == "cap") {
@@ -441,32 +459,9 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     else if tag == N_IF {
         let c = decay(ctx, check_expression(ctx, x.a, scope, -1)); require_fit(ctx, x.a, c, boolean_type(ctx));
         let a = check_expression(ctx, x.b, scope, expected);
-        if x.c >= 0 {
-            let b = check_expression(ctx, x.c, scope, expected);
-            v = a;
-            if ctx.types[a.ty].kind == T_BOTTOM { v = b; }
-            else if ctx.types[b.ty].kind != T_BOTTOM && a.ty != b.ty {
-                if fits(ctx, b, a.ty) { require_fit(ctx, x.c, b, a.ty); }
-                else if fits(ctx, a, b.ty) { v.ty = b.ty; require_fit(ctx, x.b, a, b.ty); }
-                else { error_at(ctx, x.token, "branches have incompatible types"); }
-            }
-            if root_depth(ctx, b.root) > root_depth(ctx, v.root) { v.root = b.root; }
-            if root_depth(ctx, b.held) > root_depth(ctx, v.held) { v.held = b.held; }
-            if b.fields != v.fields { v.fields = -1; }
-            v.readonly = a.readonly || b.readonly;
-            v.growshrink = a.growshrink || b.growshrink;
-            v.inexact = a.inexact || b.inexact || a.root != b.root;
-            v.place = -1; v.known = false;
-            if a.known && b.known && ctx.types[a.ty].kind == ctx.types[b.ty].kind && (ctx.types[a.ty].kind == T_FLOAT || ctx.types[a.ty].kind == T_INTEGER) {
-                v.known = true;
-                if ctx.types[v.ty].kind == T_INTEGER {
-                    let low = constant_low(ctx, v.ty, constant_low(ctx, v.ty, a.bits, a.alt), constant_low(ctx, v.ty, b.bits, b.alt));
-                    let high = constant_high(ctx, v.ty, constant_high(ctx, v.ty, a.bits, a.alt), constant_high(ctx, v.ty, b.bits, b.alt));
-                    v.bits = high; v.alt = low;
-                }
-            }
-        }
-    } else if tag == N_WHILE || tag == N_FOR || tag == N_LOOP || tag == N_EARLY { v = check_loop(ctx, n, scope); }
+        if x.c >= 0 { v = join_branch(ctx, a, check_expression(ctx, x.c, scope, expected), x.b, x.c, x.token); }
+    } else if tag == N_MATCH { v = check_match(ctx, n, scope, expected); }
+    else if tag == N_WHILE || tag == N_FOR || tag == N_LOOP || tag == N_EARLY { v = check_loop(ctx, n, scope); }
     else if tag == N_RETURN {
         if ctx.checking_function < 0 { error_at(ctx, x.token, "return outside a function"); }
         if x.a >= 0 { error_at(ctx, x.token, "not implemented yet: long-distance returns"); }
@@ -486,7 +481,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     }
     else { error_at(ctx, x.token, str("not implemented yet: expression tag ", tag)); }
     let function_body = tag == N_BLOCK && ctx.checking_function >= 0 && ctx.specializations[ctx.checking_function].body == n;
-    if (tag == N_IF || tag == N_BLOCK) && !function_body && v.ty != 0 && ctx.types[v.ty].kind != T_BOTTOM {
+    if (tag == N_IF || tag == N_BLOCK || tag == N_MATCH) && !function_body && v.ty != 0 && ctx.types[v.ty].kind != T_BOTTOM {
         if expected >= 0 && ctx.types[expected].kind == T_REFERENCE {
             require_fit(ctx, n, v, expected); v.ty = expected;
         } else {
@@ -495,7 +490,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         }
         v.place = -1;
     }
-    if (tag == N_ARRAY || tag == N_FILL || tag == N_CONSTRUCT || tag == N_CALL || tag == N_IF || (tag == N_BLOCK && !function_body)) && (ctx.types[v.ty].kind == T_ARRAY || ctx.types[v.ty].kind == T_STRUCT) && v.place < 0 {
+    if (tag == N_ARRAY || tag == N_FILL || tag == N_CONSTRUCT || tag == N_CALL || tag == N_IF || tag == N_MATCH || (tag == N_BLOCK && !function_body)) && (ctx.types[v.ty].kind == T_ARRAY || ctx.types[v.ty].kind == T_STRUCT || ctx.types[v.ty].kind == T_ENUM) && v.place < 0 {
         let temporary_scope = scope_new(ctx, scope, ctx.checking_function);
         let temporary_root = ctx.symbols.len;
         ctx.symbols.push(Symbol { token: x.token, ns: -1, kind: 4, decl: n, scope: temporary_scope, ty: v.ty, state: 2 });
@@ -508,6 +503,197 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         if owner.kind == T_ARRAY && owner.flags == 4 && holds_view_of(ctx, v.ty, owner.element) { v.growshrink = true; }
     }
     return annotate(ctx, n, v);
+}
+
+// Two branches of an if or match agree on a type, adapting a literal or a
+// variant either way; the joined value is bounded by the shorter-lived root.
+fn join_branch(ctx: Compiler&, a: Value, b: Value, anode: i64, bnode: i64, token: i64) -> Value {
+    var v = a;
+    if ctx.types[a.ty].kind == T_BOTTOM { v = b; }
+    else if ctx.types[b.ty].kind != T_BOTTOM && a.ty != b.ty {
+        if fits(ctx, b, a.ty) { require_fit(ctx, bnode, b, a.ty); }
+        else if fits(ctx, a, b.ty) { v.ty = b.ty; require_fit(ctx, anode, a, b.ty); }
+        else if a.ty == 0 || b.ty == 0 { v.ty = 0; }
+        else { error_at(ctx, token, "branches have incompatible types"); }
+    }
+    if root_depth(ctx, b.root) > root_depth(ctx, v.root) { v.root = b.root; }
+    if root_depth(ctx, b.held) > root_depth(ctx, v.held) { v.held = b.held; }
+    if b.fields != v.fields { v.fields = -1; }
+    v.readonly = a.readonly || b.readonly;
+    v.growshrink = a.growshrink || b.growshrink;
+    v.inexact = a.inexact || b.inexact || a.root != b.root;
+    v.place = -1; v.known = false;
+    // Constant branches join to a constant range of the common type.
+    if a.known && b.known && ctx.types[a.ty].kind == ctx.types[b.ty].kind && (ctx.types[a.ty].kind == T_FLOAT || ctx.types[a.ty].kind == T_INTEGER) {
+        v.known = true;
+        if ctx.types[v.ty].kind == T_INTEGER {
+            let low = constant_low(ctx, v.ty, constant_low(ctx, v.ty, a.bits, a.alt), constant_low(ctx, v.ty, b.bits, b.alt));
+            let high = constant_high(ctx, v.ty, constant_high(ctx, v.ty, a.bits, a.alt), constant_high(ctx, v.ty, b.bits, b.alt));
+            v.bits = high; v.alt = low;
+        }
+    }
+    return v;
+}
+// Integer patterns order as unsigned keys: a u64's as they are, any other
+// type's with the sign bit flipped. A pattern node's bits hold its value.
+fn pattern_key(ctx: Compiler&, bits: u64, ty: i64) -> u64 {
+    if ctx.types[ty].flags & 2 != 0 && ctx.types[ty].bytes == 8 { return bits; }
+    return bits ^ 9223372036854775808;
+}
+fn pattern_low(ctx: Compiler&, item: i64, ty: i64) -> u64 {
+    if ctx.nodes[item].tag == N_RANGE { return pattern_key(ctx, ctx.nodes[ctx.nodes[item].a].bits, ty); }
+    return pattern_key(ctx, ctx.nodes[item].bits, ty);
+}
+fn pattern_high(ctx: Compiler&, item: i64, ty: i64) -> u64 {
+    if ctx.nodes[item].tag == N_RANGE { return pattern_key(ctx, ctx.nodes[ctx.nodes[item].b].bits, ty) - 1; }
+    return pattern_key(ctx, ctx.nodes[item].bits, ty);
+}
+fn bound_text(ctx: Compiler&, n: i64) -> const u8[:] {
+    if ctx.nodes[n].tag == N_UNARY { return own_text(ctx, str("-", ctx.tokens[ctx.nodes[ctx.nodes[n].a].token].text)); }
+    return ctx.tokens[ctx.nodes[n].token].text;
+}
+fn pattern_text(ctx: Compiler&, item: i64) -> const u8[:] {
+    let x = ctx.nodes[item];
+    if x.tag == N_RANGE { return own_text(ctx, str(bound_text(ctx, x.a), "..", bound_text(ctx, x.b))); }
+    return bound_text(ctx, item);
+}
+recursive fn pattern_literal(ctx: Compiler&, item: i64) -> bool {
+    let x = ctx.nodes[item];
+    if x.tag == N_RANGE { return pattern_literal(ctx, x.a) && pattern_literal(ctx, x.b); }
+    if x.tag == N_UNARY { return ctx.nodes[x.a].tag == N_INT; }
+    return x.tag == N_INT;
+}
+// A literal or a let/const global, either one negated, at the scrutinee's type.
+fn pattern_value(ctx: Compiler&, n: i64, scope: i64, ty: i64) -> u64 {
+    var inner = n; if ctx.nodes[n].tag == N_UNARY { inner = ctx.nodes[n].a; }
+    let spelled = ctx.tokens[ctx.nodes[inner].token].text;
+    if ctx.nodes[inner].tag == N_NAME {
+        let s = lookup(ctx, inner, scope, 2);
+        if s < 0 { error_at(ctx, ctx.nodes[n].token, str("unknown constant ", spelled, " in an integer match")); }
+        if ctx.symbols[s].scope != 0 { error_at(ctx, ctx.nodes[n].token, str("match pattern ", spelled, " names a local variable, not a constant")); }
+        if ctx.symbols[s].flags & 1 != 0 { error_at(ctx, ctx.nodes[n].token, str("match pattern ", spelled, " names a var global, not a constant")); }
+    }
+    let bits = constant_integer(ctx, n);
+    let t = ctx.types[ty];
+    var fit = integer_fits(ctx, bits, ty);
+    if t.flags & 2 == 0 && ctx.nodes[n].tag != N_UNARY && ctx.nodes[n].tag == N_INT && bits > 9223372036854775807 { fit = false; }
+    if t.flags & 2 != 0 && t.bytes < 8 && ctx.nodes[n].tag == N_UNARY && bits != 0 { fit = false; }
+    if !fit { error_at(ctx, ctx.nodes[n].token, "match pattern does not fit the scrutinee type"); }
+    ctx.nodes[n].bits = bits;
+    return bits;
+}
+fn covered_by_earlier(ctx: Compiler&, m: i64, arm: i64, lo: u64, hi: u64, ty: i64) -> bool {
+    // Walk forward from lo through the earlier arms' patterns until hi.
+    var cursor = lo;
+    loop {
+        var reach = cursor; var found = false;
+        var e = ctx.nodes[m].first;
+        while e >= 0 && ctx.edges[e].value != arm {
+            var p = ctx.nodes[ctx.edges[e].value].first;
+            while p >= 0 {
+                let item = ctx.edges[p].value;
+                let a = pattern_low(ctx, item, ty); let b = pattern_high(ctx, item, ty);
+                if a <= cursor && cursor <= b && b >= reach { reach = b; found = true; }
+                p = ctx.edges[p].next;
+            }
+            e = ctx.edges[e].next;
+        }
+        if !found { return false; }
+        if reach >= hi || reach == 18446744073709551615 { return true; }
+        cursor = reach + 1;
+    }
+    return false;
+}
+recursive fn check_match(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Value {
+    let x = ctx.nodes[n];
+    let s = decay(ctx, check_expression(ctx, x.a, scope, -1));
+    let st = ctx.types[s.ty];
+    if st.kind != T_ENUM && st.kind != T_INTEGER { error_at(ctx, x.token, "cannot match on a value of this type"); }
+    if x.first < 0 { error_at(ctx, x.token, "match has no arms"); }
+    var e = x.first;
+    var wildcard = false;
+    while e >= 0 {
+        let arm = ctx.edges[e].value;
+        if wildcard { error_at(ctx, ctx.nodes[arm].token, "_ must be the last match arm"); }
+        if ctx.nodes[arm].flags & 2 != 0 { wildcard = true; e = ctx.edges[e].next; continue; }
+        var p = ctx.nodes[arm].first;
+        while p >= 0 {
+            let item = ctx.edges[p].value; let t = ctx.nodes[item].token;
+            if st.kind == T_ENUM {
+                if ctx.nodes[item].tag != N_NAME || ctx.nodes[item].flags & 1 != 0 { error_at(ctx, t, "ADT match arms are variant names (or _)"); }
+                let vt = find_variant(ctx, s.ty, t);
+                if vt < 0 { error_at(ctx, t, str("enum ", ctx.tokens[ctx.nodes[st.decl].token].text, " has no variant named ", ctx.tokens[t].text)); }
+                ctx.nodes[item].symbol = vt;
+                var q = x.first;
+                while q != e {
+                    var r = ctx.nodes[ctx.edges[q].value].first;
+                    while r >= 0 { if ctx.nodes[ctx.edges[r].value].symbol == vt { error_at(ctx, t, str("variant ", ctx.tokens[t].text, " is already matched by an earlier arm")); } r = ctx.edges[r].next; }
+                    q = ctx.edges[q].next;
+                }
+                var r = ctx.nodes[arm].first;
+                while r != p { if ctx.nodes[ctx.edges[r].value].symbol == vt { error_at(ctx, t, str("variant ", ctx.tokens[t].text, " is listed twice")); } r = ctx.edges[r].next; }
+            } else {
+                if ctx.nodes[arm].b >= 0 { error_at(ctx, t, str("constant pattern ", pattern_text(ctx, item), " has no payload to bind")); }
+                if ctx.nodes[item].tag == N_RANGE {
+                    pattern_value(ctx, ctx.nodes[item].a, scope, s.ty); pattern_value(ctx, ctx.nodes[item].b, scope, s.ty);
+                    if pattern_key(ctx, ctx.nodes[ctx.nodes[item].b].bits, s.ty) <= pattern_key(ctx, ctx.nodes[ctx.nodes[item].a].bits, s.ty) { error_at(ctx, t, "empty range in match pattern"); }
+                } else { pattern_value(ctx, item, scope, s.ty); }
+                let lo = pattern_low(ctx, item, s.ty); let hi = pattern_high(ctx, item, s.ty);
+                if covered_by_earlier(ctx, n, arm, lo, hi, s.ty) { error_at(ctx, t, str("match pattern ", pattern_text(ctx, item), " never matches: earlier arms match all of its values")); }
+                var r = ctx.nodes[arm].first;
+                while r != p {
+                    let other = ctx.edges[r].value;
+                    if !(pattern_low(ctx, other, s.ty) > hi || lo > pattern_high(ctx, other, s.ty)) {
+                        if pattern_text(ctx, item) == pattern_text(ctx, other) { error_at(ctx, t, str("match pattern ", pattern_text(ctx, item), " is listed twice")); }
+                        if pattern_literal(ctx, item) && pattern_literal(ctx, other) { error_at(ctx, t, str("match patterns ", pattern_text(ctx, other), " and ", pattern_text(ctx, item), " overlap")); }
+                    }
+                    r = ctx.edges[r].next;
+                }
+            }
+            p = ctx.edges[p].next;
+        }
+        e = ctx.edges[e].next;
+    }
+    if st.kind == T_INTEGER && !wildcard { error_at(ctx, x.token, "integer match requires a _ arm"); }
+    if st.kind == T_ENUM && !wildcard {
+        var v = st.first;
+        while v >= 0 {
+            let vt = ctx.edges[v].value; var covered = false;
+            var q = x.first;
+            while q >= 0 {
+                var r = ctx.nodes[ctx.edges[q].value].first;
+                while r >= 0 { if ctx.nodes[ctx.edges[r].value].symbol == vt { covered = true; } r = ctx.edges[r].next; }
+                q = ctx.edges[q].next;
+            }
+            if !covered { error_at(ctx, x.token, str("match does not cover variant ", ctx.tokens[ctx.nodes[st.decl].token].text, ".", ctx.tokens[ctx.nodes[ctx.types[vt].decl].token].text)); }
+            v = ctx.edges[v].next;
+        }
+    }
+    var result = Value {};
+    var previous = -1;
+    e = x.first;
+    while e >= 0 {
+        let arm = ctx.edges[e].value;
+        let inner = scope_new(ctx, scope, ctx.checking_function);
+        let binder = ctx.nodes[arm].b;
+        if binder >= 0 {
+            let vt = ctx.nodes[first_child(ctx, arm)].symbol;
+            let variant = ctx.tokens[ctx.nodes[first_child(ctx, arm)].token].text;
+            if !has_payload(ctx, vt) { error_at(ctx, ctx.nodes[binder].token, str("variant ", variant, " has no payload to bind")); }
+            if ctx.nodes[arm].flags & 1 != 0 { error_at(ctx, ctx.nodes[binder].token, str("cannot bind the payload of fixed-mode ", ctx.tokens[ctx.nodes[st.decl].token].text, " by reference (§3.5); bind by value: ", variant, " ", ctx.tokens[ctx.nodes[binder].token].text)); }
+            // A payload copy that cannot be written, as a by-value for binding.
+            let b = register_symbol(ctx, ctx.nodes[binder].token, -1, 2, arm, inner, 32);
+            ctx.symbols[b].ty = vt; ctx.symbols[b].state = 2; ctx.symbols[b].root = s.root; ctx.symbols[b].held = s.held;
+            ctx.nodes[binder].symbol = b;
+        }
+        let body = ctx.nodes[arm].c;
+        let a = check_expression(ctx, body, inner, expected);
+        if previous < 0 { result = a; result.place = -1; result.known = false; }
+        else { result = join_branch(ctx, result, a, previous, body, x.token); }
+        previous = body;
+        e = ctx.edges[e].next;
+    }
+    return result;
 }
 
 recursive fn check_array(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Value {
@@ -541,15 +727,32 @@ recursive fn check_array(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
     if ty < 0 { error_at(ctx, x.token, "invalid array element type"); }
     return Value { ty: ty, held: root };
 }
+// The type a name expression spells, with its written type arguments.
+fn type_syntax(ctx: Compiler&, name: i64) -> i64 {
+    let t = node(ctx, N_TYPE, ctx.nodes[name].token);
+    ctx.nodes[t].ns = ctx.nodes[name].ns; ctx.nodes[t].flags = ctx.nodes[name].flags;
+    ctx.nodes[t].first = ctx.nodes[name].first; ctx.nodes[t].last = ctx.nodes[name].last;
+    return t;
+}
+// The enum a name denotes where it is not a variable: Shape in Shape.Dot.
+fn variant_owner(ctx: Compiler&, n: i64, scope: i64) -> i64 {
+    if ctx.nodes[n].tag != N_NAME || lookup(ctx, n, scope, 2) >= 0 || lookup(ctx, n, scope, 1) < 0 { return -1; }
+    let ty = resolve_type(ctx, type_syntax(ctx, n), scope);
+    if ctx.types[ty].kind == T_ENUM { return ty; }
+    return -1;
+}
 recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let name = ctx.nodes[n].a;
-    if ctx.nodes[name].tag != N_NAME { error_at(ctx, ctx.nodes[name].token, "not implemented yet: variant constructors"); }
-    let symbol = lookup(ctx, name, scope, 1);
-    if symbol < 0 { error_at(ctx, ctx.nodes[name].token, "unknown constructor"); }
-    let type_name = node(ctx, N_TYPE, ctx.nodes[name].token);
-    ctx.nodes[type_name].ns = ctx.nodes[name].ns; ctx.nodes[type_name].flags = ctx.nodes[name].flags;
-    ctx.nodes[type_name].first = ctx.nodes[name].first;
-    let ty = resolve_type(ctx, type_name, scope);
+    var ty = -1;
+    if ctx.nodes[name].tag == N_MEMBER {
+        let owner = variant_owner(ctx, ctx.nodes[name].a, scope);
+        if owner < 0 { error_at(ctx, ctx.nodes[name].token, "variant literal of non-ADT type"); }
+        let variant = node(ctx, N_TYPE_MEMBER, ctx.nodes[name].token); ctx.nodes[variant].a = type_syntax(ctx, ctx.nodes[name].a);
+        ty = resolve_type(ctx, variant, scope);
+    } else {
+        if ctx.nodes[name].tag != N_NAME || lookup(ctx, name, scope, 1) < 0 { error_at(ctx, ctx.nodes[name].token, "unknown constructor"); }
+        ty = resolve_type(ctx, type_syntax(ctx, name), scope);
+    }
     if ctx.types[ty].kind != T_STRUCT { error_at(ctx, ctx.nodes[n].token, "constructor needs a struct type"); }
     var f = ctx.types[ty].first; var e = ctx.nodes[n].first;
     ctx.nodes[n].first = -1; ctx.nodes[n].last = -1;
@@ -883,7 +1086,17 @@ fn check_result(ctx: Compiler&, n: i64, raw: Value, spec: i64, result: i64, toke
     if ctx.types[target].size_class > 0 && v.place >= 0 && !own_local { error_at(ctx, token, "returning nonfixed storage by value requires an explicit copy"); }
     let decl = ctx.symbols[ctx.specializations[spec].symbol].decl;
     if ctx.specializations[spec].in_cycle && ctx.nodes[decl].b < 0 && ctx.types[target].kind == T_REFERENCE { error_at(ctx, token, "a recursive cycle needs an explicit reference result type"); }
-    if n >= 0 { require_fit(ctx, n, v, target); }
+    if n >= 0 {
+        // Results are generic over constness: a read-only view returned where
+        // a writable one is declared makes this instance's result read-only.
+        var given = v;
+        let t = ctx.types[target]; let g = ctx.types[given.ty];
+        if (t.kind == T_SLICE || t.kind == T_REFERENCE) && t.flags & 1 == 0 {
+            if g.kind == t.kind && g.element == t.element && g.flags & 1 != 0 { given.ty = target; given.readonly = true; }
+            if t.kind == T_REFERENCE { given.readonly = false; }
+        }
+        require_fit(ctx, n, given, target);
+    }
     else if target != 0 { error_at(ctx, token, "missing return value"); }
     let root = content_root(ctx, received(ctx, v, target));
     if contains_view(ctx, target) && root >= 0 && ctx.scopes[ctx.symbols[root].scope].function == spec { error_at(ctx, token, "returned reference refers to a local"); }

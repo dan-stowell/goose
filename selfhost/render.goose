@@ -5,6 +5,11 @@ fn render_field(ctx: Compiler&, ty: i64, code: const u8[:]) {
         emit(ctx, str("gg_quote(out, ", c_view(ctx, CValue { code: code, ty: ty }), ");"));
     } else { emit(ctx, str("gg_render_", ty, "(out, ", code, ");")); }
 }
+// A payload-less variant renders as Enum.Variant; one with a payload as its literal.
+fn render_constant(ctx: Compiler&, vt: i64) {
+    let text = save_text(ctx, str(ctx.tokens[ctx.nodes[ctx.types[ctx.types[vt].element].decl].token].text, ".", ctx.tokens[ctx.nodes[ctx.types[vt].decl].token].text));
+    emit(ctx, str("gg_append(out,", c_literal(ctx, text), ",", text.len, ",1);"));
+}
 fn c_format_helpers(ctx: Compiler&) {
     emit(ctx, "static void gg_quote(gg_reference out,gg_slice text) { int64_t i; unsigned char c; gg_append(out,\"\\\"\",1,1); for(i=0;i<text.len;i++){c=((unsigned char*)text.data)[i]; if(c=='\\\"'||c=='\\\\'){gg_append(out,\"\\\\\",1,1);gg_append(out,&c,1,1);} else if(c=='\\n')gg_append(out,\"\\\\n\",2,1);else if(c=='\\r')gg_append(out,\"\\\\r\",2,1);else if(c=='\\t')gg_append(out,\"\\\\t\",2,1);else gg_append(out,&c,1,1);}gg_append(out,\"\\\"\",1,1);}\n");
     for t, id in ctx.types {
@@ -12,6 +17,12 @@ fn c_format_helpers(ctx: Compiler&) {
         emit(ctx, str("static uint8_t gg_eq_", id, "(", c_type(ctx, id), " a, ", c_type(ctx, id), " b);\n"));
         emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a, gg_slice b);\n"));
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value);\n"));
+        if is_variant(ctx, id) {
+            let owner = c_type(ctx, t.element);
+            emit(ctx, str("static ", owner, " gg_wrap_", id, "(", c_type(ctx, id), " v) { ", owner, " e; memset(&e, 0, sizeof(e)); e.tag = ", t.count, ";"));
+            if has_payload(ctx, id) { emit(ctx, str(" e.u.v", t.count, " = v;")); } else { emit(ctx, " (void)v;"); }
+            emit(ctx, " return e; }\n");
+        }
     }
     for t, id in ctx.types {
         if t.kind == T_VOID || t.kind == T_BOTTOM { continue; }
@@ -26,6 +37,15 @@ fn c_format_helpers(ctx: Compiler&) {
                 e = ctx.edges[e].next;
             }
             emit(ctx, "return 1;\n");
+        } else if t.kind == T_ENUM {
+            emit(ctx, "if(a.tag!=b.tag)return 0;\nswitch(a.tag){\n");
+            var e = t.first;
+            while e >= 0 {
+                let vt = ctx.edges[e].value;
+                if has_payload(ctx, vt) { emit(ctx, str("case ", ctx.types[vt].count, ": return gg_eq_", vt, "(a.u.v", ctx.types[vt].count, ",b.u.v", ctx.types[vt].count, ");\n")); }
+                e = ctx.edges[e].next;
+            }
+            emit(ctx, "}\nreturn 1;\n");
         } else if t.kind == T_ARRAY || t.kind == T_SLICE {
             emit(ctx, str("return gg_equal_elements_", t.element, "(", c_view(ctx, CValue { code: "a", ty: id }), ",", c_view(ctx, CValue { code: "b", ty: id }), ");\n"));
         } else if t.kind == T_REFERENCE && ctx.types[t.element].size_class == 2 { emit(ctx, "return a.header == b.header;\n"); }
@@ -37,7 +57,19 @@ fn c_format_helpers(ctx: Compiler&) {
         else if t.kind == T_BOOL { emit(ctx, "gg_bool(out,value);\n"); }
         else if t.kind == T_REFERENCE {
             emit(ctx, str("gg_render_", t.element, "(out,", if ctx.types[t.element].size_class == 2 { "*value.header" } else { "*value" }, ");\n"));
-        } else if t.kind == T_STRUCT {
+        } else if t.kind == T_ENUM {
+            emit(ctx, "switch(value.tag){\n");
+            var e = t.first;
+            while e >= 0 {
+                let vt = ctx.edges[e].value;
+                emit(ctx, str("case ", ctx.types[vt].count, ": "));
+                if has_payload(ctx, vt) { emit(ctx, str("gg_render_", vt, "(out,value.u.v", ctx.types[vt].count, ");")); }
+                else { render_constant(ctx, vt); }
+                emit(ctx, " break;\n"); e = ctx.edges[e].next;
+            }
+            emit(ctx, "}\n");
+        } else if is_variant(ctx, id) && !has_payload(ctx, id) { render_constant(ctx, id); emit(ctx, "\n"); }
+        else if t.kind == T_STRUCT {
             let name = ctx.tokens[ctx.nodes[t.decl].token].text;
             let prefix = save_text(ctx, str(name, " { "));
             emit(ctx, str("gg_append(out,", c_literal(ctx, prefix), ",", prefix.len, ",1);\n"));

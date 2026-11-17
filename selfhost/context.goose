@@ -58,6 +58,7 @@ struct Compiler {
     cursor: i64 = 0,
     parse_limit: i64 = 0,
     parse_depth: i64 = 0,
+    instantiation_depth: i64 = 0,
     types: Type[>..]&,
     fielddefs: Field[>..]&,
     scopes: Scope[>..]&,

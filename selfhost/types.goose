@@ -10,6 +10,9 @@ const T_SLICE = 6;
 const T_REFERENCE = 7;
 const T_VARINT = 8;
 const T_BOTTOM = 9;
+// An enum's first lists its variant types. A variant type is a T_STRUCT whose
+// element is its enum and whose count is its index (its tag).
+const T_ENUM = 10;
 
 struct Type {
     kind: i64,
@@ -291,11 +294,15 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
                 if ctx.symbols[s].state == 1 { error_at(ctx, syntax.token, "cyclic type alias"); }
                 if syntax.first >= 0 { error_at(ctx, syntax.token, "a type alias takes no type arguments"); }
                 ctx.symbols[s].state = 1; ty = resolve_type_at(ctx, ctx.nodes[d].a, ctx.symbols[s].scope, reference_target); ctx.symbols[s].state = 2;
-            } else {
-                if ctx.nodes[d].tag == N_ENUM { error_at(ctx, syntax.token, "not implemented yet: enum type checking"); }
-                ty = instantiate_struct(ctx, d, syntax.first, scope, reference_target);
-            }
+            } else { ty = instantiate_struct(ctx, d, syntax.first, scope, reference_target); }
         }
+    } else if syntax.tag == N_TYPE_MEMBER {
+        let owner = resolve_type_at(ctx, syntax.a, scope, reference_target);
+        if ctx.types[owner].kind != T_ENUM { error_at(ctx, syntax.token, "variant type of non-ADT type"); }
+        ty = find_variant(ctx, owner, syntax.token);
+        if ty < 0 { error_at(ctx, syntax.token, str("enum ", ctx.tokens[ctx.nodes[ctx.types[owner].decl].token].text, " has no variant named ", ctx.tokens[syntax.token].text)); }
+    } else if syntax.tag == N_TYPE_MODE {
+        error_at(ctx, syntax.token, "not implemented yet: variable-mode enums");
     } else if syntax.tag == N_TYPE_ARRAY {
         if syntax.flags & 15 == 1 || syntax.flags & 15 == 2 { error_at(ctx, syntax.token, "not implemented yet: variable and limited array storage"); }
         let element = resolve_type(ctx, syntax.a, scope);
@@ -326,12 +333,14 @@ fn same_type_arguments(ctx: Compiler&, a: i64, b: i64) -> bool {
     return left == right;
 }
 recursive fn instantiate_struct(ctx: Compiler&, decl: i64, written: i64, caller_scope: i64, reference_target: bool) -> i64 {
+    var kind = T_STRUCT; if ctx.nodes[decl].tag == N_ENUM { kind = T_ENUM; }
+    let what = if kind == T_ENUM { "enum" } else { "struct" };
     var param = ctx.nodes[ctx.nodes[decl].a].first;
     if param < 0 {
-        if written >= 0 { error_at(ctx, ctx.nodes[decl].token, "non-generic struct takes no type arguments"); }
-        let ty = intern_type(ctx, Type { kind: T_STRUCT, decl: decl });
+        if written >= 0 { error_at(ctx, ctx.nodes[decl].token, str("non-generic ", what, " takes no type arguments")); }
+        let ty = intern_type(ctx, Type { kind: kind, decl: decl });
         if reference_target && ctx.types[ty].state == 1 { return ty; }
-        return struct_type(ctx, decl, 0);
+        return nominal_type(ctx, decl, 0);
     }
     var argument = written; var types = -1; var last = -1;
     while param >= 0 && argument >= 0 {
@@ -341,10 +350,10 @@ recursive fn instantiate_struct(ctx: Compiler&, decl: i64, written: i64, caller_
         if last < 0 { types = edge; } else { ctx.edges[last].next = edge; } last = edge;
         param = ctx.edges[param].next; argument = ctx.edges[argument].next;
     }
-    if param >= 0 || argument >= 0 { error_at(ctx, ctx.nodes[decl].token, "generic struct requires its type arguments"); }
+    if param >= 0 || argument >= 0 { error_at(ctx, ctx.nodes[decl].token, str("generic ", what, " requires its type arguments")); }
     for t, i in ctx.types {
-        if t.kind == T_STRUCT && t.template == decl && same_type_arguments(ctx, t.arguments, types) {
-            if t.state == 1 && !reference_target { error_at(ctx, ctx.nodes[decl].token, "struct contains itself by value"); }
+        if t.kind == kind && t.template == decl && same_type_arguments(ctx, t.arguments, types) {
+            if t.state == 1 && !reference_target { error_at(ctx, ctx.nodes[decl].token, str(what, " contains itself by value")); }
             return i;
         }
     }
@@ -356,9 +365,18 @@ recursive fn instantiate_struct(ctx: Compiler&, decl: i64, written: i64, caller_
         param = ctx.edges[param].next; argument = ctx.edges[argument].next;
     }
     let specialized = clone_tree(ctx, decl);
-    let ty = intern_type(ctx, Type { kind: T_STRUCT, decl: specialized });
+    let ty = intern_type(ctx, Type { kind: kind, decl: specialized });
     ctx.types[ty].template = decl; ctx.types[ty].arguments = types; ctx.types[ty].scope = bindings;
-    return struct_type(ctx, specialized, bindings);
+    // A layout that needs a larger instance of itself would never finish.
+    ctx.instantiation_depth++;
+    if ctx.instantiation_depth > 16 { error_at(ctx, ctx.nodes[decl].token, str("would chain more than 16 instantiations of ", ctx.tokens[ctx.nodes[decl].token].text, ", each needed by the one before")); }
+    let result = nominal_type(ctx, specialized, bindings);
+    ctx.instantiation_depth--;
+    return result;
+}
+recursive fn nominal_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
+    if ctx.nodes[decl].tag == N_ENUM { return enum_type(ctx, decl, scope); }
+    return struct_type(ctx, decl, scope);
 }
 // Const on an owned value qualifies its contents. Its var binding can still
 // be replaced as a whole. References and slices also carry type qualifiers.
@@ -376,6 +394,49 @@ recursive fn struct_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
     let id = intern_type(ctx, Type { kind: T_STRUCT, decl: decl });
     if ctx.types[id].state == 2 { return id; }
     if ctx.types[id].state == 1 { error_at(ctx, ctx.nodes[decl].token, "struct contains itself by value"); }
+    layout_fields(ctx, id, decl, scope);
+    return id;
+}
+// An enum is a tag (u8, or u16 past 256 variants) and room for its largest
+// payload. Each variant is a struct-like type of its own, laid out first.
+recursive fn enum_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
+    let id = intern_type(ctx, Type { kind: T_ENUM, decl: decl });
+    if ctx.types[id].state == 2 { return id; }
+    if ctx.types[id].state == 1 { error_at(ctx, ctx.nodes[decl].token, "enum contains itself by value"); }
+    ctx.types[id].state = 1;
+    var payload = 0; var count = 0; var last = -1;
+    var e = ctx.nodes[decl].first;
+    while e >= 0 {
+        let v = ctx.edges[e].value;
+        let vt = intern_type(ctx, Type { kind: T_STRUCT, element: id, count: count, decl: v });
+        ctx.types[vt].scope = ctx.types[id].scope;
+        layout_fields(ctx, vt, v, scope);
+        if ctx.types[vt].size_class > 0 { error_at(ctx, ctx.nodes[v].token, "not implemented yet: variable-size variant payloads"); }
+        if ctx.types[vt].first >= 0 && ctx.types[vt].bytes > payload { payload = ctx.types[vt].bytes; }
+        let edge = ctx.edges.len; ctx.edges.push(Edge { value: vt });
+        if last < 0 { ctx.types[id].first = edge; } else { ctx.edges[last].next = edge; }
+        last = edge; count++;
+        e = ctx.edges[e].next;
+    }
+    var tag = 1; if count > 256 { tag = 2; }
+    ctx.types[id].bytes = tag + payload; ctx.types[id].state = 2;
+    return id;
+}
+// The count is not stored on the type: it is part of the interning key.
+fn enum_tag_bytes(ctx: Compiler&, ty: i64) -> i64 {
+    var count = 0; var e = ctx.types[ty].first;
+    while e >= 0 { count++; e = ctx.edges[e].next; }
+    if count > 256 { return 2; }
+    return 1;
+}
+fn find_variant(ctx: Compiler&, ty: i64, token: i64) -> i64 {
+    var e = ctx.types[ty].first;
+    while e >= 0 { let vt = ctx.edges[e].value; if same_name(ctx, ctx.nodes[ctx.types[vt].decl].token, token) { return vt; } e = ctx.edges[e].next; }
+    return -1;
+}
+fn is_variant(ctx: Compiler&, ty: i64) -> bool { ctx.types[ty].kind == T_STRUCT && ctx.types[ty].element >= 0 }
+fn has_payload(ctx: Compiler&, ty: i64) -> bool { ctx.nodes[ctx.types[ty].decl].flags & 1 != 0 }
+recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
     ctx.types[id].state = 1;
     var offset = 0;
     var size_class = 0;
@@ -399,7 +460,6 @@ recursive fn struct_type(ctx: Compiler&, decl: i64, scope: i64) -> i64 {
     if offset == 0 { offset = 1; }
     if size_class > 0 { offset = -1; }
     ctx.types[id].bytes = offset; ctx.types[id].size_class = size_class; ctx.types[id].state = 2;
-    return id;
 }
 // A type as Goose spells it, for diagnostics.
 recursive fn type_text(ctx: Compiler&, ty: i64, out: u8[>..]&) {
