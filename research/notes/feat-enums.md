@@ -24,3 +24,15 @@ What Goose made easy, forced, or could not express while writing the compiler.
   memory model shapes the algorithm: arenas outside the recursion, scans instead of scratch sets.
 - **Results generic over constness** (§9.5) was missing from the checker: `fn f() -> u8[:]
   { "lit" }` failed. `check_return` now accepts the const twin and records a read-only result.
+
+## Custom formatting dispatch (2026-11-17)
+
+- A user `fn format(out: u8[>..]&, v: T)` is chosen once per type (`Type.formatter`) while checking
+  a print/str/format argument, for every type reachable from it; generic overloads are specialized
+  through the ordinary signature path with a synthesized call whose arguments are pre-annotated
+  values (flag 512), so no new inference code was needed.
+- The generated `gg_render_<ty>` helpers have no frame, but an overload needs a data-stack base.
+  Rather than add a base parameter to every helper (more C bytes everywhere), a C global
+  `gg_render_base` is set before a structural render, only in programs that have an overload; the
+  overload call saves and restores it. A top-level argument calls its overload directly, passing
+  the argument as a call would (a reference to its real storage).

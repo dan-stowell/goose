@@ -263,11 +263,21 @@ fn converted(ctx: Compiler&, v: CValue, target: i64) -> CValue {
 }
 fn c_render(ctx: Compiler&, out: CValue, v: CValue) {
     let a = c_decay(ctx, v); let t = ctx.types[a.ty]; let dst = c_reference(ctx, out);
-    if t.kind == T_INTEGER { emit(ctx, str("  ", if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(", dst, ", ", a.code, ");\n")); }
+    if t.formatter >= 0 {
+        // A rendered argument goes to its overload as a call would pass it.
+        let params = ctx.specializations[t.formatter].parameters;
+        let p = ctx.symbols[ctx.nodes[ctx.edges[ctx.edges[ctx.nodes[params].first].next].value].symbol].ty;
+        let arg = snapshot(ctx, CValue { code: c_adapt(ctx, a, p), ty: p, address: "", stack: "" });
+        emit_ref(ctx, "  gg_function_", t.formatter); emit(ctx, str("(", dst, ", ", arg.code, ", frame.base + ", ctx.c_slots, ");\n"));
+    }
+    else if (t.kind != T_INTEGER && t.kind != T_FLOAT && t.kind != T_BOOL && element_type(ctx, a.ty) != integer_type(ctx, 1, true)) {
+        if ctx.formatters > 0 { emit(ctx, str("  gg_render_base = frame.base + ", ctx.c_slots, ";\n")); }
+        emit(ctx, str("  gg_render_", a.ty, "(", dst, ",", a.code, ");\n"));
+    }
+    else if t.kind == T_INTEGER { emit(ctx, str("  ", if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(", dst, ", ", a.code, ");\n")); }
     else if t.kind == T_FLOAT { emit(ctx, str("  gg_float(", dst, ", ", a.code, ");\n")); }
     else if t.kind == T_BOOL { emit(ctx, str("  gg_bool(", dst, ", ", a.code, ");\n")); }
     else if element_type(ctx, a.ty) == integer_type(ctx, 1, true) { emit(ctx, str("  gg_text(", dst, ", ", c_view(ctx, a), ");\n")); }
-    else { emit(ctx, str("  gg_render_", a.ty, "(", dst, ",", a.code, ");\n")); }
 }
 fn c_result_field(ctx: Compiler&, code: const u8[:], ty: i64, index: i64) -> CValue {
     let field = save_text(ctx, str(code, ".r", index));
@@ -1096,11 +1106,12 @@ fn generate_c(ctx: Compiler&) {
     ctx.c_final.append(runtime_source()); ctx.c_final.push('\n');
     let type_start = ctx.c_output.len;
     for t, id in ctx.types { emit_type(ctx, id); }
-    c_format_helpers(ctx); c_globals(ctx); ctx.c_final.append(ctx.c_output[type_start..]);
+    c_format_helpers(ctx); c_globals(ctx); c_format_bodies(ctx); ctx.c_final.append(ctx.c_output[type_start..]);
     for spec, i in ctx.specializations { emit_function(ctx, i); }
     ctx.c_function = -1; ctx.c_slots = 0; ctx.c_temporary = 0; ctx.c_label = 0;
     let multis = ctx.c_multis; multis.clear();
     ctx.c_spec_start.push(ctx.c_specs.len); ctx.c_spec_split.push(ctx.c_specs.len);
+    let wrappers = ctx.c_output.len; c_format_wrappers(ctx); spec_text(ctx, wrappers);
     let declaration_start = ctx.c_declarations.len; let body_start = ctx.c_output.len;
     emit(ctx, str("  struct { int64_t base; } frame;\n  frame.base = ", ctx.c_global_slots, ";\n  gg_argc = argc; gg_argv = argv;\n"));
     for n in ctx.global_order { c_statement(ctx, n); }

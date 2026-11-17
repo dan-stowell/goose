@@ -36,3 +36,4 @@ its C is harder to compile per byte (emit-lean is on that). **What did the oracl
 milestone?** This is the first: run 23 -> 63/776, reject 3 -> 39/2036, stdlib 0 -> 6/17, fixed point held
 throughout. Self-hosted W1 is still 1.2x stock optimized, and W2 can't be compared until more fixtures pass;
 demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, through every rung).
+- 2026-11-17 feat-enums: user format overloads (custom formatting dispatch), by value or reference, generic ones on struct/enum patterns; run 40->43.

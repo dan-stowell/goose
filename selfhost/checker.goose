@@ -700,6 +700,76 @@ recursive fn check_match(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
     return result;
 }
 
+// User format overloads (§3.7): fn format(out: u8[>..]&, v: T), T by value or
+// by reference, renders every T wherever one occurs in a rendered argument.
+// The choice is made once per type, for everything reachable from what is
+// rendered; a type an overload renders is not walked further.
+recursive fn prepare_rendering(ctx: Compiler&, ty: i64, token: i64) {
+    if ctx.types[ty].formatter != -2 { return; }
+    ctx.types[ty].formatter = -1;
+    let spec = find_formatter(ctx, ty, token);
+    if spec >= 0 { ctx.types[ty].formatter = spec; ctx.formatters++; return; }
+    let t = ctx.types[ty];
+    var e = t.first;
+    if t.kind == T_STRUCT { while e >= 0 { prepare_rendering(ctx, ctx.fielddefs[ctx.edges[e].value].ty, token); e = ctx.edges[e].next; } }
+    if t.kind == T_ENUM { while e >= 0 { prepare_rendering(ctx, ctx.edges[e].value, token); e = ctx.edges[e].next; } }
+    if t.kind == T_ARRAY || t.kind == T_SLICE || t.kind == T_REFERENCE { prepare_rendering(ctx, t.element, token); }
+}
+// A call format(out, v) for a builder and a T that both lie in storage.
+fn format_call(ctx: Compiler&, ty: i64, token: i64) -> i64 {
+    let call = node(ctx, N_CALL, token); ctx.nodes[call].a = node(ctx, N_NAME, token); ctx.nodes[call].flags = 512;
+    for arg_ty in [array_type(ctx, integer_type(ctx, 1, true), 3, -1), ty] {
+        let holder = ctx.symbols.len;
+        ctx.symbols.push(Symbol { token: token, ns: -1, kind: 4, decl: call, scope: 0, ty: arg_ty, state: 2 });
+        index_symbol(ctx, holder);
+        let arg = node(ctx, N_NAME, token);
+        annotate(ctx, arg, Value { ty: arg_ty, root: holder, place: holder });
+        child(ctx, call, arg);
+    }
+    return call;
+}
+// A generic overload on a bare type variable, or an array or slice of one,
+// is an ordinary overload and does not render.
+fn bare_type_variable(ctx: Compiler&, decl: i64, pattern: i64) -> bool {
+    if pattern < 0 { return true; }
+    var p = pattern;
+    if ctx.nodes[p].tag == N_TYPE_ARRAY || ctx.nodes[p].tag == N_TYPE_SLICE || ctx.nodes[p].tag == N_TYPE_REF { p = ctx.nodes[p].a; }
+    if ctx.nodes[p].tag != N_TYPE || ctx.nodes[p].first >= 0 { return false; }
+    var g = ctx.nodes[decl].first;
+    while g >= 0 { if same_name(ctx, ctx.nodes[ctx.edges[g].value].token, ctx.nodes[p].token) { return true; } g = ctx.edges[g].next; }
+    return false;
+}
+fn second_parameter(ctx: Compiler&, decl: i64) -> i64 { ctx.edges[ctx.edges[ctx.nodes[ctx.nodes[decl].a].first].next].value }
+recursive fn find_formatter(ctx: Compiler&, ty: i64, token: i64) -> i64 {
+    var best = -1; var best_tier = 3; var call = -1;
+    let limit = ctx.symbols.len;
+    for i in limit {
+        let s = ctx.symbols[i];
+        if s.kind != 3 || s.scope != 0 || ctx.tokens[s.token].text != "format" { continue; }
+        let d = s.decl;
+        if child_count(ctx, ctx.nodes[d].a) != 2 || ctx.nodes[d].flags & 2 != 0 { continue; }
+        var concrete = i; var tier = 0;
+        if ctx.nodes[d].first >= 0 || ctx.nodes[second_parameter(ctx, d)].a < 0 {
+            if bare_type_variable(ctx, d, ctx.nodes[second_parameter(ctx, d)].a) { continue; }
+            if call < 0 { call = format_call(ctx, ty, token); }
+            tier = 1; concrete = specialize_signature(ctx, i, call, 0, true);
+            if concrete < 0 { continue; }
+        }
+        let cd = ctx.symbols[concrete].decl;
+        let given = resolve_type(ctx, ctx.nodes[second_parameter(ctx, cd)].a, ctx.symbols[concrete].scope);
+        if given != ty && !(ctx.types[given].kind == T_REFERENCE && ctx.types[given].element == ty) { continue; }
+        // The type's own namespace is searched before the global one.
+        if s.ns >= 0 {
+            if ctx.types[ty].decl < 0 || !same_name(ctx, s.ns, ctx.nodes[ctx.types[ty].decl].ns) { continue; }
+            tier -= 1;
+        }
+        if tier < best_tier { best = concrete; best_tier = tier; }
+    }
+    if best < 0 { return -1; }
+    if call < 0 { call = format_call(ctx, ty, token); }
+    return check_function(ctx, best, call, 0);
+}
+
 recursive fn check_array(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Value {
     let x = ctx.nodes[n];
     var element = -1;
@@ -1185,7 +1255,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
             if element_type(ctx, out.ty) != integer_type(ctx, 1, true) || out.readonly { error_at(ctx, ctx.nodes[n].token, "format needs a writable byte builder"); }
             e = ctx.edges[e].next;
         }
-        while e >= 0 { check_expression(ctx, ctx.edges[e].value, scope, -1); e = ctx.edges[e].next; }
+        while e >= 0 { prepare_rendering(ctx, decay(ctx, check_expression(ctx, ctx.edges[e].value, scope, -1)).ty, ctx.nodes[n].token); e = ctx.edges[e].next; }
         if name == "str" { ctx.nodes[n].symbol = -21; return Value { ty: array_type(ctx, integer_type(ctx, 1, true), 3, -1) }; }
         if name == "print" { ctx.nodes[n].symbol = -20; } else { ctx.nodes[n].symbol = -22; }
         return Value {};
@@ -1478,7 +1548,6 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
 // A checked file that declares no main in any namespace is a library: its
 // declarations are checked without an entry point, as `goose check` does.
 fn check_program(ctx: Compiler&, library: bool) {
-    for n in ctx.declarations { if ctx.nodes[n].tag == N_FUNCTION && ctx.tokens[ctx.nodes[n].token].text == "format" { error_at(ctx, ctx.nodes[n].token, "not implemented yet: custom formatting dispatch"); } }
     initialization_order(ctx, 0);
     for n in ctx.global_order { check_binding(ctx, n, 0); }
     var main_symbol = -1;

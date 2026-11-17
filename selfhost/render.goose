@@ -1,7 +1,7 @@
 // Structural equality and formatting are generated per semantic type, rather
 // than comparing packed structs as opaque bytes (padding and floats matter).
 fn render_field(ctx: Compiler&, ty: i64, code: const u8[:]) {
-    if element_type(ctx, ty) == integer_type(ctx, 1, true) {
+    if element_type(ctx, ty) == integer_type(ctx, 1, true) && ctx.types[ty].formatter < 0 {
         emit(ctx, str("gg_quote(out, ", c_view(ctx, CValue { code: code, ty: ty }), ");"));
     } else { emit(ctx, str("gg_render_", ty, "(out, ", code, ");")); }
 }
@@ -49,7 +49,28 @@ fn c_layout_helpers(ctx: Compiler&) {
         }
     }
 }
+// The overload runs on the data stacks above the rendering function's,
+// whose base the rendering builtin leaves in gg_render_base.
+fn render_overload(ctx: Compiler&, ty: i64) {
+    emit(ctx, str("{ int64_t b = gg_render_base; gg_format_", ty, "(out, value, b); gg_render_base = b; }\n"));
+}
+// gg_format_<ty> calls the overload under the name it has after duplicate
+// specializations merge, so it lives among the functions, as a ref.
+fn c_format_wrappers(ctx: Compiler&) {
+    for t, id in ctx.types {
+        if t.formatter < 0 { continue; }
+        let params = ctx.specializations[t.formatter].parameters;
+        let value = ctx.nodes[ctx.edges[ctx.edges[ctx.nodes[params].first].next].value].symbol;
+        let p = ctx.types[ctx.symbols[value].ty];
+        // A resizable value is rendered where it lies, read-only: no stack to grow.
+        var argument = "value";
+        if p.kind == T_REFERENCE { argument = if ctx.types[p.element].size_class == 2 { "gg_ref(&value, NULL)" } else { "&value" }; }
+        emit(ctx, str("static void gg_format_", id, "(gg_reference out, ", c_type(ctx, id), " value, int64_t base) { "));
+        emit_ref(ctx, "gg_function_", t.formatter); emit(ctx, str("(out, ", argument, ", base); }\n"));
+    }
+}
 fn c_format_helpers(ctx: Compiler&) {
+    emit(ctx, "static int64_t gg_render_base;\n");
     c_layout_helpers(ctx);
     emit(ctx, "static void gg_quote(gg_reference out,gg_slice text) { int64_t i; unsigned char c; gg_append(out,\"\\\"\",1,1); for(i=0;i<text.len;i++){c=((unsigned char*)text.data)[i]; if(c=='\\\"'||c=='\\\\'){gg_append(out,\"\\\\\",1,1);gg_append(out,&c,1,1);} else if(c=='\\n')gg_append(out,\"\\\\n\",2,1);else if(c=='\\r')gg_append(out,\"\\\\r\",2,1);else if(c=='\\t')gg_append(out,\"\\\\t\",2,1);else gg_append(out,&c,1,1);}gg_append(out,\"\\\"\",1,1);}\n");
     for t, id in ctx.types {
@@ -57,6 +78,7 @@ fn c_format_helpers(ctx: Compiler&) {
         emit(ctx, str("static uint8_t gg_eq_", id, "(", c_type(ctx, id), " a, ", c_type(ctx, id), " b);\n"));
         emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a, gg_slice b);\n"));
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value);\n"));
+        if t.formatter >= 0 { emit(ctx, str("static void gg_format_", id, "(gg_reference out, ", c_type(ctx, id), " value, int64_t base);\n")); }
         if is_variant(ctx, id) {
             let owner = c_type(ctx, t.element);
             emit(ctx, str("static ", owner, " gg_wrap_", id, "(", c_type(ctx, id), " v) { ", owner, " e; memset(&e, 0, sizeof(e)); e.tag = ", t.count, ";"));
@@ -64,6 +86,9 @@ fn c_format_helpers(ctx: Compiler&) {
             emit(ctx, " return e; }\n");
         }
     }
+}
+// Bodies follow the function prototypes, since an overload renders a type.
+fn c_format_bodies(ctx: Compiler&) {
     for t, id in ctx.types {
         if t.kind == T_VOID || t.kind == T_BOTTOM { continue; }
         if t.size_class == 1 {
@@ -99,7 +124,8 @@ fn c_format_helpers(ctx: Compiler&) {
         else { emit(ctx, "return a == b;\n"); }
         emit(ctx, "}\n");
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value) {\n"));
-        if t.kind == T_INTEGER { emit(ctx, str(if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(out,value);\n")); }
+        if t.formatter >= 0 { render_overload(ctx, id); }
+        else if t.kind == T_INTEGER { emit(ctx, str(if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(out,value);\n")); }
         else if t.kind == T_FLOAT { emit(ctx, "gg_float(out,value);\n"); }
         else if t.kind == T_BOOL { emit(ctx, "gg_bool(out,value);\n"); }
         else if t.kind == T_VARINT { emit(ctx, "gg_integer(out,gg_zig_read(value));\n"); }

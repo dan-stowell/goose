@@ -12,6 +12,7 @@ call_array_capacity
 call_location
 cnames
 continue_restores
+codegen_implicit_callees
 cycle_holder_results
 cycle_threaded_before_join
 cycle_threaded_results
@@ -19,6 +20,7 @@ cycle_threaded_slices
 diverging_values
 fat_held
 fixed_array_bulk_fill
+format_hook_provenance
 generic_shadowing
 growshrink_literal_views
 growshrink_reach_stores
@@ -51,6 +53,7 @@ rebind_chain_loop
 recursive_loop_walk
 reftops_call_sync
 resize_negative
+rendered_pools
 return_root_merge
 root_identifier
 short_circuit_temporaries

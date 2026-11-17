@@ -28,6 +28,9 @@ struct Type {
     arguments: i64 = -1,
     scope: i64 = 0,
     view_visit: i64 = 0,
+    // The user format overload's specialization that renders this type: -2
+    // undecided, -1 none (structural rendering).
+    formatter: i64 = -2,
 }
 struct Field {
     token: i64,
