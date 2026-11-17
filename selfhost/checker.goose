@@ -1057,9 +1057,10 @@ recursive fn check_construct(ctx: Compiler&, n: i64, scope: i64) -> Value {
             var i = defaults.len;
             while i > 0 && defaults[i - 1] != -1 {
                 i--;
-                if defaults[i] == -2 - field {
+                // The same declaration's default, in this or another instantiation.
+                if defaults[i] <= -2 && ctx.fielddefs[-2 - defaults[i]].token == ctx.fielddefs[field].token {
                     var text: u8[>..] = [];
-                    format(text, "the default of field ", ctx.tokens[ctx.fielddefs[field].token].text, " of "); type_text(ctx, field_owner(ctx, field), text);
+                    format(text, "the default of field ", ctx.tokens[ctx.fielddefs[field].token].text, " of "); type_text(ctx, field_owner(ctx, -2 - defaults[i]), text);
                     text.append(" leads to this construction of "); type_text(ctx, ty, text); text.append(", which takes it again");
                     error_at(ctx, ctx.nodes[n].token, text);
                 }
