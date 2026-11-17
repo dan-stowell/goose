@@ -169,6 +169,7 @@ fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64,
     }
 }
 fn shrink_array(ctx: Compiler&, array: Value, scope: i64, token: i64, balanced: bool) {
+    if ctx.types[array.ty].flags == 2 { return; }
     let element = element_type(ctx, array.ty);
     check_shrink(ctx, array.root, element, scope, token, balanced, false);
     if array.inexact {
@@ -227,6 +228,7 @@ fn fits_plain(ctx: Compiler&, v: Value, target: i64) -> bool {
     if a.kind == T_FLOAT && b.kind == T_FLOAT { return a.bytes <= b.bytes || v.known; }
     // Every integer becomes a float implicitly, rounding to the nearest (§6.3).
     if a.kind == T_INTEGER && b.kind == T_FLOAT { return true; }
+    if a.kind == T_INTEGER && b.kind == T_VARINT { return a.flags & 2 == 0 || a.bytes < 8; }
     if (a.kind == T_ARRAY || a.kind == T_SLICE) && (b.kind == T_ARRAY || b.kind == T_SLICE) && a.element == b.element {
         if b.kind == T_SLICE { return !v.readonly || b.flags & 1 != 0; }
         if b.flags == 0 { return a.kind == T_ARRAY && a.flags == 0 && a.count == b.count; }
@@ -424,6 +426,8 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             let f = find_field(ctx, a.ty, x.token);
             if f < 0 { error_at(ctx, x.token, "unknown field"); }
             ctx.nodes[n].symbol = f; v.ty = ctx.fielddefs[f].ty; v.root = a.root; v.place = a.place; v.readonly = a.readonly || ctx.fielddefs[f].flags & 2 != 0;
+            // A varint field reads as an i64 and is written only at construction.
+            if ctx.types[v.ty].kind == T_VARINT { v.ty = default_integer(ctx); v.place = -1; }
             v.held = a.held;
             var initializer = a.fields;
             while initializer >= 0 {
@@ -722,8 +726,8 @@ recursive fn check_array(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> V
         }
     }
     if element < 0 { error_at(ctx, x.token, "empty array needs an element type"); }
-    var mode = 0; if ctx.types[element].size_class > 0 { mode = 1; }
-    let ty = array_type(ctx, element, mode, count);
+    var ty = array_type(ctx, element, 0, count);
+    if ctx.types[element].size_class > 0 { ty = array_type(ctx, element, 1, 4); }
     if ty < 0 { error_at(ctx, x.token, "invalid array element type"); }
     return Value { ty: ty, held: root };
 }
@@ -1120,13 +1124,17 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     let member = ctx.nodes[callee].tag == N_MEMBER;
     let name = ctx.tokens[ctx.nodes[callee].token].text;
     var receiver = Value {};
-    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop");
+    let array_method = member && (name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n");
     if array_method { receiver = check_expression(ctx, ctx.nodes[callee].a, scope, -1); }
     // Builtin arguments are checked with their construction destination.
     if member && element_type(ctx, receiver.ty) >= 0 {
         let array = decay(ctx, receiver); let element = element_type(ctx, array.ty);
-        if name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" {
-            if (name == "resize" || name == "clear" || name == "pop") && !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: shrinking within a larger expression"); }
+        if name == "push" || name == "append" || name == "resize" || name == "clear" || name == "pop" || name == "pop_n" {
+            let shrinking = name == "resize" || name == "clear" || name == "pop" || name == "pop_n";
+            // References into a limited array stay valid across shrinks.
+            let limited = ctx.types[array.ty].kind == T_ARRAY && ctx.types[array.ty].flags == 2;
+            if shrinking && ctx.types[element].size_class != 0 { error_at(ctx, ctx.nodes[callee].token, str(".", name, " needs fixed-size elements: the array is sequential")); }
+            if shrinking && !limited && !ctx.nodes[n].standalone { error_at(ctx, ctx.nodes[n].token, "not implemented yet: shrinking within a larger expression"); }
             if array.readonly { error_at(ctx, ctx.nodes[callee].token, "cannot mutate a read-only array"); }
             if ctx.types[array.ty].kind != T_ARRAY || ctx.types[array.ty].flags < 2 { error_at(ctx, ctx.nodes[callee].token, "operation requires a growable array"); }
             var e = ctx.nodes[n].first;
@@ -1153,6 +1161,11 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
                 if e >= 0 { let fill = ctx.edges[e].value; require_fit(ctx, fill, check_expression(ctx, fill, scope, element), element); }
                 ctx.nodes[n].symbol = -12;
             } else if name == "clear" { shrink_array(ctx, array, scope, ctx.nodes[n].token, false); if child_count(ctx, n) != 0 { error_at(ctx, ctx.nodes[n].token, "clear takes no arguments"); } ctx.nodes[n].symbol = -13; }
+            else if name == "pop_n" {
+                if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "pop_n takes a count"); }
+                let count = ctx.edges[e].value; require_fit(ctx, count, decay(ctx, check_expression(ctx, count, scope, -1)), default_integer(ctx));
+                shrink_array(ctx, array, scope, ctx.nodes[n].token, false); ctx.nodes[n].symbol = -15;
+            }
             else { shrink_array(ctx, array, scope, ctx.nodes[n].token, false); if child_count(ctx, n) != 0 { error_at(ctx, ctx.nodes[n].token, "pop takes no arguments"); } ctx.nodes[n].symbol = -14; return Value { ty: element }; }
             return Value {};
         }

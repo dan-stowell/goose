@@ -79,15 +79,106 @@ fn runtime_source() -> const u8[:] {
     }
     static void gg_resize(gg_reference a, int64_t n, size_t element, const void *fill) {
         int64_t old=a.header->len, i;
-        if (n < 0) gg_fail("negative array length");
+        if (n < 0) gg_fail("resize to a negative length");
         if (n > old) {
             unsigned char *p;
-            if (!fill) gg_fail("resize without fill may only shrink");
+            if (!fill) gg_fail("resize growth requires a fill value");
             if ((uint64_t)(n-old) > GG_RESERVATION / (element ? element : 1)) gg_fail("invalid array size");
             p=gg_allocate(a.stack, (size_t)(n-old)*element);
             for (i=0; i<n-old; i++) if(element) memcpy(p+(size_t)i*element, fill, element);
         } else { a.stack->top = (size_t)(a.header->base-a.stack->base) + (size_t)n*element; }
         a.header->len=n;
+    }
+    static void gg_rpop_n(gg_reference a, int64_t k, size_t element) {
+        if (k < 0 || k > a.header->len) gg_fail("pop_n count negative or beyond the array's length");
+        gg_resize(a, a.header->len - k, element, NULL);
+    }
+    static void *gg_rpop(gg_reference a, size_t element) {
+        if (!a.header->len) gg_fail("pop on empty array");
+        return a.header->base + (size_t)(a.header->len - 1) * element;
+    }
+    /* Packed storage: a variable value is a pointer to its bytes, built by
+       appending to a data stack. Stored lengths are 1, 2, 4 or 8 bytes wide,
+       or a LEB128 varint (width 0); varint fields are zigzag LEB128. */
+    static uint64_t gg_uleb_read(const uint8_t *p) {
+        uint64_t v = 0; int shift = 0;
+        for (;;) { uint8_t b = *p++; if (shift < 64) v |= (uint64_t)(b & 127) << shift; shift += 7; if (!(b & 128)) return v; }
+    }
+    static int64_t gg_uleb_size(const uint8_t *p) { int64_t n = 1; while (*p++ & 128) n++; return n; }
+    static int64_t gg_zig_read(const uint8_t *p) { uint64_t v = gg_uleb_read(p); return (int64_t)(v >> 1) ^ -(int64_t)(v & 1); }
+    static int64_t gg_len_read(const uint8_t *p, int w) {
+        if (w == 1) return *p;
+        if (w == 2) return *(const uint16_t *)p;
+        if (w == 4) return *(const uint32_t *)p;
+        if (w == 8) return (int64_t)*(const uint64_t *)p;
+        return (int64_t)gg_uleb_read(p);
+    }
+    static int64_t gg_len_size(const uint8_t *p, int w) { return w ? w : gg_uleb_size(p); }
+    static gg_slice gg_frozen_view(uint8_t *p, int w) { return gg_view(p + gg_len_size(p, w), gg_len_read(p, w)); }
+    static gg_slice gg_dyn_view(uint8_t *p) { return gg_view(p + 8, *(uint32_t *)(p + 4)); }
+    static void gg_push(gg_stack *s, const void *p, size_t n) { void *to = gg_allocate(s, n); if (n) memmove(to, p, n); }
+    static void gg_push_uleb(gg_stack *s, uint64_t v) {
+        uint8_t b[10]; int n = 0;
+        do { b[n] = (uint8_t)(v & 127); v >>= 7; if (v) b[n] |= 128; n++; } while (v);
+        gg_push(s, b, (size_t)n);
+    }
+    static void gg_push_zig(gg_stack *s, int64_t v) { gg_push_uleb(s, ((uint64_t)v << 1) ^ (uint64_t)(v >> 63)); }
+    static void gg_push_len(gg_stack *s, int64_t n, int w) {
+        uint8_t b1; uint16_t b2; uint32_t b4; uint64_t b8 = (uint64_t)n;
+        if (n < 0) gg_fail("invalid array length");
+        if (w && w < 8 && (uint64_t)n >> (w * 8)) { fprintf(stderr, "goose runtime error: array length exceeds storage range\n"); exit(1); }
+        if (w == 1) { b1 = (uint8_t)n; gg_push(s, &b1, 1); }
+        else if (w == 2) { b2 = (uint16_t)n; gg_push(s, &b2, 2); }
+        else if (w == 4) { b4 = (uint32_t)n; gg_push(s, &b4, 4); }
+        else if (w == 8) gg_push(s, &b8, 8);
+        else gg_push_uleb(s, (uint64_t)n);
+    }
+    static void gg_push_dyn(gg_stack *s, int64_t cap, size_t element) {
+        uint32_t h[2]; void *to;
+        if (cap < 0 || cap > (int64_t)UINT32_MAX) gg_fail("invalid capacity");
+        h[0] = (uint32_t)cap; h[1] = 0; gg_push(s, h, 8);
+        to = gg_allocate(s, (size_t)cap * element); if (cap && element) memset(to, 0, (size_t)cap * element);
+    }
+    /* Limited arrays: a stored length of width w, a capacity and the data. */
+    static int64_t gg_lget(void *l, int w) {
+        if (w == 1) return *(uint8_t *)l;
+        if (w == 2) return *(uint16_t *)l;
+        if (w == 4) return *(uint32_t *)l;
+        return *(int64_t *)l;
+    }
+    static void gg_lset(void *l, int w, int64_t n) {
+        if (w == 1) *(uint8_t *)l = (uint8_t)n;
+        else if (w == 2) *(uint16_t *)l = (uint16_t)n;
+        else if (w == 4) *(uint32_t *)l = (uint32_t)n;
+        else *(int64_t *)l = n;
+    }
+    static void *gg_lpush(void *l, int w, int64_t cap, void *data, size_t element) {
+        int64_t n = gg_lget(l, w);
+        if (n >= cap) gg_fail("limited array capacity exceeded");
+        gg_lset(l, w, n + 1); return (unsigned char *)data + (size_t)n * element;
+    }
+    static void *gg_lpop(void *l, int w, void *data, size_t element) {
+        int64_t n = gg_lget(l, w);
+        if (!n) gg_fail("pop on empty array");
+        gg_lset(l, w, n - 1); return (unsigned char *)data + (size_t)(n - 1) * element;
+    }
+    static void gg_lpop_n(void *l, int w, int64_t k) {
+        int64_t n = gg_lget(l, w);
+        if (k < 0 || k > n) gg_fail("pop_n count negative or beyond the array's length");
+        gg_lset(l, w, n - k);
+    }
+    static void gg_lresize(void *l, int w, int64_t cap, void *data, size_t element, int64_t n, const void *fill) {
+        int64_t old = gg_lget(l, w), i;
+        if (n < 0) gg_fail("resize to a negative length");
+        if (n > cap) gg_fail("limited array capacity exceeded");
+        if (n > old) { if (!fill) gg_fail("resize growth requires a fill value"); for (i = old; i < n; i++) memcpy((unsigned char *)data + (size_t)i * element, fill, element); }
+        gg_lset(l, w, n);
+    }
+    static void gg_lappend(void *l, int w, int64_t cap, void *data, size_t element, gg_slice s) {
+        int64_t n = gg_lget(l, w);
+        if (s.len > cap - n) gg_fail("limited array capacity exceeded");
+        if (s.len) memmove((unsigned char *)data + (size_t)n * element, s.data, (size_t)s.len * element);
+        gg_lset(l, w, n + s.len);
     }
     static int64_t gg_div(int64_t a, int64_t b) { if (!b) gg_fail("division by zero"); if (a==INT64_MIN && b==-1) gg_fail("division overflow"); return a/b; }
     static int64_t gg_mod(int64_t a, int64_t b) {

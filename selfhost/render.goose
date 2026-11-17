@@ -10,7 +10,47 @@ fn render_constant(ctx: Compiler&, vt: i64) {
     let text = save_text(ctx, str(ctx.tokens[ctx.nodes[ctx.types[ctx.types[vt].element].decl].token].text, ".", ctx.tokens[ctx.nodes[ctx.types[vt].decl].token].text));
     emit(ctx, str("gg_append(out,", c_literal(ctx, text), ",", text.len, ",1);"));
 }
+// Packed layout walkers. A variable-size value's size is found by walking its
+// parts: a stored length and its elements, or a struct's fields in order.
+fn c_layout_helpers(ctx: Compiler&) {
+    for t, id in ctx.types {
+        if t.size_class == 1 {
+            emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p);\nstatic int64_t gg_span_", id, "(uint8_t *p, int64_t n);\n"));
+            if t.kind == T_STRUCT { emit(ctx, str("static uint8_t *gg_at_", id, "(uint8_t *p, int k);\n")); }
+        }
+    }
+    for t, id in ctx.types {
+        if limited_fixed(ctx, id) {
+            let ct = c_type(ctx, id);
+            emit(ctx, str("static ", ct, " gg_limit_", id, "(gg_slice s) { ", ct, " r; memset(&r, 0, sizeof r); if (s.len > ", t.count, ") gg_fail(\"limited array capacity exceeded\"); r.len = s.len; if (s.len) memcpy(r.e, s.data, (size_t)s.len * sizeof(r.e[0])); return r; }\n"));
+        }
+        if t.size_class != 1 { continue; }
+        emit(ctx, str("static int64_t gg_span_", id, "(uint8_t *p, int64_t n) { uint8_t *q = p; while (n-- > 0) q += gg_size_", id, "(q); return q - p; }\n"));
+        if t.kind == T_STRUCT {
+            emit(ctx, str("static uint8_t *gg_at_", id, "(uint8_t *p, int k) {\n"));
+            var e = t.first; var i = 0;
+            while e >= 0 {
+                let ft = ctx.fielddefs[ctx.edges[e].value].ty;
+                emit(ctx, str("  if (k == ", i, ") return p;\n"));
+                if ctx.types[ft].size_class == 1 { emit(ctx, str("  p += gg_size_", ft, "(p);\n")); }
+                else { emit(ctx, str("  p += sizeof(", c_type(ctx, ft), ");\n")); }
+                i++; e = ctx.edges[e].next;
+            }
+            emit(ctx, "  return p;\n}\n");
+            emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p) { return gg_at_", id, "(p, ", i, ") - p; }\n"));
+        } else if t.kind == T_VARINT {
+            emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p) { return gg_uleb_size(p); }\n"));
+        } else if t.kind == T_ARRAY && t.flags == 2 {
+            emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p) { return 8 + (int64_t)*(uint32_t *)p * (int64_t)", c_element_size(ctx, t.element), "; }\n"));
+        } else if t.kind == T_ARRAY {
+            emit(ctx, str("static int64_t gg_size_", id, "(uint8_t *p) { int64_t n = gg_len_read(p, ", t.count, "), h = gg_len_size(p, ", t.count, "); "));
+            if ctx.types[t.element].size_class == 1 { emit(ctx, str("return h + gg_span_", t.element, "(p + h, n); }\n")); }
+            else { emit(ctx, str("return h + n * (int64_t)", c_element_size(ctx, t.element), "; }\n")); }
+        }
+    }
+}
 fn c_format_helpers(ctx: Compiler&) {
+    c_layout_helpers(ctx);
     emit(ctx, "static void gg_quote(gg_reference out,gg_slice text) { int64_t i; unsigned char c; gg_append(out,\"\\\"\",1,1); for(i=0;i<text.len;i++){c=((unsigned char*)text.data)[i]; if(c=='\\\"'||c=='\\\\'){gg_append(out,\"\\\\\",1,1);gg_append(out,&c,1,1);} else if(c=='\\n')gg_append(out,\"\\\\n\",2,1);else if(c=='\\r')gg_append(out,\"\\\\r\",2,1);else if(c=='\\t')gg_append(out,\"\\\\t\",2,1);else gg_append(out,&c,1,1);}gg_append(out,\"\\\"\",1,1);}\n");
     for t, id in ctx.types {
         if t.kind == T_VOID || t.kind == T_BOTTOM { continue; }
@@ -26,14 +66,20 @@ fn c_format_helpers(ctx: Compiler&) {
     }
     for t, id in ctx.types {
         if t.kind == T_VOID || t.kind == T_BOTTOM { continue; }
-        emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a,gg_slice b) {int64_t i; if(a.len!=b.len)return 0;for(i=0;i<a.len;i++)if(!gg_eq_", id, "(((", c_type(ctx, id), "*)a.data)[i],((", c_type(ctx, id), "*)b.data)[i]))return 0;return 1;}\n"));
+        if t.size_class == 1 {
+            // Variable-size elements sit back to back: walk them pairwise.
+            emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a,gg_slice b) {int64_t i; uint8_t *p=a.data,*q=b.data; if(a.len!=b.len)return 0;for(i=0;i<a.len;i++){if(!gg_eq_", id, "(p,q))return 0;p+=gg_size_", id, "(p);q+=gg_size_", id, "(q);}return 1;}\n"));
+        } else {
+            emit(ctx, str("static uint8_t gg_equal_elements_", id, "(gg_slice a,gg_slice b) {int64_t i; if(a.len!=b.len)return 0;for(i=0;i<a.len;i++)if(!gg_eq_", id, "(((", c_type(ctx, id), "*)a.data)[i],((", c_type(ctx, id), "*)b.data)[i]))return 0;return 1;}\n"));
+        }
         emit(ctx, str("static uint8_t gg_eq_", id, "(", c_type(ctx, id), " a, ", c_type(ctx, id), " b) {\n"));
         if t.kind == T_STRUCT {
             var e = t.first;
             while e >= 0 {
                 let f = ctx.edges[e].value; let ft = ctx.fielddefs[f].ty;
-                if ctx.types[ft].kind == T_SLICE { emit(ctx, str("if(a.f", f, ".data!=b.f", f, ".data || a.f", f, ".len!=b.f", f, ".len)return 0;\n")); }
-                else { emit(ctx, str("if(!gg_eq_", ft, "(a.f", f, ",b.f", f, "))return 0;\n")); }
+                let left = c_field(ctx, id, "a", f).code; let right = c_field(ctx, id, "b", f).code;
+                if ctx.types[ft].kind == T_SLICE { emit(ctx, str("if((", left, ").data!=(", right, ").data || (", left, ").len!=(", right, ").len)return 0;\n")); }
+                else { emit(ctx, str("if(!gg_eq_", ft, "(", left, ",", right, "))return 0;\n")); }
                 e = ctx.edges[e].next;
             }
             emit(ctx, "return 1;\n");
@@ -48,15 +94,20 @@ fn c_format_helpers(ctx: Compiler&) {
             emit(ctx, "}\nreturn 1;\n");
         } else if t.kind == T_ARRAY || t.kind == T_SLICE {
             emit(ctx, str("return gg_equal_elements_", t.element, "(", c_view(ctx, CValue { code: "a", ty: id }), ",", c_view(ctx, CValue { code: "b", ty: id }), ");\n"));
-        } else if t.kind == T_REFERENCE && ctx.types[t.element].size_class == 2 { emit(ctx, "return a.header == b.header;\n"); }
+        } else if t.kind == T_VARINT { emit(ctx, "return gg_zig_read(a) == gg_zig_read(b);\n"); }
+        else if t.kind == T_REFERENCE && ctx.types[t.element].size_class == 2 { emit(ctx, "return a.header == b.header;\n"); }
         else { emit(ctx, "return a == b;\n"); }
         emit(ctx, "}\n");
         emit(ctx, str("static void gg_render_", id, "(gg_reference out, ", c_type(ctx, id), " value) {\n"));
         if t.kind == T_INTEGER { emit(ctx, str(if t.flags & 2 != 0 { "gg_unsigned" } else { "gg_integer" }, "(out,value);\n")); }
         else if t.kind == T_FLOAT { emit(ctx, "gg_float(out,value);\n"); }
         else if t.kind == T_BOOL { emit(ctx, "gg_bool(out,value);\n"); }
+        else if t.kind == T_VARINT { emit(ctx, "gg_integer(out,gg_zig_read(value));\n"); }
         else if t.kind == T_REFERENCE {
-            emit(ctx, str("gg_render_", t.element, "(out,", if ctx.types[t.element].size_class == 2 { "*value.header" } else { "*value" }, ");\n"));
+            var target = "*value";
+            if ctx.types[t.element].size_class == 2 { target = "*value.header"; }
+            if ctx.types[t.element].size_class == 1 { target = "value"; }
+            emit(ctx, str("gg_render_", t.element, "(out,", target, ");\n"));
         } else if t.kind == T_ENUM {
             emit(ctx, "switch(value.tag){\n");
             var e = t.first;
@@ -77,13 +128,17 @@ fn c_format_helpers(ctx: Compiler&) {
             while e >= 0 {
                 let f = ctx.edges[e].value;
                 if !first { emit(ctx, "gg_append(out,\", \",2,1);\n"); } first = false;
-                render_field(ctx, ctx.fielddefs[f].ty, save_text(ctx, str("value.f", f))); emit(ctx, "\n"); e = ctx.edges[e].next;
+                render_field(ctx, ctx.fielddefs[f].ty, c_field(ctx, id, "value", f).code); emit(ctx, "\n"); e = ctx.edges[e].next;
             }
             emit(ctx, "gg_append(out,\" }\",2,1);\n");
         } else if t.kind == T_ARRAY || t.kind == T_SLICE {
             let view = c_view(ctx, CValue { code: "value", ty: id });
             if t.element == integer_type(ctx, 1, true) { emit(ctx, str("gg_text(out,", view, ");\n")); }
-            else {
+            else if ctx.types[t.element].size_class == 1 {
+                emit(ctx, str("int64_t i; gg_slice view=", view, "; uint8_t *p=view.data; gg_append(out,\"[\",1,1);for(i=0;i<view.len;i++){if(i)gg_append(out,\", \",2,1);"));
+                render_field(ctx, t.element, "p");
+                emit(ctx, str("p+=gg_size_", t.element, "(p);}gg_append(out,\"]\",1,1);\n"));
+            } else {
                 emit(ctx, str("int64_t i; gg_slice view=", view, ";gg_append(out,\"[\",1,1);for(i=0;i<view.len;i++){if(i)gg_append(out,\", \",2,1);"));
                 render_field(ctx, t.element, save_text(ctx, str("((", c_type(ctx, t.element), "*)view.data)[i]")));
                 emit(ctx, "}gg_append(out,\"]\",1,1);\n");
