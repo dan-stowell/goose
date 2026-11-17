@@ -9,6 +9,7 @@ cycle_threaded_slices
 fixed_array_bulk_fill
 growshrink_literal_views
 holder_param_bounds
+inline_nested_calls
 let_contents
 local_name_suffixes
 namespace_comparisons
@@ -17,6 +18,7 @@ nested_call_depth
 reassoc_discarded_value
 rebind_chain_loop
 reftops_call_sync
+return_root_merge
 root_identifier
 slice_ref_loads
 slice_ref_stores
