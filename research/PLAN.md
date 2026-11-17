@@ -41,6 +41,9 @@ M4. Positive fixtures pass; `stdlib/` compiles; W2 runs entirely through `selfho
 
 Milestones log:
 
-Now: M0. Build the C++ compiler from source; run `python test/run_tests.py --goose-in-goose-only` and the
-full suite once to time W2 on the stock rungs; then start `./research/demo` and the bytes question in
-parallel (a builder for each, in worktrees).
+Now: M0 + M1 in parallel (2026-11-17 01:40 UTC). Builders in worktrees on branches `demo` (research/demo),
+`viz` (bytes method + first picture on :8000), `feat-stdlib`, `feat-storage`, `feat-enums` (selfhost
+clusters). Lead: merge each branch as it reports (rerun `python3 selfhost/scoreboard.py --enforce --update`
+after merging), study where the selfhost's 2.75x C bytes come from (M2/M3 groundwork). If a session
+restarts with builders lost: relaunch each from its branch with /tmp/claude-1000/briefs/*.md (recreate from
+research/notes/briefs.md).

@@ -1,0 +1,1 @@
+Builder briefs: brief-common.md (VM facts), brief-feature.md (selfhost feature rules). Areas: feat-stdlib (stdlib/ parses+checks, param defaults), feat-storage (variable/limited arrays, nonfixed fields, root struct, relative/optional refs), feat-enums (enums/ADTs/match/formatting dispatch, fn modifiers).
