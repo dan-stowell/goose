@@ -457,12 +457,17 @@ def fixtures(full):
 
 
 def fixture_ok(f, r):
-    """Exit status as the suite wants it (an .aborts fixture must fail) and
-    stdout equal to the blessed output."""
+    """Exit status as the suite wants it (an .aborts fixture must fail), every
+    expected/<name>.stderr line in stderr, and stdout equal to the blessed output."""
     e = ROOT / "test" / "expected"
     aborts = (e / f"{f.stem}.aborts").exists()
     if (r.code == 0) == aborts:
         return False, f"exit {r.code}"
+    sf = e / f"{f.stem}.stderr"
+    if sf.exists():
+        markers = [m.strip() for m in sf.read_text(encoding="utf-8", errors="replace").splitlines() if m.strip()]
+        if any(m not in (r.err or "") for m in markers):
+            return False, "stderr markers"
     want = normalized((e / f"{f.stem}.out").read_text(encoding="utf-8", errors="replace"))
     return normalized(r.out) == want, "stdout"
 

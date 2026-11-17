@@ -9,7 +9,8 @@ fixed point (stage 2 and stage 3 C identical), then scores the stage-2 compiler 
           exit status and stdout match the blessed output (and expected/<name>.aborts/.stderr).
   reject  error fixtures (test/errors/, test/errors_tc/): pass when the compiler exits 1 and every
           `// error:` marker occurs in its `file:line:col: error:` lines; `rejected` counts exit 1.
-  stdlib  stdlib/*.goose: pass when `--check` accepts the module.
+  stdlib  stdlib/*.goose: pass when `--check` accepts the module and a program importing it
+          emits C that gcc compiles.
 
 Writes selfhost/scoreboard/<board>.txt (the passing names, sorted) unless --check-only, and
 build/scoreboard/<board>.tsv (every fixture with its status and first reason line). With
@@ -146,10 +147,22 @@ def score_reject(sh, f, work):
 
 
 def score_stdlib(sh, f, work):
+    """A module passes when --check accepts it as a library and a program importing it emits C
+    that gcc compiles (only what main reaches is emitted, so this checks the module's top level)."""
     code, out, err = run([sh, "--check", f.relative_to(ROOT)], timeout=60, cwd=ROOT)
-    if code == 0:
-        return f.stem, "pass", ""
-    return f.stem, ("reject" if code == 1 else "crash"), re.sub(r"^\S+:\d+:\d+: ", "", first_line(err))
+    if code:
+        return f.stem, ("reject" if code == 1 else "crash"), re.sub(r"^\S+:\d+:\d+: ", "", first_line(err))
+    d = work / "stdlib"
+    d.mkdir(parents=True, exist_ok=True)
+    prog = d / f"use_{f.stem}.goose"
+    prog.write_text(f"import {f.stem};\nfn main() {{}}\n")
+    code, out, err = run([sh, "-o", d / f"use_{f.stem}.c", prog], timeout=60, cwd=ROOT)
+    if code:
+        return f.stem, "emit-error", re.sub(r"^\S+:\d+:\d+: ", "", first_line(err))
+    code, out, err = run(["gcc", "-O0", "-w", "-c", d / f"use_{f.stem}.c", "-o", d / f"use_{f.stem}.o"], timeout=120)
+    if code:
+        return f.stem, "cc-error", first_line(re.sub(r"^.*?: ", "", err, flags=re.M))
+    return f.stem, "pass", ""
 
 
 BOARD_FNS = {"run": (positive_fixtures, score_run),
