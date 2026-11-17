@@ -1558,17 +1558,6 @@ recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
     ctx.flow = fact_kill(ctx, ctx.flow, x.a, 0);
     if non_null(ctx, rhs) { ctx.flow = fact_add(ctx, ctx.flow, x.a); }
 }
-// The body of a function with type or untyped parameters, and the nested
-// functions written in one.
-fn in_generic_code(ctx: Compiler&) -> bool {
-    var f = ctx.checking_function;
-    while f >= 0 {
-        let s = ctx.specializations[f].symbol;
-        if ctx.symbols[s].kind == 5 { return true; }
-        f = ctx.scopes[ctx.symbols[s].scope].function;
-    }
-    return false;
-}
 recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.nodes[n].first >= 0 { check_receiving(ctx, n, scope, false); return; }
     let x = ctx.nodes[n];
