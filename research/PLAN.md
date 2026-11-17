@@ -41,9 +41,10 @@ M4. Positive fixtures pass; `stdlib/` compiles; W2 runs entirely through `selfho
 
 Milestones log:
 
-Now: M0 + M1 in parallel (2026-11-17 01:40 UTC). Builders in worktrees on branches `demo` (research/demo),
-`viz` (bytes method + first picture on :8000), `feat-stdlib`, `feat-storage`, `feat-enums` (selfhost
-clusters). Lead: merge each branch as it reports (rerun `python3 selfhost/scoreboard.py --enforce --update`
-after merging), study where the selfhost's 2.75x C bytes come from (M2/M3 groundwork). If a session
-restarts with builders lost: relaunch each from its branch with /tmp/claude-1000/briefs/*.md (recreate from
-research/notes/briefs.md).
+Now: M0 + M1 in parallel (updated 2026-11-17 02:25 UTC). Merged: demo, feat-stdlib (interim), feat-enums
+(interim), scan-index. Boards run 40/776, reject 39/2036, stdlib 6/17; fixed point holds. Running: builders
+`viz`, `feat-stdlib`, `feat-storage` (must rebase: conflicts in checker/emitter), `feat-enums`, `emit-dedup`;
+codex on `feat-builtins` (/home/exedev/goose-builtins; its 0ec1d8ed claims check_length_* pass but they
+cc-error on master: re-verify before merging). Merge rule: merge a branch only when it merges cleanly and
+`python3 selfhost/scoreboard.py --enforce` passes on the merge; then `--update`. M0 closes when viz lands
+(first picture on :8000): then do LOOP's milestone steps.
