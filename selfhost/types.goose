@@ -304,10 +304,17 @@ recursive fn resolve_type_at(ctx: Compiler&, n: i64, scope: i64, reference_targe
     } else if syntax.tag == N_TYPE_MODE {
         error_at(ctx, syntax.token, "not implemented yet: variable-mode enums");
     } else if syntax.tag == N_TYPE_ARRAY {
-        if syntax.flags & 15 == 1 || syntax.flags & 15 == 2 { error_at(ctx, syntax.token, "not implemented yet: variable and limited array storage"); }
         let element = resolve_type(ctx, syntax.a, scope);
         var count = -1;
-        if syntax.b >= 0 && ctx.nodes[syntax.b].tag != N_TYPE {
+        // A frozen array's count records its stored length width in bytes;
+        // 0 is a LEB128 varint length.
+        if syntax.flags & 15 == 1 {
+            count = 4;
+            if syntax.b >= 0 {
+                let width = ctx.tokens[ctx.nodes[syntax.b].token].text;
+                if width == "u8" { count = 1; } else if width == "u16" { count = 2; } else if width == "u64" { count = 8; } else if width == "varint" { count = 0; }
+            }
+        } else if syntax.b >= 0 && ctx.nodes[syntax.b].tag != N_TYPE {
             let value = constant_integer(ctx, syntax.b);
             if value > 281474976710656 { error_at(ctx, syntax.token, "array size is negative or exceeds the 48-bit limit"); }
             count = value as i64;
@@ -446,7 +453,6 @@ recursive fn layout_fields(ctx: Compiler&, id: i64, decl: i64, scope: i64) {
         let n = ctx.edges[e].value;
         if ctx.nodes[n].tag == N_PAD { error_at(ctx, ctx.nodes[n].token, "not implemented yet: explicit padding"); }
         let ft = resolve_type(ctx, ctx.nodes[n].a, scope);
-        if ctx.types[ft].size_class > 0 { error_at(ctx, ctx.nodes[n].token, "not implemented yet: nonfixed struct fields"); }
         if size_class == 2 { error_at(ctx, ctx.nodes[n].token, "resizable field must be the final field"); }
         if ctx.types[ft].size_class > size_class { size_class = ctx.types[ft].size_class; }
         let f = ctx.fielddefs.len;

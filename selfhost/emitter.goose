@@ -15,6 +15,9 @@ fn c_type(ctx: Compiler&, ty: i64) -> const u8[:] {
     if t.kind == T_SLICE { return "gg_slice"; }
     if t.kind == T_ARRAY && t.flags >= 3 { return "gg_header"; }
     if t.kind == T_REFERENCE && ctx.types[t.element].size_class == 2 { return "gg_reference"; }
+    // A variable-size value, and a reference to one, is the address of its
+    // packed bytes on a data stack.
+    if t.size_class == 1 || (t.kind == T_REFERENCE && ctx.types[t.element].size_class == 1) { return "uint8_t *"; }
     return save_text(ctx, str("gg_type_", ty));
 }
 // Locals and parameters are numbered within their owning function, so two
@@ -84,12 +87,14 @@ fn raw_temporary(ctx: Compiler&, type_name: const u8[:]) -> const u8[:] {
 fn snapshot(ctx: Compiler&, v: CValue) -> CValue {
     if ctx.types[v.ty].kind == T_VOID || ctx.types[v.ty].kind == T_BOTTOM { return v; }
     let name = temporary(ctx, v.ty); emit(ctx, str("  ", name, " = ", v.code, ";\n"));
+    if ctx.types[v.ty].size_class == 1 { return CValue { code: name, ty: v.ty, address: name, stack: v.stack }; }
     return CValue { code: name, ty: v.ty, address: save_text(ctx, str("&", name)), stack: v.stack };
 }
 fn c_decay(ctx: Compiler&, v: CValue) -> CValue {
     if ctx.types[v.ty].kind != T_REFERENCE { return v; }
     let ty = ctx.types[v.ty].element;
     if ctx.types[ty].size_class == 2 { return CValue { code: save_text(ctx, str("(*(", v.code, ").header)")), ty: ty, address: save_text(ctx, str("(", v.code, ").header")), stack: save_text(ctx, str("(", v.code, ").stack")) }; }
+    if ctx.types[ty].size_class == 1 { return CValue { code: v.code, ty: ty, address: v.code, stack: "" }; }
     return CValue { code: save_text(ctx, str("(*(", v.code, "))")), ty: ty, address: v.code, stack: "" };
 }
 fn c_view(ctx: Compiler&, v: CValue) -> const u8[:] {
@@ -97,6 +102,9 @@ fn c_view(ctx: Compiler&, v: CValue) -> const u8[:] {
     if t.kind == T_SLICE { return a.code; }
     if t.kind != T_ARRAY { abort("internal error: array view expected"); }
     if t.flags == 0 { return save_text(ctx, str("gg_view((", a.code, ").data, ", t.count, ")")); }
+    if t.flags == 2 && t.count >= 0 { return save_text(ctx, str("gg_view((", a.code, ").e, (", a.code, ").len)")); }
+    if t.flags == 2 { return save_text(ctx, str("gg_dyn_view(", a.code, ")")); }
+    if t.flags == 1 { return save_text(ctx, str("gg_frozen_view(", a.code, ", ", t.count, ")")); }
     if t.flags >= 3 { return save_text(ctx, str("gg_view((", a.code, ").base, (", a.code, ").len)")); }
     abort("unsupported C array view");
 }
@@ -111,6 +119,7 @@ fn c_adapt(ctx: Compiler&, v: CValue, target: i64) -> const u8[:] {
     if ctx.types[target].kind == T_SLICE { return c_view(ctx, a); }
     if ctx.types[target].kind == T_ENUM && is_variant(ctx, a.ty) { return save_text(ctx, str("gg_wrap_", a.ty, "(", a.code, ")")); }
     if numeric(ctx, target) { return save_text(ctx, str("((", c_type(ctx, target), ")(", a.code, "))")); }
+    if limited_fixed(ctx, target) && a.ty != target { return save_text(ctx, str("gg_limit_", target, "(", c_view(ctx, a), ")")); }
     return a.code;
 }
 fn c_literal(ctx: Compiler&, s: const u8[:]) -> const u8[:] {
@@ -129,17 +138,65 @@ fn c_array_temp(ctx: Compiler&, ty: i64) -> CValue {
     emit(ctx, str("  ", name, ".base = ", stack, "->base + ", stack, "->top; ", name, ".len = 0;\n"));
     return CValue { code: name, ty: ty, address: save_text(ctx, str("&", name)), stack: stack };
 }
+// A variable-size temporary is built at the bottom of a slot of its own.
+fn c_variable_temp(ctx: Compiler&, ty: i64) -> CValue {
+    let name = temporary(ctx, ty); let slot = ctx.c_slots; ctx.c_slots++;
+    let stack = save_text(ctx, str("gg_get_stack(frame.base + ", slot, ")"));
+    emit(ctx, str("  ", stack, "->top = 0; ", name, " = ", stack, "->base;\n"));
+    return CValue { code: name, ty: ty, address: name, stack: stack };
+}
+fn limited_fixed(ctx: Compiler&, ty: i64) -> bool { return ctx.types[ty].kind == T_ARRAY && ctx.types[ty].flags == 2 && ctx.types[ty].count >= 0; }
+fn limited_width(count: i64) -> i64 {
+    if count > 4294967295 { return 8; }
+    if count > 65535 { return 4; }
+    if count > 255 { return 2; }
+    return 1;
+}
+fn field_index(ctx: Compiler&, ty: i64, f: i64) -> i64 {
+    var e = ctx.types[ty].first; var i = 0;
+    while e >= 0 { if ctx.edges[e].value == f { return i; } i++; e = ctx.edges[e].next; }
+    return -1;
+}
+fn field_count(ctx: Compiler&, ty: i64) -> i64 {
+    var e = ctx.types[ty].first; var i = 0;
+    while e >= 0 { i++; e = ctx.edges[e].next; }
+    return i;
+}
+// A field of a fixed struct is a C member; a field of a variable-size struct
+// is found by walking the packed fields before it.
+fn c_field(ctx: Compiler&, ty: i64, base: const u8[:], f: i64) -> CValue {
+    let ft = ctx.fielddefs[f].ty;
+    if ctx.types[ty].size_class == 0 {
+        let field = save_text(ctx, str("(", base, ").f", f));
+        return CValue { code: field, ty: ft, address: save_text(ctx, str("&(", field, ")")), stack: "" };
+    }
+    let at = save_text(ctx, str("gg_at_", ty, "(", base, ", ", field_index(ctx, ty, f), ")"));
+    if ctx.types[ft].size_class == 1 { return CValue { code: at, ty: ft, address: at, stack: "" }; }
+    let pointer = save_text(ctx, str("((", c_type(ctx, ft), " *)", at, ")"));
+    return CValue { code: save_text(ctx, str("(*", pointer, ")")), ty: ft, address: pointer, stack: "" };
+}
+// The stored length, capacity and data of a limited array lvalue.
+struct LimitedParts { length: const u8[:], width: i64, cap: const u8[:], data: const u8[:] }
+fn limited_parts(ctx: Compiler&, a: CValue) -> LimitedParts {
+    let t = ctx.types[a.ty];
+    if t.count >= 0 { return LimitedParts { length: save_text(ctx, str("&(", a.code, ").len")), width: limited_width(t.count), cap: save_text(ctx, str(t.count)), data: save_text(ctx, str("(", a.code, ").e")) }; }
+    return LimitedParts { length: save_text(ctx, str("((", a.code, ") + 4)")), width: 4, cap: save_text(ctx, str("((int64_t)*(uint32_t *)(", a.code, "))")), data: save_text(ctx, str("((", a.code, ") + 8)")) };
+}
+fn c_element_size(ctx: Compiler&, ty: i64) -> const u8[:] { return save_text(ctx, str("sizeof(", c_type(ctx, ty), ")")); }
 
 recursive fn emit_type(ctx: Compiler&, ty: i64) {
     if ctx.c_type_state[ty] == 2 { return; }
     let t = ctx.types[ty];
     if ctx.c_type_state[ty] == 1 { return; }
     ctx.c_type_state[ty] = 1;
-    if t.kind == T_STRUCT {
+    if t.kind == T_STRUCT && t.size_class == 1 {
+        var e = t.first;
+        while e >= 0 { emit_type(ctx, ctx.fielddefs[ctx.edges[e].value].ty); e = ctx.edges[e].next; }
+    } else if t.kind == T_STRUCT {
         emit(ctx, str("typedef struct gg_type_", ty, " gg_type_", ty, ";\n"));
         var e = t.first;
         while e >= 0 { emit_type(ctx, ctx.fielddefs[ctx.edges[e].value].ty); e = ctx.edges[e].next; }
-        if t.size_class != 0 { error_at(ctx, ctx.nodes[t.decl].token, "not implemented yet: nonfixed struct C layout"); }
+        if t.size_class != 0 { error_at(ctx, ctx.nodes[t.decl].token, "not implemented yet: resizable struct C layout"); }
         emit(ctx, str("#pragma pack(push, 1)\nstruct gg_type_", ty, " {\n"));
         e = t.first;
         if e < 0 { emit(ctx, "unsigned char empty;\n"); }
@@ -161,9 +218,13 @@ recursive fn emit_type(ctx: Compiler&, ty: i64) {
         emit_type(ctx, t.element);
         var extent = t.count; if extent == 0 { extent = 1; }
         emit(ctx, str("#pragma pack(push, 1)\ntypedef struct { ", c_type(ctx, t.element), " data[", extent, "]; } ", c_type(ctx, ty), ";\n#pragma pack(pop)\n"));
+    } else if limited_fixed(ctx, ty) {
+        emit_type(ctx, t.element);
+        var extent = t.count; if extent == 0 { extent = 1; }
+        emit(ctx, str("#pragma pack(push, 1)\ntypedef struct { uint", limited_width(t.count) * 8, "_t len; ", c_type(ctx, t.element), " e[", extent, "]; } ", c_type(ctx, ty), ";\n#pragma pack(pop)\n"));
     } else if t.kind == T_REFERENCE && ctx.types[t.element].size_class == 0 {
         emit_type(ctx, t.element); emit(ctx, str("typedef ", c_type(ctx, t.element), " *", c_type(ctx, ty), ";\n"));
-    } else if t.kind == T_VARINT || (t.kind == T_ARRAY && (t.flags == 1 || t.flags == 2)) { abort("not implemented yet: packed variable/limited C layout"); }
+    } else if t.kind == T_REFERENCE || t.kind == T_ARRAY || t.kind == T_SLICE { emit_type(ctx, t.element); }
     ctx.c_type_state[ty] = 2;
 }
 
@@ -192,6 +253,9 @@ fn no_c_value(ctx: Compiler&) -> CValue { return CValue { code: "", ty: 0, addre
 fn symbol_value(ctx: Compiler&, symbol: i64) -> CValue {
     let ty = ctx.symbols[symbol].ty; let name = c_symbol(ctx, symbol);
     var stack = -1; if ctx.types[ty].size_class == 2 { stack = symbol; }
+    if ctx.types[ty].size_class == 1 {
+        return CValue { code: name, ty: ty, address: name, stack: if ctx.symbol_slots[symbol] >= 0 { c_stack(ctx, symbol) } else { "" } };
+    }
     return CValue { code: name, ty: ty, address: save_text(ctx, str("&(", name, ")")), stack: if stack >= 0 { c_stack(ctx, stack) } else { "" } };
 }
 fn converted(ctx: Compiler&, v: CValue, target: i64) -> CValue {
@@ -258,10 +322,15 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
     if tag == N_MEMBER {
         let a = c_decay(ctx, c_expression(ctx, x.a));
         if element_type(ctx, a.ty) >= 0 {
-            return CValue { code: save_text(ctx, str("(", c_view(ctx, a), ").len")), ty: x.ty, address: "", stack: "" };
+            if ctx.tokens[x.token].text == "cap" {
+                let parts = limited_parts(ctx, a);
+                return CValue { code: parts.cap, ty: x.ty, address: "", stack: "" };
+            }
+            return CValue { code: save_text(ctx, str("((int64_t)(", c_view(ctx, a), ").len)")), ty: x.ty, address: "", stack: "" };
         }
-        let field = save_text(ctx, str("(", a.code, ").f", x.symbol));
-        return CValue { code: field, ty: x.ty, address: save_text(ctx, str("&(", field, ")")), stack: "" };
+        let field = c_field(ctx, a.ty, a.code, x.symbol);
+        if ctx.types[field.ty].kind == T_VARINT { return CValue { code: save_text(ctx, str("gg_zig_read(", field.code, ")")), ty: x.ty, address: "", stack: "" }; }
+        return CValue { code: field.code, ty: x.ty, address: field.address, stack: "" };
     }
     if tag == N_INDEX || tag == N_SLICE {
         let a = c_expression(ctx, x.a);
@@ -282,12 +351,14 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
     }
     if tag == N_CALL { return c_call(ctx, n, no_c_value(ctx)); }
     if tag == N_ARRAY || tag == N_FILL || tag == N_CONSTRUCT {
+        if ctx.types[x.ty].size_class == 1 { let built = c_variable_temp(ctx, x.ty); c_into(ctx, n, built); return built; }
         let name = temporary(ctx, x.ty);
         let dest = CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };
         c_into(ctx, n, dest); return dest;
     }
     if tag == N_IF || tag == N_BLOCK || tag == N_MATCH {
         if x.ty == 0 || ctx.types[x.ty].kind == T_BOTTOM { c_into(ctx, n, no_c_value(ctx)); return no_c_value(ctx); }
+        if ctx.types[x.ty].size_class == 1 { let dest = c_variable_temp(ctx, x.ty); c_into(ctx, n, dest); return dest; }
         if ctx.types[x.ty].size_class > 0 { let dest = c_array_temp(ctx, x.ty); c_into(ctx, n, dest); return dest; }
         let name = temporary(ctx, x.ty);
         let dest = CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };
@@ -310,6 +381,8 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
         if x.a >= 0 { c_into(ctx, x.a, dest); }
         emit(ctx, "  }\n"); return;
     }
+    if x.tag == N_CALL && dest.ty != 0 && ctx.types[dest.ty].size_class == 1 && x.ty == dest.ty && x.symbol >= 0 { c_call(ctx, n, dest); return; }
+    if dest.ty != 0 && ctx.types[dest.ty].size_class == 1 { c_build(ctx, n, dest); return; }
     if x.tag == N_CALL && ctx.types[x.ty].size_class == 2 && dest.ty != 0 { c_call(ctx, n, dest); return; }
     if x.tag == N_CONSTRUCT {
         // A variant built into its enum fills the payload in place, then the tag.
@@ -319,12 +392,36 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
         var e = x.first;
         while e >= 0 {
             let init = ctx.edges[e].value; let f = ctx.nodes[init].symbol;
-            let field = save_text(ctx, str(payload, ".f", f));
-            let address = save_text(ctx, str("&(", field, ")"));
-            c_into(ctx, ctx.nodes[init].a, CValue { code: field, ty: ctx.fielddefs[f].ty, address: address, stack: dest.stack });
+            var field = c_field(ctx, dest.ty, dest.code, f);
+            if wrapped {
+                let code = save_text(ctx, str(payload, ".f", f));
+                field = CValue { code: code, ty: ctx.fielddefs[f].ty, address: save_text(ctx, str("&(", code, ")")), stack: "" };
+            }
+            c_into(ctx, ctx.nodes[init].a, CValue { code: field.code, ty: field.ty, address: field.address, stack: dest.stack });
             e = ctx.edges[e].next;
         }
         if wrapped { emit(ctx, str("  (", dest.code, ").tag = ", ctx.types[x.ty].count, ";\n")); }
+        return;
+    }
+    if (x.tag == N_ARRAY || x.tag == N_FILL) && limited_fixed(ctx, dest.ty) {
+        let elem = element_type(ctx, dest.ty);
+        var count = ctx.types[x.ty].count; if x.tag == N_ARRAY { count = child_count(ctx, n); }
+        if count > ctx.types[dest.ty].count { emit(ctx, "  gg_fail(\"limited array capacity exceeded\");\n"); return; }
+        emit(ctx, str("  (", dest.code, ").len = ", count, ";\n"));
+        if x.tag == N_FILL {
+            let value = snapshot(ctx, converted(ctx, c_expression(ctx, x.a), elem)); let i = raw_temporary(ctx, "int64_t");
+            emit(ctx, str("  for (", i, "=0; ", i, "<", count, "; ", i, "++) (", dest.code, ").e[", i, "] = ", value.code, ";\n"));
+        } else {
+            var e = x.first; var i = 0;
+            while e >= 0 { let field = save_text(ctx, str("(", dest.code, ").e[", i, "]")); let address = save_text(ctx, str("&", field)); c_into(ctx, ctx.edges[e].value, CValue { code: field, ty: elem, address: address, stack: "" }); i++; e = ctx.edges[e].next; }
+        }
+        return;
+    }
+    if (x.tag == N_ARRAY || x.tag == N_FILL) && ctx.types[dest.ty].size_class == 2 && ctx.types[element_type(ctx, dest.ty)].size_class == 1 {
+        // A sequential growable array: each element is built at its top.
+        let elem = element_type(ctx, dest.ty); let decayed = c_decay(ctx, dest);
+        var e = x.first;
+        while e >= 0 { c_build(ctx, ctx.edges[e].value, CValue { code: "", ty: elem, address: "", stack: decayed.stack }); emit(ctx, str("  (", decayed.code, ").len++;\n")); e = ctx.edges[e].next; }
         return;
     }
     if x.tag == N_ARRAY || x.tag == N_FILL {
@@ -353,8 +450,69 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
     if dest.ty == 0 || v.ty == 0 || ctx.types[v.ty].kind == T_BOTTOM { if v.code.len > 0 { emit(ctx, str("  (void)(", v.code, ");\n")); } return; }
     if ctx.types[dest.ty].size_class == 2 {
         if ctx.c_function >= 0 && x.tag == N_NAME && x.symbol == ctx.return_locals[ctx.c_function] { return; }
-        let view = c_view(ctx, v); emit(ctx, str("  gg_append(", c_reference(ctx, dest), ", (", view, ").data, (", view, ").len, sizeof(", c_type(ctx, element_type(ctx, dest.ty)), "));\n"));
+        let elem = element_type(ctx, dest.ty);
+        if ctx.types[elem].size_class == 1 {
+            let view = raw_temporary(ctx, "gg_slice"); let decayed = c_decay(ctx, dest);
+            emit(ctx, str("  ", view, " = ", c_view(ctx, v), ";\n  gg_push(", decayed.stack, ", ", view, ".data, (size_t)gg_span_", elem, "(", view, ".data, ", view, ".len)); (", decayed.code, ").len += ", view, ".len;\n"));
+            return;
+        }
+        let view = c_view(ctx, v); emit(ctx, str("  gg_append(", c_reference(ctx, dest), ", (", view, ").data, (", view, ").len, sizeof(", c_type(ctx, elem), "));\n"));
     } else { emit(ctx, str("  ", dest.code, " = ", c_adapt(ctx, v, dest.ty), ";\n")); }
+}
+// Appends the value of n, as a value of the variable-size type dest.ty, at
+// the top of dest.stack: built in place wherever the expression allows.
+recursive fn c_build(ctx: Compiler&, n: i64, dest: CValue) {
+    let x = ctx.nodes[n]; let t = ctx.types[dest.ty]; let stack = dest.stack;
+    if x.tag == N_IF || x.tag == N_BLOCK { c_into(ctx, n, dest); return; }
+    if x.tag == N_UNARY && ctx.tokens[x.token].text == "(" { c_build(ctx, x.a, dest); return; }
+    if x.tag == N_CALL && x.ty == dest.ty && x.symbol >= 0 { c_into(ctx, n, dest); return; }
+    if t.kind == T_VARINT {
+        let v = snapshot(ctx, converted(ctx, c_expression(ctx, n), default_integer(ctx)));
+        emit(ctx, str("  gg_push_zig(", stack, ", ", v.code, ");\n")); return;
+    }
+    if x.tag == N_CONSTRUCT && x.ty == dest.ty {
+        var e = x.first;
+        while e >= 0 { let init = ctx.edges[e].value; c_append_value(ctx, ctx.nodes[init].a, ctx.fielddefs[ctx.nodes[init].symbol].ty, stack); e = ctx.edges[e].next; }
+        return;
+    }
+    if (x.tag == N_ARRAY || x.tag == N_FILL) && t.kind == T_ARRAY {
+        var count = ctx.types[x.ty].count; if x.tag == N_ARRAY { count = child_count(ctx, n); }
+        if t.flags == 1 { emit(ctx, str("  gg_push_len(", stack, ", ", count, ", ", t.count, ");\n")); }
+        else { emit(ctx, str("  gg_push_len(", stack, ", ", count, ", 4); gg_push_len(", stack, ", ", count, ", 4);\n")); }
+        if x.tag == N_FILL {
+            let value = snapshot(ctx, converted(ctx, c_expression(ctx, x.a), t.element)); let i = raw_temporary(ctx, "int64_t");
+            emit(ctx, str("  for (", i, "=0; ", i, "<", count, "; ", i, "++) gg_push(", stack, ", &", value.code, ", ", c_element_size(ctx, t.element), ");\n"));
+        } else {
+            var e = x.first;
+            while e >= 0 { c_append_value(ctx, ctx.edges[e].value, t.element, stack); e = ctx.edges[e].next; }
+        }
+        return;
+    }
+    if x.tag == N_LIMITED {
+        let cap = snapshot(ctx, converted(ctx, c_expression(ctx, x.a), default_integer(ctx)));
+        emit(ctx, str("  gg_push_dyn(", stack, ", ", cap.code, ", ", c_element_size(ctx, t.element), ");\n")); return;
+    }
+    // A copy of an existing value, or a conversion from another array form.
+    var source = n;
+    if x.tag == N_CALL && x.symbol == -26 { source = first_child(ctx, n); }
+    let v = c_decay(ctx, c_expression(ctx, source));
+    if v.ty == dest.ty { emit(ctx, str("  gg_push(", stack, ", ", v.code, ", (size_t)gg_size_", dest.ty, "(", v.code, "));\n")); return; }
+    if t.kind != T_ARRAY || element_type(ctx, v.ty) < 0 { abort("internal error: unsupported variable-size construction"); }
+    let view = raw_temporary(ctx, "gg_slice"); emit(ctx, str("  ", view, " = ", c_view(ctx, v), ";\n"));
+    let width = if t.flags == 1 { t.count } else { 4 };
+    emit(ctx, str("  gg_push_len(", stack, ", ", view, ".len, ", width, ");\n"));
+    if t.flags != 1 { emit(ctx, str("  gg_push_len(", stack, ", ", view, ".len, 4);\n")); }
+    if ctx.types[t.element].size_class == 1 { emit(ctx, str("  gg_push(", stack, ", ", view, ".data, (size_t)gg_span_", t.element, "(", view, ".data, ", view, ".len));\n")); }
+    else { emit(ctx, str("  gg_push(", stack, ", ", view, ".data, (size_t)", view, ".len * ", c_element_size(ctx, t.element), ");\n")); }
+}
+// Appends one field or element of type ty: a fixed value is staged in a C
+// temporary, a variable one is built at the top.
+recursive fn c_append_value(ctx: Compiler&, n: i64, ty: i64, stack: const u8[:]) {
+    if ctx.types[ty].size_class == 1 { c_build(ctx, n, CValue { code: "", ty: ty, address: "", stack: stack }); return; }
+    let name = temporary(ctx, ty);
+    let address = save_text(ctx, str("&", name));
+    c_into(ctx, n, CValue { code: name, ty: ty, address: address, stack: "" });
+    emit(ctx, str("  gg_push(", stack, ", &", name, ", sizeof(", name, "));\n"));
 }
 
 // An enum match switches on the tag and copies a bound payload; an integer
@@ -396,16 +554,77 @@ recursive fn c_match(ctx: Compiler&, n: i64, dest: CValue) {
     emit(ctx, if enumerated { "  }\n" } else { "\n" });
 }
 
+// Limited arrays grow and shrink within their capacity, in place.
+recursive fn c_limited_call(ctx: Compiler&, n: i64) -> CValue {
+    let x = ctx.nodes[n]; let callee = ctx.nodes[x.a]; let builtin = x.symbol;
+    let ty = decay(ctx, value_of(ctx, callee.a)).ty; let element = ctx.types[ty].element;
+    let original = c_decay(ctx, c_expression(ctx, callee.a));
+    var array = original;
+    if ctx.types[ty].count >= 0 {
+        let p = raw_temporary(ctx, save_text(ctx, str(c_type(ctx, ty), " *"))); emit(ctx, str("  ", p, " = ", original.address, ";\n"));
+        array = CValue { code: save_text(ctx, str("(*", p, ")")), ty: ty, address: p, stack: "" };
+    } else {
+        let p = raw_temporary(ctx, "uint8_t *"); emit(ctx, str("  ", p, " = ", original.code, ";\n"));
+        array = CValue { code: p, ty: ty, address: p, stack: "" };
+    }
+    let parts = limited_parts(ctx, array);
+    let size = c_element_size(ctx, element);
+    let common = save_text(ctx, str(parts.length, ", ", parts.width));
+    let arg = first_child(ctx, n);
+    if builtin == -10 {
+        let v = snapshot(ctx, converted(ctx, c_expression(ctx, arg), element));
+        let slot = raw_temporary(ctx, c_type(ctx, x.ty));
+        emit(ctx, str("  ", slot, " = (", c_type(ctx, x.ty), ")gg_lpush(", common, ", ", parts.cap, ", ", parts.data, ", ", size, ");\n  *", slot, " = ", v.code, ";\n"));
+        return CValue { code: slot, ty: x.ty, address: "", stack: "" };
+    }
+    if builtin == -11 {
+        let v = snapshot(ctx, c_expression(ctx, arg));
+        emit(ctx, str("  gg_lappend(", common, ", ", parts.cap, ", ", parts.data, ", ", size, ", ", c_view(ctx, v), ");\n"));
+    } else if builtin == -12 {
+        let count = snapshot(ctx, converted(ctx, c_expression(ctx, arg), default_integer(ctx))); let e = ctx.edges[x.first].next;
+        var fill = save_text(ctx, "NULL");
+        if e >= 0 { let value = snapshot(ctx, converted(ctx, c_expression(ctx, ctx.edges[e].value), element)); fill = save_text(ctx, str("&", value.code)); }
+        emit(ctx, str("  gg_lresize(", common, ", ", parts.cap, ", ", parts.data, ", ", size, ", ", count.code, ", ", fill, ");\n"));
+    } else if builtin == -13 { emit(ctx, str("  gg_lset(", common, ", 0);\n")); }
+    else if builtin == -15 {
+        let count = snapshot(ctx, converted(ctx, c_expression(ctx, arg), default_integer(ctx)));
+        emit(ctx, str("  gg_lpop_n(", common, ", ", count.code, ");\n"));
+    } else {
+        let result = temporary(ctx, element);
+        emit(ctx, str("  ", result, " = *(", c_type(ctx, element), " *)gg_lpop(", common, ", ", parts.data, ", ", size, ");\n"));
+        return CValue { code: result, ty: element, address: save_text(ctx, str("&", result)), stack: "" };
+    }
+    return no_c_value(ctx);
+}
 recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     let x = ctx.nodes[n];
     let callee = ctx.nodes[x.a];
     let builtin = x.symbol;
-    if builtin <= -10 && builtin >= -14 {
+    if builtin <= -10 && builtin >= -15 && ctx.types[decay(ctx, value_of(ctx, callee.a)).ty].flags == 2 { return c_limited_call(ctx, n); }
+    if builtin <= -10 && builtin >= -15 {
         let original = c_expression(ctx, callee.a);
         let receiver = snapshot(ctx, CValue { code: c_reference(ctx, original), ty: reference_type(ctx, decay(ctx, value_of(ctx, callee.a)).ty, false), address: "", stack: "" });
         let array = c_decay(ctx, receiver); let element = element_type(ctx, array.ty);
         let ref = c_reference(ctx, array);
         let arg = first_child(ctx, n);
+        if ctx.types[element].size_class == 1 {
+            // A sequential array: elements are built or copied at its top.
+            if builtin == -10 {
+                let start = raw_temporary(ctx, "uint8_t *");
+                emit(ctx, str("  ", start, " = ", array.stack, "->base + ", array.stack, "->top;\n"));
+                c_build(ctx, arg, CValue { code: start, ty: element, address: start, stack: array.stack });
+                emit(ctx, str("  (", array.code, ").len++;\n"));
+                return CValue { code: start, ty: x.ty, address: "", stack: "" };
+            }
+            let v = snapshot(ctx, c_expression(ctx, arg)); let view = raw_temporary(ctx, "gg_slice");
+            emit(ctx, str("  ", view, " = ", c_view(ctx, v), ";\n  gg_push(", array.stack, ", ", view, ".data, (size_t)gg_span_", element, "(", view, ".data, ", view, ".len)); (", array.code, ").len += ", view, ".len;\n"));
+            return no_c_value(ctx);
+        }
+        if builtin == -15 {
+            let count = snapshot(ctx, converted(ctx, c_expression(ctx, arg), default_integer(ctx)));
+            emit(ctx, str("  gg_rpop_n(", ref, ", ", count.code, ", ", c_element_size(ctx, element), ");\n"));
+            return no_c_value(ctx);
+        }
         if builtin == -10 {
             let v = snapshot(ctx, converted(ctx, c_expression(ctx, arg), element));
             emit(ctx, str("  gg_append(", ref, ", &", v.code, ", 1, sizeof(", c_type(ctx, element), "));\n"));
@@ -421,7 +640,7 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         } else if builtin == -13 { emit(ctx, str("  gg_resize(", ref, ", 0, sizeof(", c_type(ctx, element), "), NULL);\n")); }
         else {
             let result = temporary(ctx, element);
-            emit(ctx, str("  ", result, " = ((", c_type(ctx, element), " *)(", array.code, ").base)[gg_index((", array.code, ").len-1, (", array.code, ").len)];\n  gg_resize(", ref, ", (", array.code, ").len-1, sizeof(", c_type(ctx, element), "), NULL);\n"));
+            emit(ctx, str("  ", result, " = *(", c_type(ctx, element), " *)gg_rpop(", ref, ", ", c_element_size(ctx, element), ");\n  gg_resize(", ref, ", (", array.code, ").len-1, sizeof(", c_type(ctx, element), "), NULL);\n"));
             return CValue { code: result, ty: element, address: save_text(ctx, str("&", result)), stack: "" };
         }
         return no_c_value(ctx);
@@ -459,6 +678,11 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
                 emit(ctx, str("  gg_append(", c_reference(ctx, dest), ", (", view, ").data, (", view, ").len, sizeof(", c_type(ctx, element_type(ctx, arg.ty)), "));\n"));
                 return dest;
             }
+            if ctx.types[arg.ty].size_class == 1 {
+                let built = c_variable_temp(ctx, arg.ty);
+                emit(ctx, str("  gg_push(", built.stack, ", ", arg.code, ", (size_t)gg_size_", arg.ty, "(", arg.code, "));\n"));
+                return built;
+            }
             return snapshot(ctx, arg);
         }
         if builtin == -23 { emit(ctx, str("  if (!(", arg.code, ")) gg_fail(\"assertion failed\");\n")); }
@@ -474,12 +698,18 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     var e = x.first; var p = ctx.nodes[params].first;
     while e >= 0 {
         let expected = ctx.symbols[ctx.nodes[ctx.edges[p].value].symbol].ty;
-        let value = snapshot(ctx, converted(ctx, c_expression(ctx, ctx.edges[e].value), expected));
-        arguments.push(value.code);
+        if ctx.types[expected].size_class == 1 {
+            let built = c_variable_temp(ctx, expected); c_into(ctx, ctx.edges[e].value, built);
+            arguments.push(built.code);
+        } else {
+            let value = snapshot(ctx, converted(ctx, c_expression(ctx, ctx.edges[e].value), expected));
+            arguments.push(value.code);
+        }
         e = ctx.edges[e].next; p = ctx.edges[p].next;
     }
     var dest = destination;
-    if ctx.types[spec.result].size_class > 0 && dest.ty == 0 { dest = c_array_temp(ctx, spec.result); }
+    if ctx.types[spec.result].size_class == 1 && dest.ty == 0 { dest = c_variable_temp(ctx, spec.result); }
+    if ctx.types[spec.result].size_class == 2 && dest.ty == 0 { dest = c_array_temp(ctx, spec.result); }
     let multiple = child_count(ctx, spec.results) > 1;
     if multiple { ctx.c_multis.push(n); ctx.c_multis.push(0); }
     let ret = if multiple { c_multi(ctx, n) } else if spec.result != 0 && ctx.types[spec.result].size_class == 0 { temporary(ctx, spec.result) } else { "" };
@@ -497,7 +727,8 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     if decl.flags & 2 == 0 {
         let parent = ctx.scopes[ctx.symbols[spec.symbol].scope].function;
         if parent >= 0 { if comma { emit(ctx, ", "); } emit(ctx, c_frame(ctx, parent)); comma = true; }
-        if ctx.types[spec.result].size_class > 0 { if comma { emit(ctx, ", "); } emit(ctx, c_reference(ctx, dest)); comma = true; }
+        if ctx.types[spec.result].size_class == 1 { if comma { emit(ctx, ", "); } emit(ctx, str("gg_ref(NULL, ", dest.stack, ")")); comma = true; }
+        if ctx.types[spec.result].size_class == 2 { if comma { emit(ctx, ", "); } emit(ctx, c_reference(ctx, dest)); comma = true; }
         if comma { emit(ctx, ", "); } emit(ctx, str("frame.base + ", ctx.c_slots));
     }
     emit(ctx, ");\n");
@@ -521,6 +752,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         if ctx.types[dest.ty].size_class == 2 && (ctx.c_function < 0 || ctx.return_locals[ctx.c_function] != symbol) {
             emit(ctx, str("  ", dest.stack, "->top = 0;\n  ", dest.code, ".base = ", dest.stack, "->base; ", dest.code, ".len = 0;\n"));
         }
+        if ctx.types[dest.ty].size_class == 1 { emit(ctx, str("  ", dest.stack, "->top = 0; ", dest.code, " = ", dest.stack, "->base;\n")); }
         let init = first_child(ctx, x.b); if init >= 0 { c_into(ctx, init, dest); }
         return;
     }
@@ -542,6 +774,10 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
     }
     if x.tag == N_ASSIGN {
         let raw = c_expression(ctx, x.a); let dest = c_decay(ctx, raw); let op = ctx.tokens[x.token].text;
+        if op == "=" && ctx.types[dest.ty].kind == T_ARRAY && ctx.types[dest.ty].flags == 2 && ctx.types[dest.ty].count < 0 {
+            let v = c_decay(ctx, c_expression(ctx, x.b));
+            emit(ctx, str("  gg_dyn_assign(", dest.code, ", ", c_view(ctx, v), ", ", c_element_size(ctx, ctx.types[dest.ty].element), ");\n")); return;
+        }
         if op == "=" { c_into(ctx, x.b, dest); return; }
         if op == ".=" { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_reference(ctx, rhs), ";\n")); return; }
         let old = snapshot(ctx, dest);
@@ -558,6 +794,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         if x.tag == N_FOR {
             let index = raw_temporary(ctx, "int64_t");
             var iterable = no_c_value(ctx); var upper = no_c_value(ctx);
+            var cursor = save_text(ctx, "");
             let range = ctx.nodes[x.b].tag == N_RANGE;
             if range {
                 let lo = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.nodes[x.b].a))); upper = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.nodes[x.b].b)));
@@ -566,6 +803,8 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
                 iterable = c_decay(ctx, c_expression(ctx, x.b));
                 if ctx.types[iterable.ty].kind == T_INTEGER { upper = snapshot(ctx, iterable); }
                 emit(ctx, str("  ", index, " = 0;\n"));
+                let elem = element_type(ctx, iterable.ty);
+                if elem >= 0 && ctx.types[elem].size_class == 1 { cursor = raw_temporary(ctx, "uint8_t *"); emit(ctx, str("  ", cursor, " = (uint8_t *)(", c_view(ctx, iterable), ").data;\n")); }
             }
             emit(ctx, str("label", start, ":;\n"));
             let symbol = ctx.nodes[x.a].symbol;
@@ -574,12 +813,17 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
             } else {
                 let view = c_view(ctx, iterable); let elem = element_type(ctx, iterable.ty);
                 emit(ctx, str("  if (", index, " >= (", view, ").len) goto label", done, ";\n  ", c_symbol(ctx, symbol), " = "));
-                if x.flags & 1 != 0 || ctx.types[elem].size_class > 0 { emit(ctx, "&"); }
-                emit(ctx, str("((", c_type(ctx, elem), " *)(", view, ").data)[", index, "];\n"));
+                if cursor.len > 0 { emit(ctx, str(cursor, ";\n")); }
+                else {
+                    if x.flags & 1 != 0 || ctx.types[elem].size_class > 0 { emit(ctx, "&"); }
+                    emit(ctx, str("((", c_type(ctx, elem), " *)(", view, ").data)[", index, "];\n"));
+                }
             }
             if x.first >= 0 { emit(ctx, str("  ", c_symbol(ctx, ctx.nodes[ctx.edges[x.first].value].symbol), " = ", index, ";\n")); }
             c_statement(ctx, x.c);
-            emit(ctx, str("label", advance, ":;\n  ", index, "++; goto label", start, ";\n"));
+            emit(ctx, str("label", advance, ":;\n"));
+            if cursor.len > 0 { emit(ctx, str("  ", cursor, " += gg_size_", element_type(ctx, iterable.ty), "(", cursor, ");\n")); }
+            emit(ctx, str("  ", index, "++; goto label", start, ";\n"));
         } else if x.tag == N_EARLY { c_statement(ctx, x.a); }
         else {
             emit(ctx, str("label", advance, ":;\n"));
@@ -669,12 +913,13 @@ fn prepare_emission(ctx: Compiler&) {
     for spec, i in ctx.specializations {
         ctx.function_slots.push(0); ctx.first_local.push(-1); last_local.push(-1);
         var returned = -1;
-        if ctx.types[spec.result].size_class > 0 { returned = returned_local(ctx, spec.body, i); }
+        if ctx.types[spec.result].size_class == 2 { returned = returned_local(ctx, spec.body, i); }
         ctx.return_locals.push(returned);
     }
     for s, i in ctx.symbols {
         var slot = -1;
-        if s.kind == 2 && s.ty >= 0 && ctx.types[s.ty].size_class == 2 {
+        let owned_variable = s.kind == 2 && s.ty >= 0 && ctx.types[s.ty].size_class == 1 && s.decl >= 0 && ctx.nodes[s.decl].tag == N_BIND;
+        if owned_variable || (s.kind == 2 && s.ty >= 0 && ctx.types[s.ty].size_class == 2) {
             if global_storage(ctx, i) { slot = ctx.c_global_slots; ctx.c_global_slots++; }
             else { let owner = ctx.scopes[s.scope].function; if ctx.return_locals[owner] != i { slot = ctx.function_slots[owner]; ctx.function_slots[owner]++; } }
         }
@@ -711,6 +956,10 @@ fn emit_function(ctx: Compiler&, id: i64) {
     if child_count(ctx, spec.results) > 1 {
         declare_ref(ctx, "  gg_results_", id); ctx.c_declarations.append(" gg_return;\n");
         ctx.c_result = c_return_value(ctx, 0);
+    } else if ctx.types[spec.result].size_class == 1 {
+        // The caller marked where the result starts; the body appends it.
+        emit(ctx, "  frame.result = result;\n");
+        ctx.c_result = CValue { code: "", ty: spec.result, address: "", stack: "result.stack" };
     } else if ctx.types[spec.result].size_class > 0 {
         emit(ctx, "  frame.result = result;\n");
         ctx.c_result = CValue { code: "(*result.header)", ty: spec.result, address: "result.header", stack: "result.stack" };
