@@ -827,14 +827,18 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
     ctx.specializations[id].state = 2;
     return id;
 }
-fn check_program(ctx: Compiler&) {
+// A checked file that declares no main in any namespace is a library: its
+// declarations are checked without an entry point, as `goose check` does.
+fn check_program(ctx: Compiler&, library: bool) {
     for n in ctx.declarations { if ctx.nodes[n].tag == N_FUNCTION && ctx.tokens[ctx.nodes[n].token].text == "format" { error_at(ctx, ctx.nodes[n].token, "not implemented yet: custom formatting dispatch"); } }
     initialization_order(ctx, 0);
     for n in ctx.global_order { check_binding(ctx, n, 0); }
     var main_symbol = -1;
     for s, i in ctx.symbols { if s.scope == 0 && s.kind == 3 && s.ns < 0 && ctx.tokens[s.token].text == "main" { main_symbol = i; } }
-    if main_symbol < 0 { write_stderr("error: no root-file main function\n"); exit(1); }
-    check_function(ctx, main_symbol, -1, 0);
+    var declares_main = false;
+    for n in ctx.declarations { if ctx.nodes[n].tag == N_FUNCTION && ctx.tokens[ctx.nodes[n].token].file == 0 && ctx.tokens[ctx.nodes[n].token].text == "main" { declares_main = true; } }
+    if main_symbol < 0 && !(library && !declares_main) { write_stderr("error: no root-file main function\n"); exit(1); }
+    if main_symbol >= 0 { check_function(ctx, main_symbol, -1, 0); }
     // Fully annotated, non-generic top-level bodies are checked even unused.
     // Generic and nested declarations remain demand-driven.
     let original_symbols = ctx.symbols.len;
