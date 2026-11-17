@@ -47,10 +47,10 @@ Milestones log:
   fixed point yes. W1 (selfhost, now 288 KB of source) self-hosted: front end 0.20 s + gcc -O2 7.28 s (median)
   vs stock optimized 0.36 + 6.10 s, stock fast 0.97 s total. W2 stock optimized wall 27.0 s (771/771), stock
   fast 3.75 s (733/733); self-hosted 73/771.
-Now: M1 (+ M2/M3 groundwork), updated 2026-11-17 02:20 UTC. Boards run 79/776, reject 39/2036 (260 error
-fixtures wrongly accepted), stdlib 6/17; fixed point holds. Builders (worktrees, branches): feat-stdlib,
-feat-storage, feat-enums, feat-funvals (function values, std.goose:1155, 67 fixtures), emit-lean (cheaper C
-for gcc/tcc); codex on feat-builtins (/home/exedev/goose-builtins; its 0ec1d8ed fails 4 claimed fixtures:
-re-verify). Merge with `research/tools/merge_branch.sh <branch>...` (clean merge + --enforce, then --update).
-Pictures: `research/viz/regen.sh` (15 min; SKIP_CC1=1 to reuse cc1 traces) after ladder-moving merges.
-M1 closes when the largest clusters are closed and the board is enforced (done: --enforce in merge_branch.sh).
+Now: paused (2026-11-17 02:40 UTC): Dan stopped all Claude builders over Remote Control. Boards run 134/776,
+reject 228/2036 (340 wrongly accepted), stdlib 8/17; fixed point holds. Unmerged on origin: feat-stdlib
+2b5fcf6a (11 commits; earlier tip newly accepted 46 error fixtures, so enforce failed), feat-builtins
+9922e626 (codex; re-verify check_length_*), emit-lean has nothing new. research/viz/regen.sh failed in
+reduce: "ValueError: 'gs_os_read_file' is not in list" (stage-function list vs the grown selfhost); fix that
+before regenerating. Resume: merge with research/tools/merge_branch.sh, then relaunch builders from
+research/notes/briefs.md only when Dan says so.
