@@ -63,8 +63,21 @@ fn global_storage(ctx: Compiler&, symbol: i64) -> bool {
     let scope = ctx.symbols[symbol].scope;
     return scope == 0 || ctx.scopes[scope].function < 0;
 }
+// A local lives in its function's frame only when a nested function can reach
+// it there; otherwise it is a C local (and a parameter is used in place).
+fn c_local(ctx: Compiler&, symbol: i64) -> bool {
+    if global_storage(ctx, symbol) { return false; }
+    let owner = ctx.scopes[ctx.symbols[symbol].scope].function;
+    return ctx.c_nested[owner] == 0 && ctx.return_locals[owner] != symbol;
+}
+fn is_parameter(ctx: Compiler&, spec: i64, symbol: i64) -> bool {
+    var e = ctx.nodes[ctx.specializations[spec].parameters].first;
+    while e >= 0 { if ctx.nodes[ctx.edges[e].value].symbol == symbol { return true; } e = ctx.edges[e].next; }
+    return false;
+}
 fn c_symbol(ctx: Compiler&, symbol: i64) -> const u8[:] {
     if global_storage(ctx, symbol) { return save_text(ctx, str("gg_globals.", c_name(ctx, symbol))); }
+    if c_local(ctx, symbol) { return c_name(ctx, symbol); }
     let owner = ctx.scopes[ctx.symbols[symbol].scope].function;
     if ctx.return_locals[owner] == symbol { return save_text(ctx, str("(*", c_frame(ctx, owner), "->result.header)")); }
     return save_text(ctx, str(c_frame(ctx, ctx.scopes[ctx.symbols[symbol].scope].function), "->", c_name(ctx, symbol)));
@@ -1224,7 +1237,7 @@ fn c_signature(ctx: Compiler&, spec_id: i64) {
     while e >= 0 {
         let symbol = ctx.nodes[ctx.edges[e].value].symbol;
         if comma { emit(ctx, ", "); } comma = true;
-        emit(ctx, str(c_type(ctx, ctx.symbols[symbol].ty), " p", ctx.local_names[symbol])); e = ctx.edges[e].next;
+        emit(ctx, str(c_type(ctx, ctx.symbols[symbol].ty), if c_local(ctx, symbol) { " v" } else { " p" }, ctx.local_names[symbol])); e = ctx.edges[e].next;
     }
     let parent = ctx.scopes[ctx.symbols[spec.symbol].scope].function;
     if parent >= 0 { if comma { emit(ctx, ", "); } emit_ref(ctx, "struct gg_frame_", parent); emit(ctx, " *parent"); comma = true; }
@@ -1244,7 +1257,7 @@ fn c_frame_struct(ctx: Compiler&, id: i64) {
     if ctx.types[spec.result].size_class > 0 { emit(ctx, "  gg_reference result;\n"); }
     var symbol = ctx.first_local[id];
     while symbol >= 0 {
-        if symbol != ctx.return_locals[id] { emit(ctx, str("  ", c_type(ctx, ctx.symbols[symbol].ty), " ", c_name(ctx, symbol), ";\n")); }
+        if symbol != ctx.return_locals[id] && !c_local(ctx, symbol) { emit(ctx, str("  ", c_type(ctx, ctx.symbols[symbol].ty), " ", c_name(ctx, symbol), ";\n")); }
         symbol = ctx.next_local[symbol];
     }
     emit(ctx, "};\n");
@@ -1262,7 +1275,10 @@ fn prepare_emission(ctx: Compiler&) {
     integer_type(ctx, 1, true);
     for ty in ctx.types { ctx.c_type_state.push(0); }
     var last_local: i64[>..] = [];
+    for spec, i in ctx.specializations { ctx.c_nested.push(0); }
     for spec, i in ctx.specializations {
+        let parent = ctx.scopes[ctx.symbols[spec.symbol].scope].function;
+        if parent >= 0 { ctx.c_nested[parent] = 1; }
         ctx.function_slots.push(0); ctx.first_local.push(-1); last_local.push(-1);
         var returned = -1;
         if ctx.types[spec.result].size_class == 2 { returned = returned_local(ctx, spec.body, i); }
@@ -1324,7 +1340,13 @@ fn emit_function(ctx: Compiler&, id: i64) {
         ctx.c_result = CValue { code: name, ty: spec.result, address: save_text(ctx, str("&", name)), stack: "" };
     } else { ctx.c_result = no_c_value(ctx); }
     var e = ctx.nodes[spec.parameters].first;
-    while e >= 0 { let symbol = ctx.nodes[ctx.edges[e].value].symbol; emit(ctx, str("  ", c_symbol(ctx, symbol), " = p", ctx.local_names[symbol], ";\n")); e = ctx.edges[e].next; }
+    while e >= 0 { let symbol = ctx.nodes[ctx.edges[e].value].symbol; if !c_local(ctx, symbol) { emit(ctx, str("  ", c_symbol(ctx, symbol), " = p", ctx.local_names[symbol], ";\n")); } e = ctx.edges[e].next; }
+    // The other C locals, declared with the temporaries.
+    var local = ctx.first_local[id];
+    while local >= 0 {
+        if c_local(ctx, local) && !is_parameter(ctx, id, local) { format(ctx.c_declarations, "  ", c_type(ctx, ctx.symbols[local].ty), " ", c_name(ctx, local), ";\n"); }
+        local = ctx.next_local[local];
+    }
     c_into(ctx, spec.body, ctx.c_result);
     emit(ctx, "gg_done:;\n");
     if ctx.c_slots > 0 {

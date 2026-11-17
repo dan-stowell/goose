@@ -53,6 +53,8 @@ struct Compiler {
     local_names: i64[>..]&,
     first_local: i64[>..]&,
     next_local: i64[>..]&,
+    // 1 when a nested function of this specialization reaches its frame.
+    c_nested: i64[>..]&,
     c_controls: Control[>..<]&,
     c_arguments: (const u8[:])[>..<]&,
     // (call node, number) for this function's multiple-result calls.
@@ -107,6 +109,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
     var owned_local_names: i64[>..] = [];
     var owned_first_local: i64[>..] = [];
     var owned_next_local: i64[>..] = [];
+    var owned_c_nested: i64[>..] = [];
     var owned_c_controls: Control[>..<] = [];
     var owned_c_arguments: (const u8[:])[>..<] = [];
     var owned_c_multis: i64[>..<] = [];
@@ -144,6 +147,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
         local_names: owned_local_names,
         first_local: owned_first_local,
         next_local: owned_next_local,
+        c_nested: owned_c_nested,
         c_controls: owned_c_controls,
         c_arguments: owned_c_arguments,
         c_multis: owned_c_multis,
