@@ -37,3 +37,4 @@ milestone?** This is the first: run 23 -> 63/776, reject 3 -> 39/2036, stdlib 0 
 throughout. Self-hosted W1 is still 1.2x stock optimized, and W2 can't be compared until more fixtures pass;
 demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, through every rung).
 - 2026-11-17 feat-enums: user format overloads (custom formatting dispatch), by value or reference, generic ones on struct/enum patterns; run 40->43.
+- 2026-11-17 feat-enums: value-producing break for loop/block (joined like branches); run 43->44.

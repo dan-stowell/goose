@@ -366,7 +366,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         let dest = CValue { code: name, ty: x.ty, address: save_text(ctx, str("&", name)), stack: "" };
         c_into(ctx, n, dest); return dest;
     }
-    if tag == N_IF || tag == N_BLOCK || tag == N_MATCH {
+    if tag == N_IF || tag == N_BLOCK || tag == N_MATCH || tag == N_LOOP || tag == N_EARLY {
         if x.ty == 0 || ctx.types[x.ty].kind == T_BOTTOM { c_into(ctx, n, no_c_value(ctx)); return no_c_value(ctx); }
         if ctx.types[x.ty].size_class == 1 { let dest = c_variable_temp(ctx, x.ty); c_into(ctx, n, dest); return dest; }
         if ctx.types[x.ty].size_class > 0 { let dest = c_array_temp(ctx, x.ty); c_into(ctx, n, dest); return dest; }
@@ -385,6 +385,7 @@ recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
         emit(ctx, "\n"); return;
     }
     if x.tag == N_MATCH { c_match(ctx, n, dest); return; }
+    if x.tag == N_LOOP || x.tag == N_EARLY { c_loop(ctx, n, dest); return; }
     if x.tag == N_BLOCK {
         emit(ctx, "  {\n"); var e = x.first;
         while e >= 0 { c_statement(ctx, ctx.edges[e].value); e = ctx.edges[e].next; }
@@ -780,6 +781,7 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         if x.tag == N_CONTINUE { while control >= 0 && ctx.c_controls[control].again < 0 { control--; } }
         if control < 0 { abort("internal error: no loop target"); }
         let label = if x.tag == N_CONTINUE { ctx.c_controls[control].again } else { ctx.c_controls[control].done };
+        if x.first >= 0 { c_into(ctx, first_child(ctx, n), control_destination(ctx, control)); }
         emit(ctx, str("  goto label", label, ";\n")); return;
     }
     if x.tag == N_ASSIGN {
@@ -796,55 +798,72 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         let operation = if op == "++" { "+" } else if op == "--" { "-" } else { op[..op.len - 1] };
         emit(ctx, str("  ", dest.code, " = ", c_binary(ctx, operation, old, right, dest.ty), ";\n")); return;
     }
-    if x.tag == N_WHILE || x.tag == N_LOOP || x.tag == N_EARLY || x.tag == N_FOR {
-        let controls = ctx.c_controls;
-        let control_mark = controls.len;
-        let start = ctx.c_label; let advance = ctx.c_label + 1; let done = ctx.c_label + 2; ctx.c_label += 3;
-        controls.push(Control { again: if x.tag == N_EARLY { -1 } else { advance }, done: done });
-        if x.tag == N_FOR {
-            let index = raw_temporary(ctx, "int64_t");
-            var iterable = no_c_value(ctx); var upper = no_c_value(ctx);
-            var cursor = save_text(ctx, "");
-            let range = ctx.nodes[x.b].tag == N_RANGE;
-            if range {
-                let lo = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.nodes[x.b].a))); upper = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.nodes[x.b].b)));
-                emit(ctx, str("  ", index, " = ", lo.code, ";\n"));
-            } else {
-                iterable = c_decay(ctx, c_expression(ctx, x.b));
-                if ctx.types[iterable.ty].kind == T_INTEGER { upper = snapshot(ctx, iterable); }
-                emit(ctx, str("  ", index, " = 0;\n"));
-                let elem = element_type(ctx, iterable.ty);
-                if elem >= 0 && ctx.types[elem].size_class == 1 { cursor = raw_temporary(ctx, "uint8_t *"); emit(ctx, str("  ", cursor, " = (uint8_t *)(", c_view(ctx, iterable), ").data;\n")); }
-            }
-            emit(ctx, str("label", start, ":;\n"));
-            let symbol = ctx.nodes[x.a].symbol;
-            if upper.ty != 0 {
-                emit(ctx, str("  if (", index, " >= ", upper.code, ") goto label", done, ";\n  ", c_symbol(ctx, symbol), " = ", index, ";\n"));
-            } else {
-                let view = c_view(ctx, iterable); let elem = element_type(ctx, iterable.ty);
-                emit(ctx, str("  if (", index, " >= (", view, ").len) goto label", done, ";\n  ", c_symbol(ctx, symbol), " = "));
-                if cursor.len > 0 { emit(ctx, str(cursor, ";\n")); }
-                else {
-                    if x.flags & 1 != 0 || ctx.types[elem].size_class > 0 { emit(ctx, "&"); }
-                    emit(ctx, str("((", c_type(ctx, elem), " *)(", view, ").data)[", index, "];\n"));
-                }
-            }
-            if x.first >= 0 { emit(ctx, str("  ", c_symbol(ctx, ctx.nodes[ctx.edges[x.first].value].symbol), " = ", index, ";\n")); }
-            c_statement(ctx, x.c);
-            emit(ctx, str("label", advance, ":;\n"));
-            if cursor.len > 0 { emit(ctx, str("  ", cursor, " += gg_size_", element_type(ctx, iterable.ty), "(", cursor, ");\n")); }
-            emit(ctx, str("  ", index, "++; goto label", start, ";\n"));
-        } else if x.tag == N_EARLY { c_statement(ctx, x.a); }
-        else {
-            emit(ctx, str("label", advance, ":;\n"));
-            if x.tag == N_WHILE { let condition = c_decay(ctx, c_expression(ctx, x.a)); emit(ctx, str("  if (!(", condition.code, ")) goto label", done, ";\n")); c_statement(ctx, x.b); }
-            else { c_statement(ctx, x.a); }
-            emit(ctx, str("  goto label", advance, ";\n"));
-        }
-        emit(ctx, str("label", done, ":;\n")); controls.resize(control_mark); return;
-    }
+    if x.tag == N_WHILE || x.tag == N_LOOP || x.tag == N_EARLY || x.tag == N_FOR { c_loop(ctx, n, no_c_value(ctx)); return; }
     if x.tag == N_EXPR_STMT { c_into(ctx, x.a, no_c_value(ctx)); return; }
     c_into(ctx, n, no_c_value(ctx));
+}
+fn park_control(ctx: Compiler&, again: i64, done: i64, dest: CValue) -> Control {
+    var c = Control { again: again, done: done, ty: dest.ty, code_len: dest.code.len, address_len: dest.address.len, stack_len: dest.stack.len };
+    if dest.ty == 0 { c.code_len = 0; c.address_len = 0; c.stack_len = 0; return c; }
+    c.code = ctx.text_storage.len; ctx.text_storage.append(dest.code);
+    c.address = ctx.text_storage.len; ctx.text_storage.append(dest.address);
+    c.stack = ctx.text_storage.len; ctx.text_storage.append(dest.stack);
+    return c;
+}
+fn control_destination(ctx: Compiler&, i: i64) -> CValue {
+    let c = ctx.c_controls[i];
+    return CValue { code: ctx.text_storage[c.code..c.code + c.code_len], ty: c.ty, address: ctx.text_storage[c.address..c.address + c.address_len], stack: ctx.text_storage[c.stack..c.stack + c.stack_len] };
+}
+// Loops and blocks jump to their labels; a break with a value fills dest.
+recursive fn c_loop(ctx: Compiler&, n: i64, dest: CValue) {
+    let x = ctx.nodes[n];
+    let controls = ctx.c_controls;
+    let control_mark = controls.len;
+    let start = ctx.c_label; let advance = ctx.c_label + 1; let done = ctx.c_label + 2; ctx.c_label += 3;
+    if x.tag != N_FOR { controls.push(park_control(ctx, if x.tag == N_EARLY { -1 } else { advance }, done, dest)); }
+    if x.tag == N_FOR {
+        let index = raw_temporary(ctx, "int64_t");
+        var iterable = no_c_value(ctx); var upper = no_c_value(ctx);
+        var cursor = save_text(ctx, "");
+        let range = ctx.nodes[x.b].tag == N_RANGE;
+        if range {
+            let lo = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.nodes[x.b].a))); upper = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.nodes[x.b].b)));
+            emit(ctx, str("  ", index, " = ", lo.code, ";\n"));
+        } else {
+            iterable = c_decay(ctx, c_expression(ctx, x.b));
+            if ctx.types[iterable.ty].kind == T_INTEGER { upper = snapshot(ctx, iterable); }
+            emit(ctx, str("  ", index, " = 0;\n"));
+            let elem = element_type(ctx, iterable.ty);
+            if elem >= 0 && ctx.types[elem].size_class == 1 { cursor = raw_temporary(ctx, "uint8_t *"); emit(ctx, str("  ", cursor, " = (uint8_t *)(", c_view(ctx, iterable), ").data;\n")); }
+        }
+        // The input is evaluated before the loop catches breaks.
+        controls.push(park_control(ctx, advance, done, dest));
+        emit(ctx, str("label", start, ":;\n"));
+        let symbol = ctx.nodes[x.a].symbol;
+        if upper.ty != 0 {
+            emit(ctx, str("  if (", index, " >= ", upper.code, ") goto label", done, ";\n  ", c_symbol(ctx, symbol), " = ", index, ";\n"));
+        } else {
+            let view = c_view(ctx, iterable); let elem = element_type(ctx, iterable.ty);
+            emit(ctx, str("  if (", index, " >= (", view, ").len) goto label", done, ";\n  ", c_symbol(ctx, symbol), " = "));
+            if cursor.len > 0 { emit(ctx, str(cursor, ";\n")); }
+            else {
+                if x.flags & 1 != 0 || ctx.types[elem].size_class > 0 { emit(ctx, "&"); }
+                emit(ctx, str("((", c_type(ctx, elem), " *)(", view, ").data)[", index, "];\n"));
+            }
+        }
+        if x.first >= 0 { emit(ctx, str("  ", c_symbol(ctx, ctx.nodes[ctx.edges[x.first].value].symbol), " = ", index, ";\n")); }
+        c_statement(ctx, x.c);
+        emit(ctx, str("label", advance, ":;\n"));
+        if cursor.len > 0 { emit(ctx, str("  ", cursor, " += gg_size_", element_type(ctx, iterable.ty), "(", cursor, ");\n")); }
+        emit(ctx, str("  ", index, "++; goto label", start, ";\n"));
+    } else if x.tag == N_EARLY { c_into(ctx, x.a, dest); }
+    else {
+        emit(ctx, str("label", advance, ":;\n"));
+        if x.tag == N_WHILE { let condition = c_decay(ctx, c_expression(ctx, x.a)); emit(ctx, str("  if (!(", condition.code, ")) goto label", done, ";\n")); c_statement(ctx, x.b); }
+        else { c_statement(ctx, x.a); }
+        emit(ctx, str("  goto label", advance, ";\n"));
+    }
+    emit(ctx, str("label", done, ":;\n")); controls.resize(control_mark); return;
 }
 recursive fn returned_local(ctx: Compiler&, n: i64, spec: i64) -> i64 {
     if n < 0 { return -1; }

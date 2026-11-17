@@ -6,7 +6,9 @@ struct CValue {
     address: const u8[:] = "",
     stack: const u8[:] = "",
 }
-struct Control { again: i64, done: i64 }
+// A break with a value fills the control's destination, parked as offsets into
+// the text arena: a view may not be stored inside the emitter's recursive cycle.
+struct Control { again: i64, done: i64, ty: i64 = 0, code: i64 = 0, address: i64 = 0, stack: i64 = 0, code_len: i64 = 0, address_len: i64 = 0, stack_len: i64 = 0 }
 struct FunctionInstance { template: i64, arguments: i64, symbol: i64 }
 
 struct Compiler {
@@ -29,6 +31,7 @@ struct Compiler {
     loop_depth: i64 = 0,
     // Breaks seen in the innermost loop or block being checked.
     loop_breaks: i64 = 0,
+    break_target: i64 = -1,
     global_order: i64[>..]&,
     c_output: u8[>..]&,
     c_declarations: u8[>..]&,

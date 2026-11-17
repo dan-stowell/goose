@@ -61,6 +61,7 @@ shrink_global_let_views
 shrink_pending_own_local
 slice_ref_loads
 slice_ref_stores
+tre_abandoned_accumulator
 tre_trailing_abort
 view_aliases
 zero_length_values

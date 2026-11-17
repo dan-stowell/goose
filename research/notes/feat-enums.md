@@ -36,3 +36,13 @@ What Goose made easy, forced, or could not express while writing the compiler.
   `gg_render_base` is set before a structural render, only in programs that have an overload; the
   overload call saves and restores it. A top-level argument calls its overload directly, passing
   the argument as a call would (a reference to its real storage).
+
+## Break with a value (2026-11-17)
+
+- The breaks of a `loop`/`block` join on the target node (its `b` remembers the last joined break).
+  The emitter's control stack needed each target's destination, but a `CValue` holds views, and
+  storing views in a container inside a recursive cycle is forbidden (§7.8: "references may only be
+  passed down, not stored"). The destination is parked as offsets into the text arena instead
+  (`park_control`/`control_destination`): integers in the container, views rebuilt on use. Same
+  lesson as above: inside recursion, containers hold indices, never views.
+- A `for` loop's input is evaluated before the loop catches breaks, in both checker and emitter.

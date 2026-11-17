@@ -465,7 +465,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         let a = check_expression(ctx, x.b, scope, expected);
         if x.c >= 0 { v = join_branch(ctx, a, check_expression(ctx, x.c, scope, expected), x.b, x.c, x.token); }
     } else if tag == N_MATCH { v = check_match(ctx, n, scope, expected); }
-    else if tag == N_WHILE || tag == N_FOR || tag == N_LOOP || tag == N_EARLY { v = check_loop(ctx, n, scope); }
+    else if tag == N_WHILE || tag == N_FOR || tag == N_LOOP || tag == N_EARLY { v = check_loop(ctx, n, scope, expected); }
     else if tag == N_RETURN {
         if ctx.checking_function < 0 { error_at(ctx, x.token, "return outside a function"); }
         if x.a >= 0 { error_at(ctx, x.token, "not implemented yet: long-distance returns"); }
@@ -474,7 +474,19 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     } else if tag == N_BREAK || tag == N_CONTINUE {
         if ctx.loop_depth == 0 { error_at(ctx, x.token, "loop exit outside a loop or block"); }
         if tag == N_BREAK { ctx.loop_breaks++; }
-        if x.first >= 0 { error_at(ctx, x.token, "not implemented yet: value-producing break"); }
+        if x.first >= 0 {
+            // The breaks of one loop or block agree on a type, joined on the
+            // target node; its b is the break whose value was joined last.
+            let target = ctx.break_target;
+            if child_count(ctx, n) > 1 { error_at(ctx, x.token, "break takes one value"); }
+            if target < 0 || (ctx.nodes[target].tag != N_LOOP && ctx.nodes[target].tag != N_EARLY) { error_at(ctx, x.token, "break with a value needs a loop or block target"); }
+            let value = first_child(ctx, n);
+            let previous = ctx.nodes[target].b;
+            let b = check_expression(ctx, value, scope, ctx.nodes[target].c);
+            if previous < 0 { var first = b; first.place = -1; first.known = false; annotate(ctx, target, first); }
+            else { annotate(ctx, target, join_branch(ctx, value_of(ctx, target), b, previous, value, x.token)); }
+            ctx.nodes[target].b = value;
+        }
         v.ty = intern_type(ctx, Type { kind: T_BOTTOM });
     } else if tag == N_EXPR_STMT { let inner = check_expression(ctx, x.a, scope, -1); if ctx.types[inner.ty].kind == T_BOTTOM { v = inner; } }
     else if tag == N_BIND { check_binding(ctx, n, scope); }
@@ -485,7 +497,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
     }
     else { error_at(ctx, x.token, str("not implemented yet: expression tag ", tag)); }
     let function_body = tag == N_BLOCK && ctx.checking_function >= 0 && ctx.specializations[ctx.checking_function].body == n;
-    if (tag == N_IF || tag == N_BLOCK || tag == N_MATCH) && !function_body && v.ty != 0 && ctx.types[v.ty].kind != T_BOTTOM {
+    if (tag == N_IF || tag == N_BLOCK || tag == N_MATCH || tag == N_LOOP || tag == N_EARLY) && !function_body && v.ty != 0 && ctx.types[v.ty].kind != T_BOTTOM {
         if expected >= 0 && ctx.types[expected].kind == T_REFERENCE {
             require_fit(ctx, n, v, expected); v.ty = expected;
         } else {
@@ -494,7 +506,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         }
         v.place = -1;
     }
-    if (tag == N_ARRAY || tag == N_FILL || tag == N_CONSTRUCT || tag == N_CALL || tag == N_IF || tag == N_MATCH || (tag == N_BLOCK && !function_body)) && (ctx.types[v.ty].kind == T_ARRAY || ctx.types[v.ty].kind == T_STRUCT || ctx.types[v.ty].kind == T_ENUM) && v.place < 0 {
+    if (tag == N_ARRAY || tag == N_FILL || tag == N_CONSTRUCT || tag == N_CALL || tag == N_IF || tag == N_MATCH || tag == N_LOOP || tag == N_EARLY || (tag == N_BLOCK && !function_body)) && (ctx.types[v.ty].kind == T_ARRAY || ctx.types[v.ty].kind == T_STRUCT || ctx.types[v.ty].kind == T_ENUM) && v.place < 0 {
         let temporary_scope = scope_new(ctx, scope, ctx.checking_function);
         let temporary_root = ctx.symbols.len;
         ctx.symbols.push(Symbol { token: x.token, ns: -1, kind: 4, decl: n, scope: temporary_scope, ty: v.ty, state: 2 });
@@ -1112,16 +1124,23 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     // Updating an aggregate invalidates a remembered constructor mapping.
     if ctx.types[dest.ty].kind == T_STRUCT { ctx.symbols[dest.place].fields = -1; }
 }
-recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64) -> Value {
+recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Value {
     let x = ctx.nodes[n];
     ctx.loop_depth++;
     let outer_breaks = ctx.loop_breaks; ctx.loop_breaks = 0;
+    let outer_target = ctx.break_target; ctx.break_target = n;
+    var tail = Value {};
     if x.tag == N_WHILE { require_fit(ctx, x.a, decay(ctx, check_expression(ctx, x.a, scope, -1)), boolean_type(ctx)); check_expression(ctx, x.b, scope, 0); }
-    else if x.tag == N_LOOP || x.tag == N_EARLY { check_expression(ctx, x.a, scope, 0); }
+    else if x.tag == N_LOOP || x.tag == N_EARLY {
+        ctx.nodes[n].b = -1; ctx.nodes[n].c = expected;
+        tail = check_expression(ctx, x.a, scope, if x.tag == N_EARLY { expected } else { 0 });
+    }
     else {
         let inner = scope_new(ctx, scope, ctx.checking_function);
         var binding_type = default_integer(ctx);
         var root = -1;
+        // The input is evaluated before the loop catches breaks.
+        ctx.break_target = outer_target; ctx.loop_depth--;
         if ctx.nodes[x.b].tag == N_RANGE {
             let a = decay(ctx, check_expression(ctx, ctx.nodes[x.b].a, scope, -1));
             let b = decay(ctx, check_expression(ctx, ctx.nodes[x.b].b, scope, -1));
@@ -1133,6 +1152,7 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64) -> Value {
             if binding_type < 0 { binding_type = iterable.ty; if ctx.types[binding_type].kind != T_INTEGER { error_at(ctx, x.token, "for requires an integer or array"); } }
             else if x.flags & 1 != 0 || ctx.types[binding_type].size_class > 0 { binding_type = reference_type(ctx, binding_type, iterable.readonly); }
         }
+        ctx.break_target = n; ctx.loop_depth++;
         let s = register_symbol(ctx, ctx.nodes[x.a].token, -1, 2, n, inner, if ctx.types[binding_type].kind == T_REFERENCE { 0 } else { 32 });
         ctx.symbols[s].ty = binding_type; ctx.symbols[s].root = root; ctx.symbols[s].state = 2; ctx.nodes[x.a].symbol = s;
         if x.first >= 0 {
@@ -1144,7 +1164,13 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64) -> Value {
     ctx.loop_depth--;
     // A loop that no break leaves never completes (6.5): it is as a return.
     let left = ctx.loop_breaks > 0; ctx.loop_breaks = outer_breaks;
+    ctx.break_target = outer_target;
     if x.tag == N_LOOP && !left { return Value { ty: intern_type(ctx, Type { kind: T_BOTTOM }) }; }
+    let broke = (x.tag == N_LOOP || x.tag == N_EARLY) && ctx.nodes[n].b >= 0;
+    // A block's value is its tail's or a break's; a loop's only a break's.
+    if x.tag == N_EARLY && !broke { return tail; }
+    if x.tag == N_EARLY { return join_branch(ctx, value_of(ctx, n), tail, ctx.nodes[n].b, if ctx.nodes[x.a].a >= 0 { ctx.nodes[x.a].a } else { x.a }, x.token); }
+    if broke { return value_of(ctx, n); }
     return Value {};
 }
 fn check_return(ctx: Compiler&, n: i64, raw: Value, spec: i64, token: i64) {
@@ -1529,8 +1555,8 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         ctx.nodes[param].symbol = s; p = ctx.edges[p].next;
     }
     if ctx.nodes[decl].flags & 2 == 0 {
-        let previous = ctx.checking_function; let previous_loop = ctx.loop_depth; let previous_breaks = ctx.loop_breaks;
-        ctx.checking_function = id; ctx.loop_depth = 0; ctx.loop_breaks = 0;
+        let previous = ctx.checking_function; let previous_loop = ctx.loop_depth; let previous_breaks = ctx.loop_breaks; let previous_target = ctx.break_target;
+        ctx.checking_function = id; ctx.loop_depth = 0; ctx.loop_breaks = 0; ctx.break_target = -1;
         // A body declared outside a default may take that default again,
         // which makes it recursive rather than an endless default (§3.2).
         let defaults = ctx.default_stack; let default_mark = defaults.len; defaults.push(-1);
@@ -1538,7 +1564,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         let tail = check_expression(ctx, body, scope, result);
         if ctx.types[tail.ty].kind != T_BOTTOM { check_return(ctx, ctx.nodes[body].a, tail, id, ctx.nodes[decl].token); }
         defaults.resize(default_mark); ctx.default_site = outer_site;
-        ctx.checking_function = previous; ctx.loop_depth = previous_loop; ctx.loop_breaks = previous_breaks;
+        ctx.checking_function = previous; ctx.loop_depth = previous_loop; ctx.loop_breaks = previous_breaks; ctx.break_target = previous_target;
     } else if result < 0 { ctx.specializations[id].result = 0; }
     if ctx.specializations[id].result < 0 { ctx.specializations[id].result = 0; }
     if ctx.nodes[first_child(ctx, results)].ty < 0 { ctx.nodes[first_child(ctx, results)].ty = ctx.specializations[id].result; }
