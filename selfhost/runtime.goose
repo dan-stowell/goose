@@ -87,6 +87,7 @@ fn runtime_source() -> const u8[:] {
         if (lo < 0 || hi < lo || hi > a.len) gg_fail("slice out of bounds");
         return gg_view((unsigned char *)a.data + (size_t)lo * element, hi - lo);
     }
+    static void gg_index_fail(void) { gg_fail("array index out of bounds"); }
     static int64_t gg_index(int64_t i, int64_t len) { if ((uint64_t)i >= (uint64_t)len) gg_fail("array index out of bounds"); return i; }
     static void gg_append(gg_reference a, const void *p, int64_t n, size_t element) {
         void *to;

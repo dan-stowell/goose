@@ -113,8 +113,20 @@ fn raw_temporary(ctx: Compiler&, type_name: const u8[:]) -> const u8[:] {
     format(ctx.c_declarations, "  ", type_name, " ", name, ";\n");
     return name;
 }
+// A temporary is assigned before its value is first used and never after.
+fn is_temporary(code: const u8[:]) -> bool {
+    if code.len < 2 || code[0] != 't' { return false; }
+    for c in code[1..] { if c < '0' || c > '9' { return false; } }
+    return true;
+}
+fn calls_helper(code: const u8[:]) -> bool {
+    for c, i in code { if c == 'g' && i + 3 <= code.len && code[i..i + 3] == "gg_" { return true; } }
+    return false;
+}
+fn unsampled(ctx: Compiler&, v: CValue) -> CValue { return v; }
 fn snapshot(ctx: Compiler&, v: CValue) -> CValue {
     if ctx.types[v.ty].kind == T_VOID || ctx.types[v.ty].kind == T_BOTTOM { return v; }
+    if is_temporary(v.code) && ctx.types[v.ty].size_class == 0 { return v; }
     let name = temporary(ctx, v.ty); emit(ctx, str("  ", name, " = ", v.code, ";\n"));
     if ctx.types[v.ty].size_class == 1 { return CValue { code: name, ty: v.ty, address: name, stack: v.stack }; }
     return CValue { code: name, ty: v.ty, address: save_text(ctx, str("&", name)), stack: v.stack };
@@ -440,7 +452,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
         if op == "&" { return CValue { code: c_reference(ctx, a), ty: x.ty, address: "", stack: a.stack }; }
         if op == "(" { return a; }
         if op == "!" && ctx.nodes[x.a].truth { return CValue { code: save_text(ctx, str("(!", c_present(ctx, a), ")")), ty: x.ty, address: "", stack: "" }; }
-        let v = snapshot(ctx, c_decay(ctx, a));
+        let v = c_decay(ctx, a);
         if op == "-" && ctx.types[v.ty].kind == T_INTEGER { return CValue { code: save_text(ctx, str("((", c_type(ctx, x.ty), ")((uint64_t)0 - (uint64_t)(", v.code, ")))")), ty: x.ty, address: "", stack: "" }; }
         return CValue { code: save_text(ctx, str("(", op, "(", v.code, "))")), ty: x.ty, address: "", stack: "" };
     }
@@ -452,8 +464,11 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
             let b = c_condition(ctx, x.b); emit(ctx, str("  ", result, " = ", b.code, ";\n  }\n"));
             return CValue { code: result, ty: x.ty, address: save_text(ctx, str("&", result)), stack: "" };
         }
-        let a = snapshot(ctx, converted(ctx, c_expression(ctx, x.a), if ctx.nodes[x.a].target >= 0 { ctx.nodes[x.a].target } else { decay(ctx, value_of(ctx, x.a)).ty }));
-        let b = snapshot(ctx, converted(ctx, c_expression(ctx, x.b), if ctx.nodes[x.b].target >= 0 { ctx.nodes[x.b].target } else { decay(ctx, value_of(ctx, x.b)).ty }));
+        // The left operand is sampled only if the right one could change it.
+        let left = converted(ctx, c_expression(ctx, x.a), if ctx.nodes[x.a].target >= 0 { ctx.nodes[x.a].target } else { decay(ctx, value_of(ctx, x.a)).ty });
+        let sample = !pure_expression(ctx, x.b) || code_may_fail(ctx, x.a);
+        let a = if sample { snapshot(ctx, left) } else { left };
+        let b = unsampled(ctx, converted(ctx, c_expression(ctx, x.b), if ctx.nodes[x.b].target >= 0 { ctx.nodes[x.b].target } else { decay(ctx, value_of(ctx, x.b)).ty }));
         return CValue { code: c_binary(ctx, op, a, b, x.ty), ty: x.ty, address: "", stack: "" };
     }
     if tag == N_CAST {
@@ -491,17 +506,21 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
             parts = ViewParts { data: save_text(ctx, str(view, ".data")), len: save_text(ctx, str(view, ".len")) };
         }
         var lo = CValue { code: "0", ty: default_integer(ctx), address: "", stack: "" };
-        if x.b >= 0 { lo = snapshot(ctx, c_decay(ctx, c_expression(ctx, x.b))); }
+        if x.b >= 0 {
+            lo = c_decay(ctx, c_expression(ctx, x.b));
+            if calls_helper(lo.code) || (tag == N_SLICE && (!pure_expression(ctx, x.c) || code_may_fail(ctx, x.b))) { lo = snapshot(ctx, lo); }
+        }
         let lower = if x.flags & 1 != 0 { save_text(ctx, str(parts.len, " - ", lo.code)) } else { lo.code };
         let elem = element_type(ctx, a.ty);
         if tag == N_INDEX {
-            let pointer = save_text(ctx, str("((", c_type(ctx, elem), " *)", parts.data, ") + gg_index(", lower, ", ", parts.len, ")"));
+            emit(ctx, str("  if ((uint64_t)(", lower, ") >= (uint64_t)(", parts.len, ")) gg_index_fail();\n"));
+            let pointer = save_text(ctx, str("((", c_type(ctx, elem), " *)", parts.data, ") + (", lower, ")"));
             let sampled = raw_temporary(ctx, save_text(ctx, str(c_type(ctx, elem), " *"))); emit(ctx, str("  ", sampled, " = ", pointer, ";\n"));
             if is_relative(ctx, elem) { return CValue { code: c_relative_load(ctx, elem, sampled), ty: x.ty, address: sampled, stack: "" }; }
             return CValue { code: save_text(ctx, str("(*", sampled, ")")), ty: x.ty, address: sampled, stack: "" };
         }
         var hi = CValue { code: parts.len, ty: default_integer(ctx), address: "", stack: "" };
-        if x.c >= 0 { hi = snapshot(ctx, c_decay(ctx, c_expression(ctx, x.c))); }
+        if x.c >= 0 { hi = c_decay(ctx, c_expression(ctx, x.c)); }
         let upper = if x.flags & 2 != 0 { save_text(ctx, str(parts.len, " - ", hi.code)) } else { hi.code };
         let whole = raw_temporary(ctx, "gg_slice");
         emit(ctx, str("  ", whole, ".data = ", parts.data, "; ", whole, ".len = ", parts.len, ";\n"));
@@ -527,7 +546,7 @@ recursive fn c_expression(ctx: Compiler&, n: i64) -> CValue {
 recursive fn c_into(ctx: Compiler&, n: i64, dest: CValue) {
     let x = ctx.nodes[n];
     if x.tag == N_IF {
-        let condition = snapshot(ctx, c_condition(ctx, x.a)); emit(ctx, str("  if (", condition.code, ") {\n"));
+        let condition = c_condition(ctx, x.a); emit(ctx, str("  if (", condition.code, ") {\n"));
         c_into(ctx, x.b, dest); emit(ctx, "  }");
         if x.c >= 0 { emit(ctx, " else {\n"); c_into(ctx, x.c, dest); emit(ctx, "  }"); }
         emit(ctx, "\n"); return;
@@ -1011,7 +1030,11 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
             let built = c_variable_temp(ctx, expected); c_into(ctx, ctx.edges[e].value, built);
             arguments.push(built.code);
         } else {
-            let value = snapshot(ctx, converted(ctx, c_expression(ctx, ctx.edges[e].value), expected));
+            // An argument is sampled only if a later one could change it.
+            var later_pure = true; var rest = ctx.edges[e].next;
+            while rest >= 0 { if !pure_expression(ctx, ctx.edges[rest].value) { later_pure = false; } rest = ctx.edges[rest].next; }
+            var value = converted(ctx, c_expression(ctx, ctx.edges[e].value), expected);
+            if !later_pure || code_may_fail(ctx, ctx.edges[e].value) { value = snapshot(ctx, value); }
             arguments.push(value.code);
         }
         e = ctx.edges[e].next; p = ctx.edges[p].next;
@@ -1092,9 +1115,9 @@ recursive fn c_statement(ctx: Compiler&, n: i64) {
         if op == "=" { c_into(ctx, x.b, dest); return; }
         if op == ".=" && x.flags & 1024 == 0 && is_relative(ctx, ctx.nodes[x.b].target) { let rhs = c_expression(ctx, x.b); c_relative_store(ctx, ctx.nodes[x.b].target, raw.address, rhs); return; }
         if op == ".=" && x.flags & 1024 == 0 { let rhs = c_expression(ctx, x.b); emit(ctx, str("  ", raw.code, " = ", c_adapt(ctx, rhs, ctx.nodes[x.b].target), ";\n")); return; }
-        let old = snapshot(ctx, dest);
+        let old = if pure_expression(ctx, x.b) { dest } else { snapshot(ctx, dest) };
         var right = CValue { code: "1", ty: dest.ty, address: "", stack: "" };
-        if x.b >= 0 { right = snapshot(ctx, converted(ctx, c_expression(ctx, x.b), dest.ty)); }
+        if x.b >= 0 { right = unsampled(ctx, converted(ctx, c_expression(ctx, x.b), dest.ty)); }
         let operation = if op == "++" { "+" } else if op == "--" { "-" } else { op[..op.len - 1] };
         emit(ctx, str("  ", dest.code, " = ", c_binary(ctx, operation, old, right, dest.ty), ";\n")); return;
     }
