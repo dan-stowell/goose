@@ -607,6 +607,47 @@ recursive fn c_limited_call(ctx: Compiler&, n: i64) -> CValue {
     }
     return no_c_value(ctx);
 }
+// Every argument is evaluated once, then the tag selects the case, which is
+// given the payload in the dispatched argument's place.
+recursive fn c_dispatch(ctx: Compiler&, n: i64) -> CValue {
+    let x = ctx.nodes[n];
+    let first = ctx.specializations[ctx.edges[x.c].value];
+    let arguments = ctx.c_arguments;
+    let argument_mark = arguments.len;
+    var scrutinee = no_c_value(ctx);
+    var e = x.first; var p = ctx.nodes[first.parameters].first; var i = 0;
+    while e >= 0 {
+        if i == x.b { scrutinee = snapshot(ctx, c_decay(ctx, c_expression(ctx, ctx.edges[e].value))); arguments.push(scrutinee.code); }
+        else {
+            let expected = ctx.symbols[ctx.nodes[ctx.edges[p].value].symbol].ty;
+            arguments.push(snapshot(ctx, converted(ctx, c_expression(ctx, ctx.edges[e].value), expected)).code);
+        }
+        e = ctx.edges[e].next; p = ctx.edges[p].next; i++;
+    }
+    let ret = if first.result != 0 { temporary(ctx, first.result) } else { "" };
+    emit(ctx, str("  switch ((", scrutinee.code, ").tag) {\n"));
+    var cases = x.c; var variant = ctx.types[scrutinee.ty].first;
+    while cases >= 0 {
+        let id = ctx.edges[cases].value; let vt = ctx.edges[variant].value;
+        let spec = ctx.specializations[id];
+        emit(ctx, str("  case ", ctx.types[vt].count, ": "));
+        if ret.len > 0 { emit(ctx, str(ret, " = ")); }
+        emit_ref(ctx, "gg_function_", id); emit(ctx, "(");
+        for k in argument_mark..arguments.len {
+            if k > argument_mark { emit(ctx, ", "); }
+            if k - argument_mark == x.b { emit(ctx, if has_payload(ctx, vt) { save_text(ctx, str("(", scrutinee.code, ").u.v", ctx.types[vt].count)) } else { save_text(ctx, str("(", c_type(ctx, vt), "){0}")) }); }
+            else { emit(ctx, arguments[k]); }
+        }
+        if argument_mark < arguments.len { emit(ctx, ", "); }
+        let parent = ctx.scopes[ctx.symbols[spec.symbol].scope].function;
+        if parent >= 0 { emit(ctx, str(c_frame(ctx, parent), ", ")); }
+        emit(ctx, str("frame.base + ", ctx.c_slots, "); break;\n"));
+        cases = ctx.edges[cases].next; variant = ctx.edges[variant].next;
+    }
+    emit(ctx, "  }\n");
+    arguments.resize(argument_mark);
+    return CValue { code: ret, ty: first.result, address: save_text(ctx, str("&", ret)), stack: "" };
+}
 recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
     let x = ctx.nodes[n];
     let callee = ctx.nodes[x.a];
@@ -701,6 +742,7 @@ recursive fn c_call(ctx: Compiler&, n: i64, destination: CValue) -> CValue {
         if builtin == -25 { emit(ctx, str("  exit((int)(", arg.code, "));\n")); }
         return no_c_value(ctx);
     }
+    if builtin == -40 { return c_dispatch(ctx, n); }
     let spec = ctx.specializations[builtin]; let decl = ctx.nodes[ctx.symbols[spec.symbol].decl];
     let params = spec.parameters;
     // Borrow once: the watermark and restore share a stable reference path.

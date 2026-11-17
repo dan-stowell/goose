@@ -186,7 +186,58 @@ recursive fn resolve_overload(ctx: Compiler&, selected: i64, call: i64, scope: i
             else if tier == best_tier { ambiguous = true; }
         }
     }
+    if best < 0 && tag_dispatch(ctx, selected, call) { return -2; }
     if best < 0 { error_at(ctx, ctx.nodes[call].token, "no overload matches the arguments"); }
     if ambiguous { error_at(ctx, ctx.nodes[call].token, "ambiguous overload: several candidates have the same matching tier"); }
     return best;
+}
+// Case functions (§8.2): when no overload takes an enum argument as it is,
+// the call dispatches on its tag where every variant has exactly one
+// non-generic overload taking that variant type in the argument's place,
+// the other arguments fitting as for any call. The call's b is the place
+// and its c the overloads in variant order (specializations once checked).
+fn case_overload(ctx: Compiler&, selected: i64, call: i64, place: i64, vt: i64) -> i64 {
+    var found = -1;
+    var c = ctx.symbol_buckets[symbol_hash(ctx, ctx.symbols[selected].scope, ctx.symbols[selected].token)];
+    while c >= 0 {
+        let decl = ctx.nodes[ctx.symbols[c].decl];
+        if overload_member(ctx, c, selected) && decl.first < 0 && child_count(ctx, decl.a) == child_count(ctx, call) {
+            var applies = true; var p = ctx.nodes[decl.a].first; var e = ctx.nodes[call].first; var i = 0;
+            while p >= 0 && applies {
+                let syntax = ctx.nodes[ctx.edges[p].value].a;
+                if syntax < 0 { applies = false; }
+                else {
+                    let declared = resolve_type(ctx, syntax, ctx.symbols[c].scope);
+                    if i == place { applies = declared == vt; }
+                    else { applies = fits(ctx, value_of(ctx, ctx.edges[e].value), parameter_destination(ctx, declared, decl.flags & 2 != 0)); }
+                }
+                p = ctx.edges[p].next; e = ctx.edges[e].next; i++;
+            }
+            if applies { if found >= 0 { return -1; } found = c; }
+        }
+        c = ctx.symbol_chain[c];
+    }
+    return found;
+}
+fn tag_dispatch(ctx: Compiler&, selected: i64, call: i64) -> bool {
+    var place = 0; var e = ctx.nodes[call].first;
+    while e >= 0 {
+        let arg = decay(ctx, value_of(ctx, ctx.edges[e].value));
+        if ctx.types[arg.ty].kind == T_ENUM {
+            var cases = -1; var last = -1; var complete = true;
+            var v = ctx.types[arg.ty].first;
+            while v >= 0 && complete {
+                let found = case_overload(ctx, selected, call, place, ctx.edges[v].value);
+                if found < 0 { complete = false; }
+                else {
+                    let edge = ctx.edges.len; ctx.edges.push(Edge { value: found });
+                    if last < 0 { cases = edge; } else { ctx.edges[last].next = edge; } last = edge;
+                }
+                v = ctx.edges[v].next;
+            }
+            if complete { ctx.nodes[call].b = place; ctx.nodes[call].c = cases; return true; }
+        }
+        place++; e = ctx.edges[e].next;
+    }
+    return false;
 }

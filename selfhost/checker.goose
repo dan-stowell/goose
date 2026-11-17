@@ -1333,6 +1333,7 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     if s < 0 { error_at(ctx, ctx.nodes[callee].token, str("unknown function '", name, "'")); }
     if ctx.symbols[s].scope != 0 && ctx.symbols[s].state != 2 { error_at(ctx, ctx.nodes[callee].token, "nested function called before its declaration is reached"); }
     let concrete = resolve_overload(ctx, s, n, scope);
+    if concrete == -2 { return check_dispatch(ctx, n, scope); }
     fill_defaults(ctx, concrete, n);
     let spec = check_function(ctx, concrete, n, scope);
     ctx.checked_calls.push(CheckedCall { node: n, scope: scope, callee: spec });
@@ -1345,6 +1346,40 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     }
     ctx.nodes[n].symbol = spec;
     return result_value(ctx, first_child(ctx, ctx.specializations[spec].results));
+}
+// Each case is checked as a call whose dispatched argument is the variant's
+// payload, a copy of the enum's; the cases' results must agree (§8.2).
+recursive fn check_dispatch(ctx: Compiler&, n: i64, scope: i64) -> Value {
+    let place = ctx.nodes[n].b;
+    var result = -1;
+    var cases = ctx.nodes[n].c;
+    while cases >= 0 {
+        let symbol = ctx.edges[cases].value;
+        let call = node(ctx, N_CALL, ctx.nodes[n].token); ctx.nodes[call].a = ctx.nodes[n].a; ctx.nodes[call].flags = 512;
+        var e = ctx.nodes[n].first; var i = 0;
+        var p = ctx.nodes[ctx.nodes[ctx.symbols[symbol].decl].a].first;
+        while e >= 0 {
+            var arg = ctx.edges[e].value;
+            if i == place {
+                let enumerated = decay(ctx, value_of(ctx, arg));
+                let payload = node(ctx, N_NAME, ctx.nodes[arg].token);
+                annotate(ctx, payload, Value { ty: resolve_type(ctx, ctx.nodes[ctx.edges[p].value].a, ctx.symbols[symbol].scope), root: enumerated.root, held: enumerated.held });
+                arg = payload;
+            }
+            child(ctx, call, arg);
+            e = ctx.edges[e].next; p = ctx.edges[p].next; i++;
+        }
+        let spec = check_function(ctx, symbol, call, scope);
+        ctx.checked_calls.push(CheckedCall { node: n, scope: scope, callee: spec });
+        let given = ctx.specializations[spec].result;
+        if result < 0 { result = given; }
+        else if given != result { error_at(ctx, ctx.nodes[n].token, "the case functions of a dispatched call must agree on a result type"); }
+        if child_count(ctx, ctx.specializations[spec].results) > 1 || ctx.types[given].size_class != 0 { error_at(ctx, ctx.nodes[n].token, "not implemented yet: dispatch to cases with multiple or nonfixed results"); }
+        ctx.edges[cases].value = spec;
+        cases = ctx.edges[cases].next;
+    }
+    ctx.nodes[n].symbol = -40;
+    return Value { ty: result };
 }
 // A call leaving out trailing parameters gets a fresh clone of each one's
 // default after its written arguments, in parameter order (§7.1). The
