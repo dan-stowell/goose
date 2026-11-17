@@ -1,0 +1,706 @@
+#!/usr/bin/env python3
+"""research/demo: the ladder (research/CHARTER.md), measured stage by stage.
+
+Builds each workload through each rung that runs today, printing one line per
+stage as it goes (rung, stage, wall time, bytes in and out, peak RSS, how the
+output was checked), runs what it built and checks it, then prints
+min/median/max per stage. Every measurement is also written to
+research/runs/<UTC timestamp>-<shortsha>.json (a list of records
+{workload, rung, stage, run, seconds, bytes_in, bytes_out, peak_rss_kb, check,
+ok}, plus `item` where a workload has several programs).
+
+Workloads:
+  W1  selfhost/ compiling itself (stock optimized, stock fast, self-hosted;
+      checked by the C fixed point)
+  W2  positive fixtures with blessed output (every 10th by default, --full for
+      all); stock rungs timed, self-hosted rung counted
+  W3  samples 19_vm, 21_raytrace, 31_mini_doom (headless), checked against
+      samples/expected/
+
+Usage:
+  research/demo                 everything, 5 interleaved runs
+  research/demo --quick         everything, 1 run
+  research/demo --only W1,W3    some workloads
+  research/demo --before REV    also build REV's selfhost/ and run it alongside
+  research/demo --full          W2 over every positive fixture
+  research/demo --ladder        also rewrite research/LADDER.md from this run
+
+Build products go to build/demo/. The C++ compiler is $GOOSE (default
+/home/exedev/goose/build/goose, else build/goose in this tree).
+"""
+
+import argparse
+import datetime
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import statistics
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+B = ROOT / "build" / "demo"
+SAMPLES = ["19_vm", "21_raytrace", "31_mini_doom"]
+W2_EXCLUDED_DIRS = ("errors", "errors_tc", "goose_in_goose", "lsp", "packages")
+TIMEOUT = 900
+
+
+def find_goose():
+    for p in (os.environ.get("GOOSE"), "/home/exedev/goose/build/goose", ROOT / "build" / "goose"):
+        if p and Path(p).is_file() and os.access(p, os.X_OK):
+            return str(p)
+    sys.exit("demo: no goose compiler (set GOOSE=path)")
+
+
+GOOSE = find_goose()
+CC = shutil.which("gcc") or shutil.which("cc")
+
+
+# --- measuring one process --------------------------------------------------
+
+class Result:
+    __slots__ = ("code", "seconds", "rss_kb", "out", "err")
+
+
+def measure(argv, cwd=None, stdin=None, out=None, timeout=TIMEOUT):
+    """Run argv; wall time, peak RSS (os.wait4's ru_maxrss), exit code; its
+    stdout goes to `out` (a path) or is captured, its stderr is captured."""
+    B.mkdir(parents=True, exist_ok=True)
+    errf = open(B / f".stderr-{threading.get_ident()}", "w+b")
+    outf = open(out, "wb") if out else open(B / f".stdout-{threading.get_ident()}", "w+b")
+    inf = open(stdin, "rb") if stdin else subprocess.DEVNULL
+    try:
+        t0 = time.perf_counter()
+        p = subprocess.Popen([str(a) for a in argv], cwd=cwd, stdin=inf, stdout=outf, stderr=errf)
+        timer = threading.Timer(timeout, p.kill)
+        timer.start()
+        _, status, ru = os.wait4(p.pid, 0)
+        r = Result()
+        r.seconds = time.perf_counter() - t0
+        timer.cancel()
+        p.returncode = r.code = os.waitstatus_to_exitcode(status)
+        r.rss_kb = ru.ru_maxrss
+        errf.seek(0)
+        r.err = errf.read().decode("utf-8", "replace")
+        if out:
+            r.out = None
+        else:
+            outf.seek(0)
+            r.out = outf.read().decode("utf-8", "replace")
+        return r
+    finally:
+        errf.close()
+        outf.close()
+        if stdin:
+            inf.close()
+
+
+def size(p):
+    try:
+        return Path(p).stat().st_size
+    except OSError:
+        return 0
+
+
+def tree_bytes(d):
+    return sum(size(f) for f in Path(d).glob("*.goose"))
+
+
+def normalized(text):
+    return text.replace("\r\n", "\n").rstrip("\n")
+
+
+def first_error(r):
+    for line in (r.err + (r.out or "")).splitlines():
+        if line.strip():
+            return line.strip().replace(str(ROOT) + "/", "")[:160]
+    return f"exit {r.code}"
+
+
+def human(n):
+    if n is None:
+        return "-"
+    for unit, scale in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if n >= scale:
+            return f"{n / scale:.2f} {unit}"
+    return f"{n} B"
+
+
+# --- the record -------------------------------------------------------------
+
+RECORDS = []
+W2_FAILURES = {}   # rung -> (passed, ran, fixtures, [(first failure, [fixtures])])
+PRINT_LOCK = threading.Lock()
+
+
+def record(workload, rung, stage, run, seconds, bytes_in, bytes_out, rss_kb, check, ok,
+           item=None, quiet=False):
+    rec = {"workload": workload, "rung": rung, "stage": stage, "run": run,
+           "seconds": round(seconds, 6) if seconds is not None else None,
+           "bytes_in": bytes_in, "bytes_out": bytes_out, "peak_rss_kb": rss_kb,
+           "check": check, "ok": ok}
+    if item:
+        rec["item"] = item
+    RECORDS.append(rec)
+    if not quiet:
+        what = f"{workload}{'/' + item if item else ''}"
+        secs = f"{seconds:8.3f} s" if seconds is not None else "       - s"
+        rss = f"{rss_kb / 1024:7.1f} MB" if rss_kb else "        -"
+        line = (f"{what:<16} {rung:<26} {stage:<26} run {run}  {secs}  in {human(bytes_in):>9}"
+                f"  out {human(bytes_out):>9}  rss {rss}  {'ok  ' if ok else 'FAIL'} {check}")
+        with PRINT_LOCK:
+            print(line, flush=True)
+    return rec
+
+
+def step(workload, rung, stage, run, argv, bytes_in, out_path=None, check="-", item=None,
+         cwd=None, stdin=None, bytes_out=None):
+    """Measure one stage, print and record it; returns the Result (ok = exit 0)."""
+    r = measure(argv, cwd=cwd or ROOT, stdin=stdin)   # out_path is the product, sized
+    if bytes_out is None:
+        bytes_out = size(out_path) if out_path else len((r.out or "").encode())
+    ok = r.code == 0
+    record(workload, rung, stage, run, r.seconds, bytes_in, bytes_out, r.rss_kb,
+           check if ok else f"exit {r.code}: {first_error(r)}", ok, item)
+    return r
+
+
+def check_cmp(workload, rung, run, a, b, what, item=None):
+    t0 = time.perf_counter()
+    ok = Path(a).exists() and Path(b).exists() and Path(a).read_bytes() == Path(b).read_bytes()
+    record(workload, rung, "check", run, time.perf_counter() - t0, size(a) + size(b), 0, None,
+           f"fixed point cmp: {what}" + ("" if ok else " DIFFER"), ok, item)
+    return ok
+
+
+def check_out(workload, rung, run, got, want_path, item=None):
+    t0 = time.perf_counter()
+    want = normalized(Path(want_path).read_text(encoding="utf-8", errors="replace"))
+    ok = got is not None and normalized(got) == want
+    record(workload, rung, "check", run, time.perf_counter() - t0, len(want.encode()), 0, None,
+           f"blessed output match: {Path(want_path).relative_to(ROOT)}" + ("" if ok else " MISMATCH"),
+           ok, item)
+    return ok
+
+
+# --- the C compiler command `goose build` would run -------------------------
+
+def build_cc_command(src, exe, extra=(), cwd=None):
+    """`goose build --dry-run`'s commands: builds the runtime object if it is
+    missing and returns the program's own C compile, as an argv whose C file
+    is the first .c argument (to be replaced by ours)."""
+    r = measure([GOOSE, "build", "-O2", *extra, "-o", exe, "--dry-run", src], cwd=cwd or ROOT)
+    if r.code != 0:
+        return None, first_error(r)
+    lines = [l for l in r.out.splitlines() if l.strip()]
+    for l in lines[:-1]:
+        argv = shlex.split(l)
+        target = argv[argv.index("-o") + 1] if "-o" in argv else None
+        if target and not Path(target).exists():
+            # The runtime object (or a package's) is built once per GOOSE_HOME:
+            # one real build makes it, outside any measurement.
+            measure([GOOSE, "build", "-O2", *extra, "-o", exe, src], cwd=cwd or ROOT)
+            break
+    argv = shlex.split(lines[-1])
+    ci = next(i for i, a in enumerate(argv) if a.endswith(".c"))
+    return (argv, ci), None
+
+
+def cc_argv(cmd, cfile, exe):
+    argv, ci = cmd
+    argv = list(argv)
+    argv[ci] = str(cfile)
+    argv[argv.index("-o") + 1] = str(exe)
+    return argv
+
+
+# --- trees: the selfhost/ under test, now and --before ----------------------
+
+class Tree:
+    def __init__(self, label, root, src):
+        self.label = label          # "" for now, "@sha" for --before
+        self.root = Path(root)      # the cwd its compilers run in (stdlib/ is found there)
+        self.src = Path(src)        # the directory with main.goose
+        self.dir = B / ("now" if not label else "before-" + label[1:])
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.sh2 = self.dir / "sh2"
+        self.ref = self.dir / "sh3.c"
+        self.ok = False
+
+    def rung(self, name):
+        return name + self.label
+
+
+def bootstrap(tree):
+    """sh1 = goose build selfhost; sh1 -> sh2.c; gcc -> sh2; sh2 -> sh3.c;
+    sh2.c == sh3.c. Recorded as run 0."""
+    d, main = tree.dir, tree.src / "main.goose"
+    nbytes = tree_bytes(tree.src)
+    rung = tree.rung("bootstrap")
+    print(f"-- bootstrap {tree.src} --", flush=True)
+    cmd, err = build_cc_command(main, d / "sh1", cwd=tree.root)
+    if not cmd:
+        record("W1", rung, "goose build --dry-run", 0, None, nbytes, 0, None, err, False)
+        return False
+    steps = [
+        ("sh1: C++ front end", [GOOSE, "-O2", "-o", d / "sh1.c", main], d / "sh1.c", nbytes),
+        ("sh1: C compiler", cc_argv(cmd, d / "sh1.c", d / "sh1"), d / "sh1", None),
+        ("sh2.c: sh1 front end", [d / "sh1", "-o", d / "sh2.c", main], d / "sh2.c", nbytes),
+        ("sh2: gcc -O2", [CC, "-O2", d / "sh2.c", "-o", d / "sh2", "-lm"], d / "sh2", None),
+        ("sh3.c: sh2 front end", [d / "sh2", "-o", d / "sh3.c", main], d / "sh3.c", nbytes),
+    ]
+    prev = None
+    for stage, argv, out, nin in steps:
+        r = measure(argv, cwd=tree.root)
+        nin = nin if nin is not None else size(prev)
+        record("W1", rung, stage, 0, r.seconds, nin, size(out), r.rss_kb,
+               "-" if r.code == 0 else f"exit {r.code}: {first_error(r)}", r.code == 0)
+        if r.code != 0:
+            return False
+        prev = out
+    tree.ok = check_cmp("W1", rung, 0, d / "sh2.c", d / "sh3.c", "sh2.c == sh3.c")
+    tree.cc = cmd
+    return tree.ok
+
+
+# --- W1 ----------------------------------------------------------------------
+
+def w1(tree, run, rungs):
+    d, main, nbytes = tree.dir, tree.src / "main.goose", tree_bytes(tree.src)
+    for rung in rungs:
+        name = tree.rung(rung)
+        if rung == "stock optimized":
+            c, exe, outc = d / "so.c", d / "so", d / "so.out.c"
+            if step("W1", name, "front end (C++)", run, [GOOSE, "-O2", "-o", c, main], nbytes, c,
+                    cwd=tree.root).code:
+                continue
+            if step("W1", name, "C compiler (gcc -O2)", run, cc_argv(tree.cc, c, exe), size(c), exe,
+                    cwd=tree.root).code:
+                continue
+            if step("W1", name, "run (compile selfhost)", run, [exe, "-o", outc, main], nbytes, outc,
+                    cwd=tree.root).code:
+                continue
+            check_cmp("W1", name, run, outc, tree.ref, "its C == sh3.c")
+        elif rung == "stock fast":
+            outc = d / "sf.out.c"
+            if step("W1", name, "front end+TinyCC+run", run,
+                    [GOOSE, "-O2", main, "--", "-o", outc, main], nbytes, outc, cwd=tree.root,
+                    bytes_out=None).code:
+                continue
+            check_cmp("W1", name, run, outc, tree.ref, "its C == sh3.c")
+        elif rung == "self-hosted":
+            c, exe, outc = d / "sh.c", d / "sh", d / "sh.out.c"
+            if step("W1", name, "front end (sh2)", run, [tree.sh2, "-o", c, main], nbytes, c,
+                    cwd=tree.root).code:
+                continue
+            if step("W1", name, "C compiler (gcc -O2)", run, [CC, "-O2", c, "-o", exe, "-lm"],
+                    size(c), exe, cwd=tree.root).code:
+                continue
+            if step("W1", name, "run (compile selfhost)", run, [exe, "-o", outc, main], nbytes, outc,
+                    cwd=tree.root).code:
+                continue
+            check_cmp("W1", name, run, outc, c, "stage n C == stage n+1 C")
+
+
+# --- W3 ----------------------------------------------------------------------
+
+class Sample:
+    def __init__(self, stem):
+        self.stem = stem
+        self.name = re.sub(r"^\d+_", "", stem)
+        self.src = ROOT / "samples" / f"{stem}.goose"
+        argf = ROOT / "samples" / "data" / f"{self.name}.args"
+        self.args = argf.read_text().split() if argf.exists() else []
+        stdin = ROOT / "samples" / "data" / f"{self.name}.stdin"
+        self.stdin = stdin if stdin.exists() else None
+        h = ROOT / "samples" / f"{self.name}.h"
+        self.extra = ["--include", str(h)] if h.exists() else []
+        self.expected = ROOT / "samples" / "expected" / f"{self.name}.out"
+        self.nbytes = size(self.src)
+        self.cc, self.ccerr = build_cc_command(self.src, B / "w3" / self.name, self.extra)
+        self.unsupported = {}   # tree label -> first error line
+
+
+def w3(sample, tree, run, rungs):
+    d = B / "w3"
+    d.mkdir(parents=True, exist_ok=True)
+    cwd = ROOT / "samples"
+    it = sample.name
+    for rung in rungs:
+        name = tree.rung(rung)
+        if rung == "stock optimized":
+            c, exe = d / f"{it}.so.c", d / f"{it}.so"
+            if step("W3", name, "front end (C++)", run,
+                    [GOOSE, "-O2", *sample.extra, "-o", c, sample.src], sample.nbytes, c, item=it).code:
+                continue
+            if not sample.cc:
+                record("W3", name, "C compiler (gcc -O2)", run, None, size(c), 0, None,
+                       f"no build command: {sample.ccerr}", False, it)
+                continue
+            if step("W3", name, "C compiler (gcc -O2)", run, cc_argv(sample.cc, c, exe), size(c), exe,
+                    item=it).code:
+                continue
+            r = step("W3", name, "run", run, [exe, *sample.args], size(sample.stdin or ""),
+                     item=it, cwd=cwd, stdin=sample.stdin)
+            if r.code == 0:
+                check_out("W3", name, run, r.out, sample.expected, it)
+        elif rung == "stock fast":
+            r = step("W3", name, "front end+TinyCC+run", run,
+                     [GOOSE, "-O2", *sample.extra, sample.src, "--", *sample.args], sample.nbytes,
+                     item=it, cwd=cwd, stdin=sample.stdin)
+            if r.code == 0:
+                check_out("W3", name, run, r.out, sample.expected, it)
+        elif rung == "self-hosted":
+            if not tree.ok:
+                continue
+            c, exe = d / f"{it}.sh{tree.label}.c", d / f"{it}.sh{tree.label}"
+            if tree.label in sample.unsupported:
+                continue   # said once, in run 1
+            r = measure([tree.sh2, "-o", c, sample.src], cwd=tree.root)
+            if r.code != 0:
+                sample.unsupported[tree.label] = first_error(r)
+                record("W3", name, "front end (sh2)", run, r.seconds, sample.nbytes, 0, r.rss_kb,
+                       f"unsupported: {first_error(r)}", False, it)
+                continue
+            record("W3", name, "front end (sh2)", run, r.seconds, sample.nbytes, size(c), r.rss_kb,
+                   "-", True, it)
+            if step("W3", name, "C compiler (gcc -O2)", run, [CC, "-O2", c, "-o", exe, "-lm"],
+                    size(c), exe, item=it).code:
+                continue
+            r = step("W3", name, "run", run, [exe, *sample.args], size(sample.stdin or ""), item=it,
+                     cwd=cwd, stdin=sample.stdin)
+            if r.code == 0:
+                check_out("W3", name, run, r.out, sample.expected, it)
+
+
+# --- W2 ----------------------------------------------------------------------
+
+def fixtures(full):
+    t = ROOT / "test"
+    fs = []
+    for f in sorted(t.glob("*/*.goose")):
+        if f.parent.name in W2_EXCLUDED_DIRS or f.name == "lexer_tokens.goose":
+            continue
+        if not (t / "expected" / f"{f.stem}.out").exists() or f.with_suffix(".build").exists():
+            continue
+        line = f.open(encoding="utf-8", errors="replace").readline()
+        if "parse-only" in line:
+            continue
+        defines = re.findall(r"^// runtime-define: (\w+=\w+)$", line)
+        fs.append((f, ["-D" + d for d in defines], "no-jit" in line))
+    return fs if full else fs[::10]
+
+
+def fixture_ok(f, r):
+    """Exit status as the suite wants it (an .aborts fixture must fail) and
+    stdout equal to the blessed output."""
+    e = ROOT / "test" / "expected"
+    aborts = (e / f"{f.stem}.aborts").exists()
+    if (r.code == 0) == aborts:
+        return False, f"exit {r.code}"
+    want = normalized((e / f"{f.stem}.out").read_text(encoding="utf-8", errors="replace"))
+    return normalized(r.out) == want, "stdout"
+
+
+def w2_one(rung, f, defines, nojit, tree, d):
+    """One fixture through one rung: (stage seconds dict, peak rss, outcome)."""
+    exe, c = d / f.stem, d / f"{f.stem}.c"
+    secs, rss = {}, 0
+    if rung == "stock optimized":
+        r = measure([GOOSE, "build", "-O2", *defines, "-o", exe, f])
+        secs["goose build"], rss = r.seconds, r.rss_kb
+        if r.code:
+            return secs, rss, "build failed"
+    elif rung == "stock fast":
+        if nojit:
+            return secs, rss, "skip (no-jit)"
+        r = measure([GOOSE, "-O2", *defines, f])
+        secs["goose x.goose (fe+tcc+run)"], rss = r.seconds, r.rss_kb
+        if r.code and "JIT mode does not support" in r.err:
+            return secs, rss, "skip (JIT does not support it)"
+        ok, why = fixture_ok(f, r)
+        return secs, rss, "pass" if ok else f"run: {why}"
+    else:
+        r = measure([tree.sh2, "-o", c, f], cwd=tree.root)
+        secs["front end (sh2)"], rss = r.seconds, r.rss_kb
+        if r.code:
+            return secs, rss, "front end: " + re.sub(r"^\S+:\d+:\d+: ", "", first_error(r))[:70]
+        r = measure([CC, "-O2", *defines, c, "-o", exe, "-lm", "-pthread"])
+        secs["C compiler (gcc -O2)"], rss = r.seconds, max(rss, r.rss_kb)
+        if r.code:
+            return secs, rss, "C compiler failed"
+    r = measure([exe])
+    secs["run"], rss = r.seconds, max(rss, r.rss_kb)
+    ok, why = fixture_ok(f, r)
+    return secs, rss, "pass" if ok else f"run: {why}"
+
+
+def w2(fs, tree, run, rungs, jobs, show_failures):
+    nbytes = sum(size(f) for f, _, _ in fs)
+    for rung in rungs:
+        name = tree.rung(rung)
+        d = B / "w2" / re.sub(r"\W+", "_", name)
+        d.mkdir(parents=True, exist_ok=True)
+        t0 = time.perf_counter()
+        with ThreadPoolExecutor(jobs) as pool:
+            res = list(pool.map(lambda x: w2_one(rung, *x, tree, d), fs))
+        wall = time.perf_counter() - t0
+        outcomes = [o for _, _, o in res]
+        ran = [o for o in outcomes if not o.startswith("skip")]
+        passed = outcomes.count("pass")
+        rss = max((r for _, r, _ in res), default=0)
+        stages = {}
+        for s, _, _ in res:
+            for k, v in s.items():
+                stages[k] = stages.get(k, 0) + v
+        check = f"blessed output match: {passed}/{len(ran)} pass"
+        for k, v in stages.items():
+            record("W2", name, f"{k} (sum)", run, v, nbytes, 0, rss, check, passed == len(ran))
+        record("W2", name, f"wall, {len(fs)} fixtures -j{jobs}", run, wall, nbytes, 0, rss, check,
+               passed == len(ran))
+        if show_failures:
+            clusters = {}
+            for (f, _, _), o in zip(fs, outcomes):
+                if o != "pass" and not o.startswith("skip"):
+                    clusters.setdefault(o, []).append(f.stem)
+            top = sorted(clusters.items(), key=lambda kv: -len(kv[1]))[:12]
+            for o, names in top:
+                print(f"    {len(names):4}  {o}  (e.g. {names[0]})")
+            W2_FAILURES[name] = (passed, len(ran), len(fs), top)
+
+
+# --- the summary --------------------------------------------------------------
+
+def summary_rows():
+    groups = {}
+    for r in RECORDS:
+        if r["run"] == 0 or r["seconds"] is None:
+            continue
+        key = (r["workload"], r.get("item", ""), r["rung"], r["stage"])
+        groups.setdefault(key, []).append(r)
+    rows = []
+    for key, rs in groups.items():
+        secs = sorted(r["seconds"] for r in rs)
+        last = rs[-1]
+        rows.append((*key, secs[0], statistics.median(secs), secs[-1], len(secs),
+                     last["bytes_in"], last["bytes_out"], max(r["peak_rss_kb"] or 0 for r in rs),
+                     all(r["ok"] for r in rs), last["check"]))
+    # Source to running program: the stages before check, summed per run.
+    # A run counts only when every one of its stages, the check included, is ok;
+    # a rung with no such run is listed as not running.
+    totals, bad = {}, set()
+    for r in RECORDS:
+        if r["run"] == 0 or r["workload"] == "W2":
+            continue
+        key = (r["workload"], r.get("item", ""), r["rung"])
+        totals.setdefault(key, {}).setdefault(r["run"], 0.0)
+        if not r["ok"] or r["seconds"] is None:
+            bad.add((key, r["run"]))
+        elif r["stage"] != "check":
+            totals[key][r["run"]] += r["seconds"]
+    for (key, run) in bad:
+        totals[key].pop(run, None)
+    return rows, totals
+
+
+def markdown_tables(rows, totals):
+    out = []
+    for wl in ("W1", "W3", "W2"):
+        wrows = [r for r in rows if r[0] == wl]
+        if not wrows:
+            continue
+        out.append(f"\n### {wl}\n")
+        out.append("| item | rung | stage | min s | median s | max s | runs | bytes in | bytes out "
+                   "| peak RSS | check |")
+        out.append("|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|")
+        for (w, item, rung, stage, mn, md, mx, n, bi, bo, rss, ok, check) in wrows:
+            out.append(f"| {item or '-'} | {rung} | {stage} | {mn:.3f} | {md:.3f} | {mx:.3f} | {n} "
+                       f"| {human(bi)} | {human(bo)} | {rss / 1024:.1f} MB | "
+                       f"{'ok' if ok else 'FAIL'}: {check} |")
+        tots = [(k, v) for k, v in totals.items() if k[0] == wl]
+        if tots:
+            out.append(f"\nSource to running program ({wl}, stages before the check, summed per run):\n")
+            out.append("| item | rung | min s | median s | max s |")
+            out.append("|---|---|---:|---:|---:|")
+            for (w, item, rung), per in tots:
+                v = sorted(per.values())
+                if not v:
+                    out.append(f"| {item or '-'} | {rung} | does not run | | |")
+                    continue
+                out.append(f"| {item or '-'} | {rung} | {v[0]:.3f} | {statistics.median(v):.3f} "
+                           f"| {v[-1]:.3f} |")
+    return "\n".join(out)
+
+
+def print_summary(rows, totals):
+    print("\n== summary: min / median / max seconds ==", flush=True)
+    for (w, item, rung, stage, mn, md, mx, n, bi, bo, rss, ok, check) in rows:
+        what = f"{w}{'/' + item if item else ''}"
+        print(f"{what:<16} {rung:<26} {stage:<34} {mn:8.3f} {md:8.3f} {mx:8.3f}  n={n}  "
+              f"{'ok  ' if ok else 'FAIL'} {check}")
+    print("\n== source to running program (sum of stages before check) ==")
+    for (w, item, rung), per in totals.items():
+        v = sorted(per.values())
+        what = f"{w}{'/' + item if item else ''}"
+        if not v:
+            print(f"{what:<16} {rung:<26} does not run (see its FAIL line)")
+            continue
+        print(f"{what:<16} {rung:<26} {v[0]:8.3f} {statistics.median(v):8.3f} {v[-1]:8.3f}")
+
+
+# --- main ---------------------------------------------------------------------
+
+def git(*args, cwd=ROOT):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def make_before(rev):
+    sha = git("rev-parse", "--short", rev)
+    wt = Path(f"/tmp/goose-demo-before-{sha}")
+    if wt.exists():
+        subprocess.run(["git", "worktree", "remove", "--force", f"/tmp/goose-demo-before-{sha}"],
+                       cwd=ROOT)
+    git("worktree", "add", "--detach", str(wt), sha)
+    src = wt / "selfhost"
+    if not (src / "main.goose").exists():
+        src = wt / "test" / "goose_in_goose"   # before selfhost/ was seeded from it
+    return Tree("@" + sha, wt, src), sha
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--runs", type=int, default=None, help="interleaved runs (default 5)")
+    ap.add_argument("--quick", action="store_true", help="one run")
+    ap.add_argument("--only", default="W1,W3,W2", help="workloads, comma separated")
+    ap.add_argument("--full", action="store_true", help="W2 over every positive fixture")
+    ap.add_argument("--w2-runs", type=int, default=None,
+                    help="runs of W2 (default: --runs)")
+    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1, help="W2 parallelism")
+    ap.add_argument("--before", help="also build this commit's selfhost/ and run it alongside")
+    ap.add_argument("--ladder", action="store_true", help="rewrite research/LADDER.md from this run")
+    ap.add_argument("--no-record", action="store_true", help="write no research/runs/ JSON")
+    args = ap.parse_args()
+
+    # Cap the whole tree of processes at 8 GB, once, by re-running under a
+    # systemd scope: no per-process wrapper to distort times or RSS.
+    if not os.environ.get("GOOSE_DEMO_SCOPED") and shutil.which("systemd-run"):
+        env = dict(os.environ, GOOSE_DEMO_SCOPED="1")
+        try:
+            os.execvpe("systemd-run", ["systemd-run", "--user", "--scope", "--quiet",
+                                       "-p", "MemoryMax=8G", sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]], env)
+        except OSError:
+            pass
+
+    runs = 1 if args.quick else (args.runs or 5)
+    w2runs = args.w2_runs or runs
+    only = {w.strip().upper() for w in args.only.split(",")}
+    os.environ["GOOSE_GFX_HEADLESS"] = "1"
+    os.environ["GOOSE_HOME"] = str(B / "goose-home")
+    B.mkdir(parents=True, exist_ok=True)
+
+    sha = git("rev-parse", "--short", "HEAD")
+    dirty = bool(git("status", "--porcelain", "--", "selfhost", "research/demo"))
+    started = datetime.datetime.now(datetime.timezone.utc)
+    up = subprocess.run(["uptime"], capture_output=True, text=True).stdout.strip()
+    cmdline = "research/demo " + " ".join(shlex.quote(a) for a in sys.argv[1:])
+    print(f"demo {cmdline}\n  commit {sha}{' (dirty)' if dirty else ''}, "
+          f"{started:%Y-%m-%d %H:%M:%S} UTC, {platform.node()}, {os.cpu_count()} cpus")
+    print(f"  uptime: {up}")
+    print(f"  goose {GOOSE}; cc {CC}; runs {runs} (W2 {w2runs}), W2 jobs {args.jobs}", flush=True)
+
+    trees = [Tree("", ROOT, ROOT / "selfhost")]
+    before_wt = None
+    try:
+        if args.before:
+            t, bsha = make_before(args.before)
+            trees.append(t)
+            before_wt = bsha
+        for t in trees:
+            bootstrap(t)
+            if not t.ok:
+                print(f"  bootstrap of {t.src} failed: its rungs are skipped", flush=True)
+
+        samples = [Sample(s) for s in SAMPLES] if "W3" in only else []
+        fs = fixtures(args.full) if "W2" in only else []
+
+        for run in range(1, runs + 1):
+            print(f"\n== run {run}/{runs} ==", flush=True)
+            if "W1" in only:
+                for t in trees:
+                    if t.ok:
+                        w1(t, run, ["stock optimized", "stock fast", "self-hosted"])
+            for s in samples:
+                for i, t in enumerate(trees):
+                    w3(s, t, run, ["stock optimized", "stock fast", "self-hosted"] if i == 0
+                       else ["self-hosted"])
+            if fs and run <= w2runs:
+                print(f"-- W2: {len(fs)} positive fixtures{' (every 10th)' if not args.full else ''}"
+                      f", -j{args.jobs} --", flush=True)
+                for i, t in enumerate(trees):
+                    rungs = (["stock optimized", "stock fast"] if i == 0 else []) + \
+                            (["self-hosted"] if t.ok else [])
+                    w2(fs, t, run, rungs, args.jobs, show_failures=(run == 1))
+    finally:
+        if before_wt:
+            subprocess.run(["git", "worktree", "remove", "--force",
+                            f"/tmp/goose-demo-before-{before_wt}"], cwd=ROOT)
+
+    rows, totals = summary_rows()
+    print_summary(rows, totals)
+    unsupported = [f"{s.stem}{lbl and ' (' + lbl + ')'}: {e}" for s in samples
+                   for lbl, e in s.unsupported.items()]
+    if unsupported:
+        print("\nself-hosted rung, unsupported:")
+        for u in unsupported:
+            print("  " + u)
+
+    stamp = started.strftime("%Y%m%dT%H%M%SZ")
+    if not args.no_record:
+        out = ROOT / "research" / "runs" / f"{stamp}-{sha}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(RECORDS, indent=1) + "\n")
+        meta = {"command": cmdline, "commit": sha, "dirty": dirty, "utc": started.isoformat(),
+                "uptime": up, "host": platform.node(), "cpus": os.cpu_count(), "goose": GOOSE,
+                "cc": CC, "runs": runs, "w2_runs": w2runs, "w2_fixtures": len(fs),
+                "w2_full": args.full, "before": args.before}
+        out.with_suffix(".meta.json").write_text(json.dumps(meta, indent=1) + "\n")
+        print(f"\nrecord: {out.relative_to(ROOT)}")
+    if args.ladder:
+        write_ladder(rows, totals, cmdline, up, started, sha, unsupported, len(fs), args.full)
+
+
+def write_ladder(rows, totals, cmdline, up, started, sha, unsupported, nfix, full):
+    text = ["# LADDER", "",
+            "Source to running program, per workload and rung (research/CHARTER.md). Written by "
+            "`research/demo --ladder` from a real run; do not edit by hand.", "",
+            f"- command: `{cmdline}`",
+            f"- date: {started:%Y-%m-%d %H:%M} UTC, commit {sha}",
+            f"- uptime: `{up}`",
+            f"- W2: {nfix} positive fixtures{' (all)' if full else ' (every 10th)'}; "
+            "the wall rows are the felt numbers, the (sum) rows add each process's wall time.",
+            ""]
+    if unsupported:
+        text.append("What does not run on the self-hosted rung today:\n")
+        text += [f"- {u}" for u in unsupported]
+        text.append("")
+    for rung, (passed, ran, n, top) in W2_FAILURES.items():
+        if passed == ran:
+            continue
+        text.append(f"W2 on {rung}: {passed}/{ran} pass ({n - ran} skipped); the largest failure "
+                    "clusters (first error):\n")
+        text += [f"- {len(names)}: {o} (e.g. `{names[0]}`)" for o, names in top]
+        text.append("")
+    text.append(markdown_tables(rows, totals))
+    (ROOT / "research" / "LADDER.md").write_text("\n".join(text) + "\n")
+    print("wrote research/LADDER.md")
+
+
+if __name__ == "__main__":
+    main()
