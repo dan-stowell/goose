@@ -47,7 +47,7 @@ Milestones log:
   fixed point yes. W1 (selfhost, now 288 KB of source) self-hosted: front end 0.20 s + gcc -O2 7.28 s (median)
   vs stock optimized 0.36 + 6.10 s, stock fast 0.97 s total. W2 stock optimized wall 27.0 s (771/771), stock
   fast 3.75 s (733/733); self-hosted 73/771.
-Now: paused (2026-11-17 02:40 UTC): Dan stopped all Claude builders over Remote Control. Boards run 134/776,
+Now: stopped (STOP, 2026-11-17 02:45 UTC); Dan stopped all Claude builders at 02:40. Boards run 134/776,
 reject 228/2036 (340 wrongly accepted), stdlib 8/17; fixed point holds. Unmerged on origin: feat-stdlib
 2b5fcf6a (11 commits; earlier tip newly accepted 46 error fixtures, so enforce failed), feat-builtins
 9922e626 (codex; re-verify check_length_*), emit-lean has nothing new. research/viz/regen.sh failed in
