@@ -1,3 +1,4 @@
+bce_function_state
 byteview_global_lists
 byteview_global_stores
 byteview_global_tables
