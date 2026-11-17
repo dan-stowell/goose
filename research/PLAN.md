@@ -47,10 +47,10 @@ Milestones log:
   fixed point yes. W1 (selfhost, now 288 KB of source) self-hosted: front end 0.20 s + gcc -O2 7.28 s (median)
   vs stock optimized 0.36 + 6.10 s, stock fast 0.97 s total. W2 stock optimized wall 27.0 s (771/771), stock
   fast 3.75 s (733/733); self-hosted 73/771.
-Now: M0 + M1 in parallel (updated 2026-11-17 02:25 UTC). Merged: demo, feat-stdlib (interim), feat-enums
-(interim), scan-index. Boards run 40/776, reject 39/2036, stdlib 6/17; fixed point holds. Running: builders
-`viz`, `feat-stdlib`, `feat-storage` (must rebase: conflicts in checker/emitter), `feat-enums`, `emit-dedup`;
-codex on `feat-builtins` (/home/exedev/goose-builtins; its 0ec1d8ed claims check_length_* pass but they
-cc-error on master: re-verify before merging). Merge rule: merge a branch only when it merges cleanly and
-`python3 selfhost/scoreboard.py --enforce` passes on the merge; then `--update`. M0 closes when viz lands
-(first picture on :8000): then do LOOP's milestone steps.
+Now: M1 (+ M2/M3 groundwork), updated 2026-11-17 02:20 UTC. Boards run 79/776, reject 39/2036 (260 error
+fixtures wrongly accepted), stdlib 6/17; fixed point holds. Builders (worktrees, branches): feat-stdlib,
+feat-storage, feat-enums, feat-funvals (function values, std.goose:1155, 67 fixtures), emit-lean (cheaper C
+for gcc/tcc); codex on feat-builtins (/home/exedev/goose-builtins; its 0ec1d8ed fails 4 claimed fixtures:
+re-verify). Merge with `research/tools/merge_branch.sh <branch>...` (clean merge + --enforce, then --update).
+Pictures: `research/viz/regen.sh` (15 min; SKIP_CC1=1 to reuse cc1 traces) after ladder-moving merges.
+M1 closes when the largest clusters are closed and the board is enforced (done: --enforce in merge_branch.sh).
