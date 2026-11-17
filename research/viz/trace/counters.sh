@@ -6,7 +6,7 @@
 # Usage: counters.sh SH2 GOOSE OUTDIR    (run from the repo root)
 set -e
 sh2=$1; goose=$2; out=$3; mkdir -p "$out"
-A=instructions:u,cycles:u,ls_dispatch.ld_dispatch:u,ls_dispatch.store_dispatch:u,ls_any_fills_from_sys.all:u
+A=duration_time,instructions:u,cycles:u,ls_dispatch.ld_dispatch:u,ls_dispatch.store_dispatch:u,ls_any_fills_from_sys.all:u
 B=ls_dmnd_fills_from_sys.local_l2:u,ls_dmnd_fills_from_sys.local_ccx:u,ls_dmnd_fills_from_sys.near_cache:u,ls_dmnd_fills_from_sys.dram_io_near:u,ls_dmnd_fills_from_sys.far_cache:u,ls_dmnd_fills_from_sys.dram_io_far:u
 C=ls_any_fills_from_sys.local_l2:u,ls_any_fills_from_sys.local_ccx:u,ls_any_fills_from_sys.dram_io_near:u,l2_request_g1.all_dc:u,l2_cache_req_stat.dc_hit_in_l2:u,l2_pf_hit_l2.all:u
 uptime > "$out/uptime.txt"
