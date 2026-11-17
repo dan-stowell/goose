@@ -70,6 +70,10 @@ struct Symbol {
     // An instance's function-value bindings (7.6): edges to the kind-3
     // symbols, decl -2, that name each bound generic in its scope.
     function_values: i64 = -1,
+    // For a named constant (3.1, 6.3): the first use that adapted it to
+    // another type, and the first writable reference bound to it.
+    literal_use: i64 = -1,
+    writable_at: i64 = -1,
 }
 
 

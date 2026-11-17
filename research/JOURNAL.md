@@ -60,3 +60,4 @@ demo2 is adding a like-for-like W2 row (the fixtures the selfhost passes, throug
 - 2026-11-17 feat-stdlib rebased onto master (storage, enums, emit-dedup): std checks; stdlib 12/17, run 131/776, reject 49
 - 2026-11-17 selfhost resolves names lexically for constant positions, values, calls and assignments (type parameters, nested functions, locals hide globals) and bounds a growing type's field-default cycle (reject 49->84, accepted 294->260)
 - 2026-11-17 feat-stdlib rebased onto master with storage: stdlib 14/17, run 198/776, reject 88
+- 2026-11-17 feat-stdlib adds the checks its features skipped: defer named results, ~ on floats, default<T&>, thread_fn calls, variables hiding functions, function values in defaults, named constants behind writable references, string branch temporaries, loop shrink replay, and not-implemented gates for block-literal provenance (newly accepted 46 -> 9, reject 88 -> 139)

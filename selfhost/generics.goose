@@ -49,6 +49,19 @@ recursive fn infer_type_pattern(ctx: Compiler&, pattern: i64, actual: i64, scope
     }
 }
 
+// Whether syntax n names a var of scope's chain that holds a view.
+recursive fn names_var_view(ctx: Compiler&, n: i64, scope: i64) -> bool {
+    if n < 0 { return false; }
+    let x = ctx.nodes[n];
+    if x.tag == N_NAME {
+        let s = lookup(ctx, n, scope, 2);
+        return s >= 0 && ctx.symbols[s].scope != 0 && ctx.symbols[s].flags & 1 != 0 && ctx.symbols[s].ty >= 0 && contains_view(ctx, ctx.symbols[s].ty);
+    }
+    if names_var_view(ctx, x.a, scope) || names_var_view(ctx, x.b, scope) || names_var_view(ctx, x.c, scope) { return true; }
+    var e = x.first;
+    while e >= 0 { if names_var_view(ctx, ctx.edges[e].value, scope) { return true; } e = ctx.edges[e].next; }
+    return false;
+}
 recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller_scope: i64, probing: bool) -> i64 {
     let original = ctx.symbols[symbol]; let decl = ctx.nodes[original.decl];
     var generic = decl.first >= 0;
@@ -135,6 +148,15 @@ recursive fn specialize_signature(ctx: Compiler&, symbol: i64, call: i64, caller
             else {
                 target = lookup(ctx, v, caller_scope, 3);
                 if ctx.symbols[target].decl == -2 { target = ctx.symbols[target].root; }
+                else if ctx.symbols[target].scope != 0 && ctx.nodes[ctx.symbols[target].decl].flags & 4096 == 0 {
+                    // A nested function's body is checked once per HOF
+                    // instance; passing it again after its captures may have
+                    // changed would need it checked again (literal_use keeps
+                    // the first call passing it).
+                    let again = (ctx.symbols[target].literal_use >= 0 && ctx.symbols[target].literal_use != ctx.nodes[call].token) || ctx.loop_depth > 0;
+                    if again && names_var_view(ctx, ctx.nodes[ctx.symbols[target].decl].c, ctx.symbols[target].scope) { if probing { return -1; } error_at(ctx, ctx.nodes[v].token, "not implemented yet: a nested function that reads a captured view passed as a function value again"); }
+                    ctx.symbols[target].literal_use = ctx.nodes[call].token;
+                }
             }
             let f = register_symbol(ctx, ctx.symbols[s].token, -1, 3, -2, bindings, 0);
             ctx.symbols[f].root = target; ctx.symbols[f].state = 2;

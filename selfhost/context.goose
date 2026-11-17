@@ -64,6 +64,11 @@ struct Compiler {
     // Parameter tokens of the defaults being checked, innermost last. A -1
     // separates those of a function body being checked from its callers'.
     default_stack: i64[>..<]&,
+    // Shrinks checked inside loops, five values each (root, element, scope,
+    // token, balanced): replayed at the loop's end, when what the body
+    // stores later in an iteration is known to the next iteration's shrink.
+    loop_shrinks: i64[>..<]&,
+    replaying: bool = false,
     c_label: i64 = 0,
     c_result: CValue = CValue { code: "", ty: 0 },
     text_storage: u8[>..]&,
@@ -105,6 +110,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
     var owned_return_locals: i64[>..] = [];
     var owned_c_final: u8[>..] = [];
     var owned_default_stack: i64[>..<] = [];
+    var owned_loop_shrinks: i64[>..<] = [];
     var owned_c_specs: u8[>..] = [];
     var owned_c_spec_start: i64[>..] = [];
     var owned_c_spec_split: i64[>..] = [];
@@ -154,6 +160,7 @@ fn run_compilation(mode: i64, path: const u8[:], output: const u8[:]) {
         c_arguments: owned_c_arguments,
         c_multis: owned_c_multis,
         default_stack: owned_default_stack,
+        loop_shrinks: owned_loop_shrinks,
         text_storage: owned_text_storage,
         sources: owned_sources,
         tokens: owned_tokens,

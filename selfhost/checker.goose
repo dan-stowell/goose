@@ -99,8 +99,52 @@ recursive fn contains_view(ctx: Compiler&, ty: i64) -> bool {
     }
     return false;
 }
+recursive fn holds_relative(ctx: Compiler&, ty: i64) -> bool {
+    let t = ctx.types[ty];
+    if t.kind == T_REFERENCE { return t.flags & 24 != 0; }
+    if t.kind == T_ARRAY { return holds_relative(ctx, t.element); }
+    if t.kind == T_STRUCT {
+        var e = t.first;
+        while e >= 0 { if holds_relative(ctx, ctx.fielddefs[ctx.edges[e].value].ty) { return true; } e = ctx.edges[e].next; }
+    }
+    return false;
+}
+recursive fn calls_recursive_where(ctx: Compiler&, n: i64, nonfixed: bool) -> bool {
+    if n < 0 { return false; }
+    let x = ctx.nodes[n];
+    if x.tag == N_FUNCTION { return false; }
+    if x.tag == N_CALL && x.symbol >= 0 && x.symbol < ctx.specializations.len {
+        let spec = ctx.specializations[x.symbol];
+        if ctx.nodes[ctx.symbols[spec.symbol].decl].flags & 1 != 0 && (!nonfixed || (spec.result >= 0 && ctx.types[spec.result].size_class != 0)) { return true; }
+    }
+    if calls_recursive_where(ctx, x.a, nonfixed) || calls_recursive_where(ctx, x.b, nonfixed) || calls_recursive_where(ctx, x.c, nonfixed) { return true; }
+    var e = x.first;
+    while e >= 0 { if calls_recursive_where(ctx, ctx.edges[e].value, nonfixed) { return true; } e = ctx.edges[e].next; }
+    return false;
+}
+fn calls_recursive(ctx: Compiler&, n: i64) -> bool { return calls_recursive_where(ctx, n, false); }
+fn calls_recursive_nonfixed(ctx: Compiler&, n: i64) -> bool { return calls_recursive_where(ctx, n, true); }
+recursive fn indexes(ctx: Compiler&, n: i64) -> bool {
+    if n < 0 { return false; }
+    let x = ctx.nodes[n];
+    if x.tag == N_INDEX || x.tag == N_SLICE { return true; }
+    if indexes(ctx, x.a) || indexes(ctx, x.b) || indexes(ctx, x.c) { return true; }
+    var e = x.first;
+    while e >= 0 { if indexes(ctx, ctx.edges[e].value) { return true; } e = ctx.edges[e].next; }
+    return false;
+}
+fn in_block_literal(ctx: Compiler&) -> bool {
+    let f = ctx.checking_function;
+    return f >= 0 && ctx.nodes[ctx.symbols[ctx.specializations[f].symbol].decl].flags & 4096 != 0;
+}
+fn captured(ctx: Compiler&, symbol: i64) -> bool {
+    return symbol >= 0 && ctx.scopes[ctx.symbols[symbol].scope].function != ctx.checking_function;
+}
 fn store_lifetime(ctx: Compiler&, v: Value, destination: i64, token: i64) {
     let root = content_root(ctx, v);
+    // A block called from inside a loop may run again after the loop has
+    // rebound what it stores; that feedback is not analysed for blocks yet.
+    if in_block_literal(ctx) && ctx.nodes[ctx.symbols[ctx.specializations[ctx.checking_function].symbol].decl].flags & 8192 != 0 && contains_view(ctx, v.ty) && captured(ctx, destination) { error_at(ctx, token, "not implemented yet: a view stored through a block literal's capture inside a loop"); }
     if contains_view(ctx, v.ty) && root_depth(ctx, root) > root_depth(ctx, destination) { error_at(ctx, token, "stored reference would outlive its owner"); }
     if destination >= 0 && root_depth(ctx, root) >= root_depth(ctx, ctx.symbols[destination].held) { ctx.symbols[destination].held = root; }
 }
@@ -203,7 +247,12 @@ fn store_in_array(ctx: Compiler&, value: Value, array: Value, scope: i64, token:
     }
 }
 fn check_shrink(ctx: Compiler&, root: i64, element: i64, scope: i64, token: i64, balanced: bool, at_call: bool) {
+    if !at_call && !ctx.replaying && ctx.loop_depth > 0 {
+        let shrinks = ctx.loop_shrinks;
+        shrinks.push(root); shrinks.push(element); shrinks.push(scope); shrinks.push(token); shrinks.push(if balanced { 1 } else { 0 });
+    }
     if root < 0 { error_at(ctx, token, "not implemented yet: shrink through an unknown root"); }
+    if in_block_literal(ctx) && captured(ctx, root) { error_at(ctx, token, "not implemented yet: a shrink through a block literal's capture"); }
     for s in ctx.symbols {
         if balanced && at_call { continue; }
         if s.kind != 2 || s.state != 2 || s.ty < 0 || !scope_contains(ctx, s.scope, scope) { continue; }
@@ -327,6 +376,7 @@ fn require_fit(ctx: Compiler&, n: i64, v: Value, target: i64) {
         text.append(" -> "); type_text(ctx, target, text);
         error_at(ctx, ctx.nodes[n].token, text);
     }
+    if v.known && v.place >= 0 && v.ty != target && numeric(ctx, target) && ctx.symbols[v.place].kind == 2 && ctx.symbols[v.place].flags & 64 == 0 && ctx.symbols[v.place].literal_use < 0 && adapts_as_constant(ctx, v.place) { ctx.symbols[v.place].literal_use = ctx.nodes[n].token; }
     if v.known && v.ty != target && ctx.types[v.ty].kind == ctx.types[target].kind && (ctx.types[v.ty].kind == T_FLOAT || ctx.types[v.ty].kind == T_INTEGER) { retype_constant(ctx, n, target); }
     ctx.nodes[n].target = target;
 }
@@ -340,6 +390,7 @@ recursive fn retype_constant(ctx: Compiler&, n: i64, ty: i64) {
     if n < 0 { return; }
     let x = ctx.nodes[n];
     if !x.known || x.ty < 0 || ctx.types[x.ty].kind != ctx.types[ty].kind { return; }
+    if x.tag == N_NAME && x.symbol >= 0 && ctx.symbols[x.symbol].kind == 2 && ctx.symbols[x.symbol].literal_use < 0 { ctx.symbols[x.symbol].literal_use = x.token; }
     if ctx.types[ty].kind == T_INTEGER && x.vague == 0 && (x.tag == N_BINARY || x.tag == N_UNARY || x.tag == N_INT) {
         ctx.nodes[n].tag = N_INT; ctx.nodes[n].ty = ty; return;
     }
@@ -474,6 +525,9 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
             if op == "!" && (is_optional(ctx, operand.ty) || is_optional(ctx, slot_type(ctx, x.a))) { ctx.nodes[x.a].truth = true; v = Value { ty: boolean_type(ctx) }; }
             else if op == "!" { if v.ty != boolean_type(ctx) { error_at(ctx, x.token, "boolean operand required"); } if v.known { v.bits = 0; if operand.bits == 0 { v.bits = 1; } } }
             else if op == "-" || op == "~" {
+                if op == "~" && ctx.types[v.ty].kind != T_INTEGER {
+                    var text: u8[>..] = []; text.append("~ requires an integer, got "); type_text(ctx, v.ty, text); error_at(ctx, x.token, text);
+                }
                 if !numeric(ctx, v.ty) { error_at(ctx, x.token, "numeric operand required"); }
                 if op == "-" && ctx.nodes[x.a].tag == N_INT && ctx.tokens[ctx.nodes[x.a].token].integer > 9223372036854775808 { error_at(ctx, x.token, "negated literal too large for i64"); }
                 if op == "-" && ctx.types[v.ty].kind == T_INTEGER && ctx.types[v.ty].flags & 2 != 0 && v.bits != 9223372036854775808 { error_at(ctx, x.token, "cannot negate an unsigned value"); }
@@ -623,7 +677,7 @@ recursive fn check_expression(ctx: Compiler&, n: i64, scope: i64, expected: i64)
         let after_then = ctx.flow;
         ctx.flow = condition_facts(ctx, x.a, false, before);
         var else_diverges = false;
-        if x.c >= 0 { let b = check_expression(ctx, x.c, scope, expected); else_diverges = ctx.types[b.ty].kind == T_BOTTOM; v = join_branch(ctx, a, b, x.b, x.c, x.token); }
+        if x.c >= 0 { let b = check_expression(ctx, x.c, scope, expected); else_diverges = ctx.types[b.ty].kind == T_BOTTOM; check_string_branches(ctx, a, b, expected, x.token); v = join_branch(ctx, a, b, x.b, x.c, x.token); }
         if ctx.types[a.ty].kind == T_BOTTOM { }
         else if else_diverges { ctx.flow = after_then; }
         else { ctx.flow = fact_meet(ctx, after_then, ctx.flow); }
@@ -723,6 +777,22 @@ fn check_branch_value(ctx: Compiler&, construct: i64, v: Value, node: i64, inner
 }
 // Two branches of an if or match agree on a type, adapting a literal or a
 // variant either way; the joined value is bounded by the shorter-lived root.
+// A branch that makes a new array is a temporary of its branch: viewed as a
+// slice beside a literal, or at a slice destination, it would not outlive
+// the construct (9.2).
+fn fresh_array(ctx: Compiler&, v: Value) -> bool {
+    let t = ctx.types[decay(ctx, v).ty];
+    return t.kind == T_ARRAY && t.size_class > 0 && v.place < 0 && ctx.types[v.ty].kind != T_REFERENCE;
+}
+fn check_string_branches(ctx: Compiler&, a: Value, b: Value, expected: i64, token: i64) {
+    let sa = ctx.types[a.ty].kind == T_SLICE; let sb = ctx.types[b.ty].kind == T_SLICE;
+    if ((fresh_array(ctx, a) && sb) || (fresh_array(ctx, b) && sa)) && !(expected >= 0 && ctx.types[expected].kind == T_ARRAY) { error_at(ctx, token, "for byte-string branches (including mixed literals and builders), declare an explicitly owned result"); }
+    if fresh_array(ctx, a) && fresh_array(ctx, b) && expected >= 0 && ctx.types[expected].kind == T_SLICE {
+        let t = ctx.tokens[token];
+        write_stderr(str(ctx.sources[t.file].path, ":", t.line, ":", t.column, ": error: the block's value is a slice rooted at a temporary, which does not outlive it\n"));
+        error_at(ctx, token, "a temporary lasts until the end of its statement, or of the block whose final expression made it; make the value in a variable before the statement, or, where every branch makes a new array of one type, slice the whole construct");
+    }
+}
 fn join_branch(ctx: Compiler&, a: Value, b: Value, anode: i64, bnode: i64, token: i64) -> Value {
     var v = a;
     if ctx.types[a.ty].kind == T_BOTTOM { v = b; }
@@ -1155,6 +1225,7 @@ recursive fn check_block(ctx: Compiler&, n: i64, parent: i64, expected: i64) -> 
     var declaration = ctx.nodes[n].first;
     while declaration >= 0 {
         let d = ctx.edges[declaration].value;
+        if ctx.nodes[d].tag == N_FUNCTION && ctx.nodes[d].flags & 1 != 0 && in_block_literal(ctx) { error_at(ctx, ctx.nodes[d].token, "not implemented yet: a recursive function declared in a block literal"); }
         if ctx.nodes[d].tag == N_FUNCTION { ctx.nodes[d].symbol = register_symbol(ctx, ctx.nodes[d].token, ctx.nodes[d].ns, 3, d, scope, 0); }
         declaration = ctx.edges[declaration].next;
     }
@@ -1525,7 +1596,7 @@ fn generic_code(ctx: Compiler&, spec: i64) -> bool {
     var f = spec;
     while f >= 0 {
         let symbol = ctx.symbols[ctx.specializations[f].symbol];
-        if symbol.kind == 5 { return true; }
+        if symbol.kind == 5 && ctx.nodes[symbol.decl].flags & 4096 == 0 { return true; }
         f = ctx.scopes[symbol.scope].function;
     }
     return false;
@@ -1561,6 +1632,12 @@ recursive fn check_rebind(ctx: Compiler&, n: i64, scope: i64) {
 recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
     if ctx.nodes[n].first >= 0 { check_receiving(ctx, n, scope, false); return; }
     let x = ctx.nodes[n];
+    if in_block_literal(ctx) {
+        // Writing or rebinding a view through a block's capture changes the
+        // caller's provenance, which is not analysed for blocks yet.
+        let target = check_expression(ctx, x.a, scope, -1);
+        if contains_view(ctx, target.ty) && (captured(ctx, target.place) || captured(ctx, target.root)) { error_at(ctx, x.token, "not implemented yet: a view written through a block literal's capture"); }
+    }
     if ctx.nodes[x.a].tag == N_NAME {
         let nearest = nearest_declaration(ctx, x.a, scope);
         if nearest >= 0 && ctx.symbols[nearest].kind != 2 { error_at(ctx, ctx.nodes[x.a].token, str(ctx.tokens[ctx.nodes[x.a].token].text, " names ", declaration_kind(ctx, nearest, scope), ", not a variable")); }
@@ -1606,6 +1683,7 @@ recursive fn check_assignment(ctx: Compiler&, n: i64, scope: i64) {
 }
 recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Value {
     let x = ctx.nodes[n];
+    let shrinks = ctx.loop_shrinks; let shrink_mark = shrinks.len;
     ctx.loop_depth++;
     let outer_breaks = ctx.loop_breaks; ctx.loop_breaks = 0;
     let outer_target = ctx.break_target; ctx.break_target = n;
@@ -1650,7 +1728,16 @@ recursive fn check_loop(ctx: Compiler&, n: i64, scope: i64, expected: i64) -> Va
         check_expression(ctx, x.c, inner, 0);
         ctx.flow = fact_meet(ctx, loop_entry, ctx.flow);
     }
+    // The next iteration's shrinks see what this one stored (5.1).
+    let was = ctx.replaying; ctx.replaying = true;
+    var k = shrink_mark;
+    while k + 4 < shrinks.len {
+        check_shrink(ctx, shrinks[k], shrinks[k + 1], shrinks[k + 2], shrinks[k + 3], shrinks[k + 4] != 0, false);
+        k += 5;
+    }
+    ctx.replaying = was;
     ctx.loop_depth--;
+    if ctx.loop_depth == 0 { shrinks.resize(shrink_mark); }
     // A loop that no break leaves never completes (6.5): it is as a return.
     let left = ctx.loop_breaks > 0; ctx.loop_breaks = outer_breaks;
     ctx.break_target = outer_target;
@@ -1832,7 +1919,12 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     if !member && (name == "assert" || name == "abort" || name == "exit" || name == "copy" || name == "default") {
         if name == "default" {
             let t = first_child(ctx, callee); if t < 0 { error_at(ctx, ctx.nodes[n].token, "default requires a type argument"); }
-            let ty = resolve_type(ctx, t, scope); ctx.nodes[n].symbol = -27; return Value { ty: ty };
+            let ty = resolve_type(ctx, t, scope); ctx.nodes[n].symbol = -27;
+            if ctx.types[ty].kind == T_REFERENCE && !is_optional(ctx, ty) {
+                var text: u8[>..] = []; text.append("default<"); type_text(ctx, ty, text); text.append(">() does not exist: "); type_text(ctx, ty, text); text.append(" is a non-optional reference");
+                error_at(ctx, ctx.nodes[n].token, text);
+            }
+            return Value { ty: ty };
         }
         if child_count(ctx, n) != 1 { error_at(ctx, ctx.nodes[n].token, "builtin takes one argument"); }
         let arg = first_child(ctx, n); let raw = check_expression(ctx, arg, scope, -1); let v = decay(ctx, raw);
@@ -1860,6 +1952,10 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
     }
     split_function_values(ctx, n, scope);
     let nearest = nearest_declaration(ctx, callee, scope);
+    if nearest >= 0 && ctx.symbols[nearest].kind == 2 { error_at(ctx, ctx.nodes[callee].token, str(name, " is a variable, not a function")); }
+    if nearest >= 0 && ctx.symbols[nearest].kind == 3 && ctx.symbols[nearest].decl == -2 && ctx.default_decl >= 0 && ctx.default_floor >= 0 && scope_contains(ctx, ctx.default_floor, scope) {
+        error_at(ctx, ctx.nodes[callee].token, str("the default of parameter ", ctx.tokens[ctx.nodes[ctx.default_param].token].text, " of ", ctx.tokens[ctx.nodes[ctx.default_decl].token].text, " names function value ", name));
+    }
     if nearest >= 0 && ctx.symbols[nearest].kind == 1 {
         let tp = ctx.tokens[ctx.nodes[callee].token].text;
         var text: u8[>..] = [];
@@ -1879,6 +1975,11 @@ recursive fn check_call(ctx: Compiler&, n: i64, scope: i64) -> Value {
         } else { s = target; }
     }
     if ctx.symbols[s].scope != 0 && ctx.symbols[s].state != 2 { error_at(ctx, ctx.nodes[callee].token, "nested function called before its declaration is reached"); }
+    if ctx.symbols[s].decl >= 0 && ctx.nodes[ctx.symbols[s].decl].tag == N_FUNCTION && ctx.nodes[ctx.symbols[s].decl].flags & 4 != 0 { error_at(ctx, ctx.nodes[callee].token, str("thread_fn ", ctx.tokens[ctx.symbols[s].token].text, " is spawned with thread_spawn, not called")); }
+    if ctx.nodes[n].c >= 0 && ctx.nodes[ctx.symbols[s].decl].flags & 64 != 0 {
+        var e = ctx.nodes[ctx.nodes[n].c].first;
+        while e >= 0 { if ctx.nodes[ctx.edges[e].value].tag == N_FUNVAL && indexes(ctx, ctx.nodes[ctx.edges[e].value].b) { error_at(ctx, ctx.nodes[n].token, "not implemented yet: checkfree verification of a block literal that indexes"); } e = ctx.edges[e].next; }
+    }
     let concrete = if is_block { specialize_signature(ctx, s, n, scope, false) } else { resolve_overload(ctx, s, n, scope) };
     if concrete == -2 { return check_dispatch(ctx, n, scope); }
     fill_defaults(ctx, concrete, n);
@@ -1974,6 +2075,7 @@ fn block_function(ctx: Compiler&, n: i64, params: i64, scope: i64) -> i64 {
     let f = node(ctx, N_FUNCTION, ctx.nodes[n].token);
     var p = params; if p < 0 { p = node(ctx, N_BLOCK, ctx.nodes[n].token); }
     ctx.nodes[f].a = p; ctx.nodes[f].c = ctx.nodes[n].b; ctx.nodes[f].flags = 4096; ctx.nodes[f].ns = -1;
+    if ctx.loop_depth > 0 { ctx.nodes[f].flags |= 8192; }
     let s = register_symbol(ctx, ctx.nodes[n].token, -1, 3, f, scope, 0);
     ctx.symbols[s].state = 2; ctx.symbols[s].capture_limit = ctx.symbols.len;
     return s;
@@ -2060,6 +2162,64 @@ recursive fn syntax_names(ctx: Compiler&, n: i64, token: i64) -> bool {
     while e >= 0 { if syntax_names(ctx, ctx.edges[e].value, token) { return true; } e = ctx.edges[e].next; }
     return false;
 }
+recursive fn names_symbol(ctx: Compiler&, n: i64, symbol: i64) -> bool {
+    if n < 0 { return false; }
+    let x = ctx.nodes[n];
+    if x.tag == N_NAME && x.symbol == symbol { return true; }
+    if x.tag == N_FUNCTION { return false; }
+    if names_symbol(ctx, x.a, symbol) || names_symbol(ctx, x.b, symbol) || names_symbol(ctx, x.c, symbol) { return true; }
+    var e = x.first;
+    while e >= 0 { if names_symbol(ctx, ctx.edges[e].value, symbol) { return true; } e = ctx.edges[e].next; }
+    return false;
+}
+// The nested function a defer body calls that names symbol, if any.
+recursive fn defer_callee_naming(ctx: Compiler&, n: i64, spec: i64, symbol: i64) -> i64 {
+    if n < 0 { return -1; }
+    let x = ctx.nodes[n];
+    if x.tag == N_FUNCTION { return -1; }
+    if x.tag == N_CALL && x.symbol >= 0 && x.symbol < ctx.specializations.len && x.symbol != spec {
+        let callee = x.symbol;
+        if ctx.scopes[ctx.symbols[ctx.specializations[callee].symbol].scope].function == spec && names_symbol(ctx, ctx.specializations[callee].body, symbol) { return callee; }
+        // A literal handed to the callee runs inside it.
+        if x.c >= 0 {
+            var v = ctx.nodes[x.c].first;
+            while v >= 0 {
+                let literal = ctx.edges[v].value;
+                if ctx.nodes[literal].tag == N_FUNVAL && ctx.nodes[literal].symbol >= 0 {
+                    // A block written in the defer body is part of it.
+                    for other in ctx.specializations { if ctx.symbols[other.symbol].token == ctx.nodes[literal].token && names_symbol(ctx, other.body, symbol) { return -3; } }
+                }
+                if ctx.nodes[literal].tag == N_NAME {
+                    for other in ctx.specializations {
+                        if same_name(ctx, ctx.symbols[other.symbol].token, ctx.nodes[literal].token) && ctx.scopes[ctx.symbols[other.symbol].scope].function == spec && names_symbol(ctx, other.body, symbol) { return callee; }
+                    }
+                }
+                v = ctx.edges[v].next;
+            }
+        }
+    }
+    for sub in [x.a, x.b, x.c] { let found = defer_callee_naming(ctx, sub, spec, symbol); if found != -1 { return found; } }
+    var e = x.first;
+    while e >= 0 { let found = defer_callee_naming(ctx, ctx.edges[e].value, spec, symbol); if found != -1 { return found; } e = ctx.edges[e].next; }
+    return -1;
+}
+recursive fn check_defers_named(ctx: Compiler&, n: i64, spec: i64, symbol: i64) {
+    if n < 0 { return; }
+    let x = ctx.nodes[n];
+    if x.tag == N_FUNCTION { return; }
+    let local = ctx.tokens[ctx.symbols[symbol].token].text;
+    let function = ctx.tokens[ctx.symbols[ctx.specializations[spec].symbol].token].text;
+    if x.tag == N_DEFER {
+        let tail = str(", which ", function, " returns by name and so builds at its destination (§7.3): a defer runs after the value is complete (§6.6)");
+        let callee = defer_callee_naming(ctx, x.a, spec, symbol);
+        if names_symbol(ctx, x.a, symbol) || callee == -3 { error_at(ctx, x.token, str("defer body names ", local, tail)); }
+        if callee >= 0 { error_at(ctx, x.token, str("defer body calls ", ctx.tokens[ctx.symbols[ctx.specializations[callee].symbol].token].text, ", which names ", local, tail)); }
+        return;
+    }
+    check_defers_named(ctx, x.a, spec, symbol); check_defers_named(ctx, x.b, spec, symbol); check_defers_named(ctx, x.c, spec, symbol);
+    var e = x.first;
+    while e >= 0 { check_defers_named(ctx, ctx.edges[e].value, spec, symbol); e = ctx.edges[e].next; }
+}
 recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope: i64) -> i64 {
     let decl = ctx.symbols[symbol].decl;
     if ctx.nodes[decl].first >= 0 { error_at(ctx, ctx.nodes[decl].token, "not implemented yet: generic functions"); }
@@ -2078,6 +2238,7 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
             let arg = ctx.edges[actual].value;
             let v = if first_default >= 0 && index >= first_default { check_default(ctx, arg, symbol, parameter, caller_scope, expected, ctx.nodes[call].token) } else if ctx.nodes[call].flags & 512 != 0 || (actual == ctx.nodes[call].first && ctx.nodes[call].flags & 256 != 0) { value_of(ctx, arg) } else { check_expression(ctx, arg, caller_scope, expected) };
             require_fit(ctx, arg, v, parameter_destination(ctx, expected, ctx.nodes[decl].flags & 2 != 0));
+            if ctx.types[expected].kind == T_REFERENCE && ctx.types[expected].flags & 1 == 0 && ctx.nodes[arg].tag == N_NAME && v.place >= 0 && ctx.symbols[v.place].kind == 2 && ctx.symbols[v.place].flags & 64 == 0 && adapts_as_constant(ctx, v.place) && ctx.symbols[v.place].writable_at < 0 { ctx.symbols[v.place].writable_at = ctx.nodes[arg].token; }
             ctx.nodes[arg].target = expected;
             if ctx.types[expected].kind != T_REFERENCE && (v.place >= 0 || ctx.types[v.ty].kind == T_REFERENCE) { reject_self_link_copy(ctx, expected, ctx.nodes[arg].token, ""); }
             if ctx.types[expected].size_class > 0 && !adapts_enum(ctx, decay(ctx, v).ty, expected) && v.place >= 0 { error_at(ctx, ctx.nodes[arg].token, "nonfixed value parameter needs a fresh value or explicit copy"); }
@@ -2209,6 +2370,20 @@ recursive fn check_function(ctx: Compiler&, symbol: i64, call: i64, caller_scope
         let tail = check_expression(ctx, body, scope, result);
         ctx.flow = outer_flow;
         if ctx.types[tail.ty].kind != T_BOTTOM { check_return(ctx, ctx.nodes[body].a, tail, id, ctx.nodes[decl].token); }
+        // Blocks: what a block's result and its calls into a recursive cycle
+        // do to the caller's temporaries is not analysed yet (7.6, 7.8).
+        if ctx.nodes[decl].flags & 4096 != 0 {
+            let r = ctx.specializations[id].result;
+            if r >= 0 && ctx.types[r].kind == T_ARRAY && holds_relative(ctx, r) { error_at(ctx, ctx.nodes[decl].token, "not implemented yet: a block literal's value holding relative references"); }
+            if calls_recursive(ctx, body) && ((r >= 0 && ctx.types[r].size_class != 0) || calls_recursive_nonfixed(ctx, body)) { error_at(ctx, ctx.nodes[decl].token, "not implemented yet: a block literal calling into a recursive cycle with a non-fixed-size value"); }
+        }
+        // A local returned by name is built at the result's destination
+        // (7.3): a defer runs after that value is complete, so none may name it.
+        let result_ty = ctx.specializations[id].result;
+        if result_ty >= 0 && ctx.types[result_ty].size_class == 2 {
+            let named = returned_local(ctx, body, id);
+            if named >= 0 { check_defers_named(ctx, body, id, named); }
+        }
         defaults.resize(default_mark); ctx.default_site = outer_site;
         ctx.checking_function = previous; ctx.loop_depth = previous_loop; ctx.loop_breaks = previous_breaks; ctx.break_target = previous_target;
         ctx.defer_loops = previous_defer;
@@ -2277,6 +2452,15 @@ fn check_program(ctx: Compiler&, library: bool) {
     }
 }
 fn verify_literals(ctx: Compiler&) {
+    // A use that adapts a named constant relies on it keeping its value; a
+    // writable reference to it could change that, before or after the use.
+    for s in ctx.symbols {
+        if s.kind == 2 && s.literal_use >= 0 && s.writable_at >= 0 {
+            let use = ctx.tokens[s.literal_use]; let path = ctx.sources[use.file].path;
+            var base = 0; for c, i in path { if c == '/' { base = i + 1; } }
+            error_at(ctx, s.writable_at, str(ctx.tokens[s.token].text, " is bound to a writable reference here, through which it may change, while the use as a literal at ", path[base..], ":", use.line, " relies on it keeping its initializer's value, as a named constant"));
+        }
+    }
     var changed = true;
     while changed {
         changed = false;
