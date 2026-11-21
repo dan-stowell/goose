@@ -1805,15 +1805,17 @@ fn time() -> f64            fn delta_time() -> f64            fn frame_count() -
 ```
 
 Flags for `open`: `WINDOW_RESIZABLE`, `WINDOW_HIDDEN`, `WINDOW_FULLSCREEN`,
-`NO_VSYNC`, `DEBUG` (validation layers where installed; on in a debug build of
-the layer). With `GOOSE_GFX_HEADLESS=1` in the environment, `open` opens no
-window; the test runners use this. The screen is an RGBA8 texture the size
-of the window in pixels, with a depth texture. A frame draws into it, and
-`frame()` shows it. A window has the width and height that `open` gives, in
-the display's own coordinates, and it has every pixel the display has in
-that area. On a high-density display, that is more pixels than its width
-and height; `screen_size()` counts these pixels, and the mouse position is
-reported in them.
+`NO_VSYNC`, `DEBUG` (validation layers where installed; on in a debug build
+of the layer). With `GOOSE_GFX_HEADLESS=1` in the environment, `open` opens
+no window; the test runners use this. The screen is an RGBA8 texture the
+size of the window in pixels. Its depth texture is made on the first
+`screen_depth()`, which `begin_screen` calls; a 2D program that needs no
+depth draws with `begin_pass(screen(), Texture { 0 }, clear)`. A frame draws
+into the screen, and `frame()` shows it. A window has the width and height
+that `open` gives, in the display's own coordinates, and it has every pixel
+the display has in that area. On a high-density display, that is more pixels
+than its width and height; `screen_size()` counts these pixels, and the
+mouse position is reported in them.
 
 `pixel_density()` is the screen's pixels per unit of those coordinates: 2 on
 most high-density displays, 1 elsewhere, including Windows at any scale
@@ -2016,6 +2018,7 @@ fn save_png(t: Texture, path: const u8[:]) -> bool           // RGBA8 or BGRA8
 fn screenshot(path: const u8[:]) -> bool                     // the screen, as shown
 fn generate_mips(t: Texture)
 fn texture_info(t: Texture) -> TextureDesc
+fn format_supported(format: i32, usage: i32) -> bool
 fn release(t: Texture)
 
 struct Sampler { id: u32 }
@@ -2034,8 +2037,13 @@ Kinds `TEXTURE_2D`, `TEXTURE_2D_ARRAY`, `TEXTURE_3D`, `TEXTURE_CUBE` (faces
 `RGBA8`, `BGRA8`, `RGBA8_SRGB`, `R8`, `RG8`, `RGBA16F`, `RGBA32F`, `R16F`,
 `RG16F`, `R32F`, `RG32F`, `R32UI`, `RGBA8UI`, `RGB10A2`, `RG11B10F`, and
 `DEPTH16`, `DEPTH24`, `DEPTH32F`, `DEPTH24_STENCIL8`, `DEPTH` (32-bit float
-where it can also be sampled). Filters `NEAREST`, `LINEAR`; wraps `REPEAT`,
-`MIRROR`, `CLAMP`; compares `COMPARE_LESS` and the like.
+where it can also be sampled), and the block-compressed `BC1`, `BC3`, `BC7`,
+`ASTC_4x4`, `ASTC_5x5`, `ASTC_6x6`, `ASTC_8x8`: `SAMPLED` only, updated a
+whole mip at a time (region `w` 0, data in whole blocks), and not read back
+or given `generate_mips`. `format_supported` says whether the device makes a
+texture of a format and usage; ask it before using a compressed format.
+Filters `NEAREST`, `LINEAR`; wraps `REPEAT`, `MIRROR`, `CLAMP`; compares
+`COMPARE_LESS` and the like.
 
 ### Pipelines and drawing
 
