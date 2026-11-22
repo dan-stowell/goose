@@ -1791,7 +1791,7 @@ read-write resources are instead passed to `begin_compute` in binding order.
 fn open(title: const u8[:], width: i64, height: i64) -> bool        // and (..., flags)
 fn open_headless(width: i64, height: i64) -> bool                   // no window; and (..., flags)
 fn close()
-fn frame() -> bool          // ends the frame drawn since the last call; false once asked to close
+fn frame() -> bool          // ends the frame drawn since the last call; false once asked to close or the device is lost
 fn quit()                   // frame() returns false next
 fn flush()                  // submit everything and wait for the GPU
 fn error() -> u8[>..]       // why the last failing call failed
@@ -1805,17 +1805,17 @@ fn time() -> f64            fn delta_time() -> f64            fn frame_count() -
 ```
 
 Flags for `open`: `WINDOW_RESIZABLE`, `WINDOW_HIDDEN`, `WINDOW_FULLSCREEN`,
-`NO_VSYNC`, `DEBUG` (validation layers where installed; on in a debug build
-of the layer). With `GOOSE_GFX_HEADLESS=1` in the environment, `open` opens
-no window; the test runners use this. The screen is an RGBA8 texture the
-size of the window in pixels. Its depth texture is made on the first
-`screen_depth()`, which `begin_screen` calls; a 2D program that needs no
-depth draws with `begin_pass(screen(), Texture { 0 }, clear)`. A frame draws
-into the screen, and `frame()` shows it. A window has the width and height
-that `open` gives, in the display's own coordinates, and it has every pixel
-the display has in that area. On a high-density display, that is more pixels
-than its width and height; `screen_size()` counts these pixels, and the
-mouse position is reported in them.
+`NO_VSYNC`, `DEBUG` (validation layers where installed; on in a debug build of
+the layer), `WAIT_WHEN_IDLE` (below). With `GOOSE_GFX_HEADLESS=1` in the
+environment, `open` opens no window; the test runners use this. The screen is
+an RGBA8 texture the size of the window in pixels. Its depth texture is made
+on the first `screen_depth()`, which `begin_screen` calls; a 2D program that
+needs no depth draws with `begin_pass(screen(), Texture { 0 }, clear)`. A
+frame draws into the screen, and `frame()` shows it. A window has the width
+and height that `open` gives, in the display's own coordinates, and it has
+every pixel the display has in that area. On a high-density display, that is
+more pixels than its width and height; `screen_size()` counts these pixels,
+and the mouse position is reported in them.
 
 `pixel_density()` is the screen's pixels per unit of those coordinates: 2 on
 most high-density displays, 1 elsewhere, including Windows at any scale
@@ -1826,6 +1826,13 @@ with no window open, and they change as the window moves between displays, so
 a program that follows them reads them each frame. They only report: gfx and
 ui apply neither, and how big to draw is the program's choice. For a ui the
 size of the system's own, pass `display_scale()` to `ui::set_scale`.
+
+With `WAIT_WHEN_IDLE`, `frame()` shows the screen only when something used
+the GPU since the last call or the window needs it redrawn. After a frame that
+drew nothing, the next `frame()` waits for an event, up to a second, unless
+`quit()` was called; `delta_time()` leaves the wait out, so a timer that runs
+while idle reads `time()`. A resize leaves the screen black, so the program
+redraws when `screen_size()` changes.
 
 `set_fullscreen` makes the window borderless fullscreen at the desktop's
 resolution, or a window again. It returns false if the window can't change,
@@ -1848,6 +1855,11 @@ have made is printed when it happens and skipped, and the program aborts at
 the next `frame()`, `check()`, read back or `close()`. Examples are a draw
 with no pipeline bound, a texture the shader samples left unbound, a
 released handle, and a uniform struct of the wrong size.
+
+A lost GPU device (Vulkan's `VK_ERROR_DEVICE_LOST`) is printed once, and
+`frame()` returns false from then on, as if the window were closed, so the
+program can save and exit. Direct3D 12's device removal and Metal's loss
+aren't recognized yet.
 
 ### Input
 
@@ -2078,6 +2090,12 @@ fn draw_indexed(indices: i64)                   fn draw_indexed_instanced(indice
 fn draw(vertices, instances, first_vertex, first_instance)
 fn draw_indexed(indices, instances, first_index, vertex_offset, first_instance)
 ```
+
+A pass with a `resolve` target resolves its multisampled `color` target into
+it and drops the samples of its multisampled color and depth targets: a later
+pass that loads them rather than clears them is a misuse. A pass that
+doesn't resolve keeps them, so a frame can draw over several passes and
+resolve in the last.
 
 A pipeline is not tied to the formats it draws into; it is made for each
 pass's targets the first time it is bound in one. The vertex shader's inputs
