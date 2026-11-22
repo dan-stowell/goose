@@ -89,7 +89,7 @@ The library uses these conventions:
   `heap_push`) cannot take one that contains self-relative references, because
   those values cannot be copied (spec §3.9). Construct them in place.
 * The functions that move elements around (`swap_at`, `reverse`, `shuffle`,
-  `sort`, `stable_sort`, `fill`, `copy_into`, `insert_at`, `remove_at`,
+  `sort`, `stable_sort`, `fill`, `copy_from`, `insert_at`, `remove_at`,
   `swap_remove`, `retain`, `dedup`, the heap functions) move the elements
   themselves, including references: `reverse(refs)` reorders an array of
   references and leaves what they point to unchanged, and an array of
@@ -343,7 +343,8 @@ let total = fold(xs, 0.0) { a, x => a + x };
 
 ```goose
 fn fill<T>(xs: T[:], v: T)
-fn copy_into<T>(dst: T[:], src: T[:])           // equal lengths; first to last
+fn copy_from<T>(dst: T[:], src: T[:])           // equal lengths; first to last
+fn copy_into<T>(dst: T[:], src: T[:])           // deprecated name of copy_from; a call warns
 fn reverse<T>(xs: T[:])
 fn sort<T>(xs: T[:])                            // by <; sort(xs) { a, b => ... } by the block
 fn stable_sort<T>(xs: T[:])                     // natural merge sort; one temporary of xs.len elements
@@ -351,9 +352,13 @@ fn to_lower(s: u8[:])                           // ASCII, in place
 fn to_upper(s: u8[:])
 ```
 
-`copy_into` preserves its element-by-element, first-to-last semantics. For a
-checked copy that preserves the source values when the slices overlap, use the
-language operation `dst.move_from(src)` (fixed-size, copyable elements).
+`copy_from` preserves its element-by-element, first-to-last semantics.
+`dst.copy_from(src)` reads the same way the call behaves: it copies from
+`src` into `dst`. `copy_into` is that function under its old name. The
+arguments are unchanged, and a call warns (spec §7.15) and names
+`copy_from`. For a checked copy that preserves the source values when the
+slices overlap, use the language operation `dst.move_from(src)` (fixed-size,
+copyable elements).
 
 `sort` is a pattern-defeating quicksort based on pdqsort and Rust's
 ipnsort. It is unstable (the order it leaves equal elements in is
@@ -1802,20 +1807,23 @@ fn set_fullscreen(on: bool) -> bool   fn fullscreen() -> bool   fn maximize()
 fn screen() -> Texture      fn screen_depth() -> Texture      fn screen_size() -> int2
 fn pixel_density() -> f32   fn display_scale() -> f32
 fn time() -> f64            fn delta_time() -> f64            fn frame_count() -> i64
+fn native_window() -> u64   fn native_display() -> u64        fn native_kind() -> i64
+fn presented(shown: bool)   fn needs_present() -> bool        // WINDOW_ONLY
 ```
 
 Flags for `open`: `WINDOW_RESIZABLE`, `WINDOW_HIDDEN`, `WINDOW_FULLSCREEN`,
 `NO_VSYNC`, `DEBUG` (validation layers where installed; on in a debug build of
-the layer), `WAIT_WHEN_IDLE` (below). With `GOOSE_GFX_HEADLESS=1` in the
-environment, `open` opens no window; the test runners use this. The screen is
-an RGBA8 texture the size of the window in pixels. Its depth texture is made
-on the first `screen_depth()`, which `begin_screen` calls; a 2D program that
-needs no depth draws with `begin_pass(screen(), Texture { 0 }, clear)`. A
-frame draws into the screen, and `frame()` shows it. A window has the width
-and height that `open` gives, in the display's own coordinates, and it has
-every pixel the display has in that area. On a high-density display, that is
-more pixels than its width and height; `screen_size()` counts these pixels,
-and the mouse position is reported in them.
+the layer), `WAIT_WHEN_IDLE` and `WINDOW_ONLY` (below). With
+`GOOSE_GFX_HEADLESS=1` in the environment, `open` opens no window; the test
+runners use this. The screen is an RGBA8 texture the size of the window in
+pixels. Its depth texture is made on the first `screen_depth()`, which
+`begin_screen` calls; a 2D program that needs no depth draws with
+`begin_pass(screen(), Texture { 0 }, clear)`. A frame draws into the screen,
+and `frame()` shows it. A window has the width and height that `open` gives,
+in the display's own coordinates, and it has every pixel the display has in
+that area. On a high-density display, that is more pixels than its width and
+height; `screen_size()` counts these pixels, and the mouse position is
+reported in them.
 
 `pixel_density()` is the screen's pixels per unit of those coordinates: 2 on
 most high-density displays, 1 elsewhere, including Windows at any scale
@@ -1829,10 +1837,24 @@ size of the system's own, pass `display_scale()` to `ui::set_scale`.
 
 With `WAIT_WHEN_IDLE`, `frame()` shows the screen only when something used
 the GPU since the last call or the window needs it redrawn. After a frame that
-drew nothing, the next `frame()` waits for an event, up to a second, unless
-`quit()` was called; `delta_time()` leaves the wait out, so a timer that runs
-while idle reads `time()`. A resize leaves the screen black, so the program
-redraws when `screen_size()` changes.
+drew nothing, the next `frame()` waits for an event, up to a second (16 ms
+while a gamepad is open and the window has focus), unless `quit()` was
+called; `delta_time()` leaves the wait out, so a timer that runs while idle
+reads `time()`. A resize leaves the screen black, so the program redraws
+when `screen_size()` changes.
+
+With `WINDOW_ONLY`, `open` makes the window, its input, events and time, but
+no GPU device, so another renderer draws into the window; a call that needs
+the device is a misuse. `native_window()` is the handle to draw into: a
+`CAMetalLayer` on Apple's systems, the `HWND` on Windows, the `ANativeWindow`
+on Android (a new one each time the app comes back to the foreground, 0 in the
+background), the `wl_surface` or X11 window on Linux, and 0 headless. On
+Linux, `native_display()` is the `wl_display` or `Display*`, and
+`native_kind()` says which, `NATIVE_WAYLAND` or `NATIVE_X11`. Another video
+driver, or another platform, fails the `open`. With `WAIT_WHEN_IDLE` as well,
+the renderer calls `presented(shown)` each frame, and a frame that showed
+nothing makes the next `frame()` wait; `needs_present()` is true while the
+window needs its image again. `presented()` without `WINDOW_ONLY` is a misuse.
 
 `set_fullscreen` makes the window borderless fullscreen at the desktop's
 resolution, or a window again. It returns false if the window can't change,
