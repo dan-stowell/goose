@@ -73,7 +73,7 @@ single translation unit, included in the order the driver lists them.
 | Typecheck | `typecheck*.h` (`TypeCheckProgram`) | the `Ast` | one `FnSpec` per specialization with a cloned, annotated body; `StructInst`/`EnumInst`; `VarDef`s; the store record; every diagnostic of §3--§11; the shader blobs `embed_shader` compiles (`gfx.h`, `shaderc.c`) |
 | Optimize | `optimize.h`, `optimize_basecase.h`, `optimize_tre.h`, `optimize_loops.h`, `optimize_reassoc.h` (`Optimizer`) | live specializations | bodies rewritten in place (inlined, folded, loops), liveness and use counts, loop shapes (`ForLoop::stripk`, `sumred`, `While::countdown`) |
 | BCE | `bce.h` (`BCE::RunAll`) | live specializations | `Index::nobc`, `SliceExpr::nobc`, `Call::nobc` (a `pop`), `ForLoop::fixedlen` and `lenbound`, per-loop `hoistrefs` and `hoistfields` |
-| Codegen | `codegen*.h` (`CodeGen`) | live specializations, globals | one C file, with `src/runtime/` (or the part of it that a program's unit holds) around it |
+| Codegen | `codegen*.h` (`CodeGen`) | live specializations, globals | one C file, with `src/runtime/` (or the part of it that a program's unit holds) around it, and one C function for each group of specializations whose C is the same (§6.15) |
 | JIT | `jit.h` | the C text | the program run in-process through libtcc, when no `-o` was given |
 
 The passes are virtual methods on `Node` (`ast.h`): `Dump`, `Clone1`,
@@ -6409,6 +6409,75 @@ costs nothing to check.
   cases are the ones that failed on x86-64 Linux and macOS (above), whose CI
   runs that task.
 
+### 6.15 Identical functions
+
+A function is checked once per specialization (§3.1), and many
+specializations differ in nothing their C shows. A slice rooted at a global
+in one call and at a local in another gives two root classes, so two keys
+and two bodies, whose C is the same but for the names of the
+specializations each calls and the numbers of its long-distance returns
+(§6.6). `MergeSpecs` (`codegen_merge.h`) runs once all the C is written and
+keeps one function of each such group. The checks are unchanged; only the C
+written is.
+
+* **References.** `EmitSpec` records where each function it writes lies in
+  `code` and the names it defines there (`SpecText`: its own, or an
+  element-run twin's, and a `simd` function's versions). A function's
+  references are read from its text: a name that a `SpecText` defines, which
+  `Unique` keeps apart from every local, type and global name, and which is
+  no reference after `.` or `->`, where it would be a member; and a
+  long-distance return's number, in the channels `gs_lret_K_J`,
+  `gs_fdst_K_J` and `gs_fval_K_J` (`FromChannels`) and as what `gs_rf` is
+  compared with or set to (`EmitRfCheck`, `PropagateReturn`). A number
+  stands for its target's function, the one that catches it. Literals and
+  comments hold no references.
+* **Candidates.** Only specializations of one function merge, an
+  element-run twin only with twins, so only a function written more than
+  once is read. Another function's name or number stays in the text, where
+  it matches only itself, and a program with no such function pays for a
+  count. Distinct functions whose C happens to be the same, two empty
+  methods say, stay apart.
+* **Groups.** Two candidates are alike when they are copies of one
+  function, their texts with every reference blanked are the same, and
+  each reference, in order, is to a function of the same group. The groups
+  start as "the same blanked text" and split until nothing splits, as
+  minimizing an automaton does. Starting from "all apart" and joining would
+  never merge two copies of a recursion, each calling itself or its own
+  copy of the other function. A target stands only with targets.
+* **Output.** The first function of a group is kept. In it, and in the rest
+  of the C (calls, thunks, exports, `gs_init_globals`), a reference to any
+  function of a group names the kept one, and a target's number becomes the
+  number of the kept copy of the target. The prototypes of the others go,
+  and so do the channels of a target that is not kept; a merged target's
+  channels must be the same C as the kept one's, as the signatures reading
+  them are, or codegen stops with an internal error.
+* **Renumbering.** Merging changes no control flow: each frame runs the
+  kept copy of what it ran, which is the same C up to references into the
+  same groups. What can change is where a long-distance return to `t`
+  stops. A frame it passes compares `gs_rf` with that frame's own number
+  where the frame is a target too (§6.6), and a frame of another target of
+  `t`'s group would now catch it. There is none: `t`'s group holds only
+  specializations of `t`'s function, and a return to `t` passes none but
+  `t`. For `return ... from`, the innermost call of that function on every
+  path the return takes is `t` itself (`CheckReturn`, `NeedOnPath`, §3.12;
+  a function value's body stands on a path as the specialization calling
+  it). A plain return in a function value's body exits the specialization
+  that wrote the body (`FrameOfSpec`). Another copy of that function
+  between them would have to run the body, so be keyed on it, and would
+  write a body of its own to key the next copy on, without end, which
+  `MAXNESTEDSPECS` refuses (§3.11). Codegen stops with
+  an internal error if a specialization that records `t` in its `needs`
+  shares `t`'s group.
+* **What stays apart.** Copies whose C differs in anything else: a loop
+  that BCE bounds in one copy and not the other (§6.12), say, or a
+  `GS_INLINE` on one (`FnSpec::cinline`, §4).
+* **Effect.** `samples/18_json.goose` is a recursive descent parser whose
+  nested functions report an error with `return ... from parse`. `parse`
+  and the functions nested in it had two copies each, the target included;
+  they now have one, and the program's C went from 6,811 lines to 5,212
+  (23% less) at `-O2`.
+* **Tests.** `test/codegen/merged_specs.goose` (`docs/testing.md`).
+
 ---
 
 ## 7. The runtime
@@ -7666,7 +7735,12 @@ implicit `it`.
 and the occurrence at its position (`Locate`, `FileIndex::At`). Hover
 renders a declaration header (`FnHeader`, `VariantHeader`), the type a clone
 gave the node, the specializations a function has (`SpecsText`) and the
-documentation comment (`DocText`, with the `//` stripped). For a name no
+documentation comment (`DocText`, with the `//` stripped); for builtins
+(`builtins.h`, `builtindocs` compact form strings, compile-time checked via
+`CheckBuiltinDocs()`), it renders the arity-matched form, concrete call
+types and documentation (or all forms without concrete types when uncalled or
+unmatched, and `builtin .name: i64` with documentation for properties `.len`
+and `.cap`). For a name no
 instantiation reaches, hover says so. For a type that an exemplar's clone
 gave, it says that the type is an exemplar's (`NoteExemplar`: `a: T`, "in an
 exemplar instantiation"). For a name past the error that ended an exemplar,
@@ -7680,15 +7754,24 @@ follows the resolution to the declaration's name (`DefinitionOf`), and on an
 file's top-level declarations with their fields, variants and nested
 functions; workspace symbols are those of every root. Semantic tokens
 classify the occurrences by their resolution (`SemanticTokenOf`, the legend
-in `SEMANTIC_TYPES`). Signature help finds the innermost call whose
-parentheses hold the position (`FileIndex::CallAt`), and counts the commas
-before the position to find the active parameter, leaving out commas in
-string and character literals and in comments. It lists the overloads of the
-callee's name, with the resolved one active; for a UFCS call these are the
-ones the receiver's type selects (`MethodsOf`, from its clone's type), which
-is also where hover and definition look for a call the check left
-unresolved. Completion (`Completion`) looks
-at what precedes the name being typed:
+in `SEMANTIC_TYPES`, setting `SM_DEFAULTLIBRARY` for resolved builtins and
+builtin members/properties). Signature help finds the innermost call whose
+parentheses hold the position (`FileIndex::CallAt`) and counts the commas
+before the position to find the active parameter, leaving out commas in string
+and character literals and in comments. It lists the overloads of the callee's
+name and applicable builtin forms from `builtindocs`, selecting the resolved
+user overload or arity-matching builtin form and clamping `activeParameter` to
+any trailing variadic parameter. For an unresolved dot call, one helper
+(`ResolveUfcs`) mirrors `CheckUfcsCall`'s order across hover, definition,
+semantic tokens, signature help and rename refusal: `BF_MEMBER` builtins on
+`TY_ARRAY` receivers, then struct field names, type parameters (`GenericAt`),
+enclosing local functions (`LocalFnsAt`) and `MethodsOf`, then any remaining
+callable builtin that accepts the receiver (or any callable builtin when the
+receiver has no checked type or is an exemplar's opaque type). Signature help
+and free-call lookup also check `LocalFnsAt` ahead of `Namespace::functionmap`.
+Non-call properties (`.len`, `.cap`) still require a known array or slice
+receiver type (`ResolveDotProperty`). Completion (`Completion`) looks at what
+precedes the name being typed:
 
 * After a `.`, it offers the members of the value before the `.`
   (`MemberCompletions`). The innermost node ending at the `.` is the object
@@ -7696,16 +7779,19 @@ at what precedes the name being typed:
   it). The object's type from a clone gives the fields of a struct or a
   variant's payload, the functions whose first parameter takes the type
   (`FirstParamTakes`: untyped, generic, the type or a reference to it) as
-  UFCS calls, and the builtin members of its kind (`RecvKindOf`). An enum's
-  name before the `.` gives its variants, and a value no instantiation typed
-  gives every field and function.
+  UFCS calls, and the builtin members of its kind (`RecvKindOf`), all carrying
+  signatures and docs from `builtindocs` (ordered ahead of user methods only
+  for `TY_ARRAY` receivers so shared names follow `CheckUfcsCall`
+  precedence). An enum's name before the `.` gives its variants, and a value no
+  instantiation typed gives every field and function.
 * After `::`, it offers the namespace's declarations.
 * Otherwise it offers the names in scope (`ScopeCompletions`), taken from
   the parse tree alone so that a generic body has them too. In order of
   nearness (`sortText`), these are the bindings of the enclosing blocks
   declared before the position, the enclosing functions' parameters, type
   parameters and nested functions, every namespace's declarations (qualified
-  where the namespace is not the file's own), the builtins and the keywords.
+  where the namespace is not the file's own), the builtins (with signatures
+  and docs from `builtindocs`) and the keywords.
 
 References and rename share one notion of identity: the place of the
 declaration's name, as `DefinitionOf` finds it for any occurrence. Two
@@ -7744,10 +7830,14 @@ Inlay hints give two things. The first is the type of each `let` or `var`
 that has no type written, shown after its name, where the clones' `VarDef`s
 agree on it (there is no hint where the specializations differ, or where an
 exemplar knows the type only as `?`). The second is the parameter's name
-before each argument written in a call resolved to a specialization (not
-before the defaults that a global's initializer, checked in place, holds). A
-UFCS call's object stands for the first parameter, and an argument that is
-the parameter's own name gets no hint. Folding ranges are every
+before each argument written in a call resolved to a specialization, never
+before the defaults that a global's initializer, checked in place, holds.
+Multi-argument builtin calls (`>= 2` post-receiver written arguments for
+`BF_MEMBER` builtins, or `>= 2` written arguments for non-member builtins)
+likewise emit parameter hints for non-variadic parameters from `builtindocs`,
+or from the worker's parameters on `thread_spawn*`. A UFCS call's object
+stands for the first parameter, and an argument that is the parameter's own
+name gets no hint. Folding ranges are every
 brace-delimited body (a block, a match, a struct literal) and declaration
 that spans more than one line, as `region`, and every run of `//` comment
 lines, as `comment`. A body's or declaration's range ends one line early

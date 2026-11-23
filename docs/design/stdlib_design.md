@@ -310,7 +310,7 @@ fn rem<T>(a: T, b: T) -> T         // integers; pairs with `/`
 fn div_euclid<T>(a: T, b: T) -> T  // integers; pairs with `%`
 fn sign<T>(x: T) -> T           // -1, 0, 1 at x's type; f32/f64 overloads
 fn lerp(a: f64, b: f64, t: f64) -> f64      // and an f32 overload
-fn next_pow2(x: i64) -> i64     // smallest power of two >= max(x, 1)
+fn next_pow2(x: i64) -> i64     // smallest power of two >= max(x, 1); asserts x <= 2^62
 fn popcount(x: u64) -> i64
 fn clz(x: u64) -> i64           // 64 for x == 0
 fn ctz(x: u64) -> i64           // 64 for x == 0
@@ -403,7 +403,7 @@ own xorshift. To seed from the OS, use `os`'s `random_seed()`.
 
 ```goose
 fn each_rev<T, F>(xs: T[:])                    // F(x), last to first
-fn each_chunk<T, F>(xs: T[:], n: i64)          // F(chunk: T[:], i); the last chunk may be short
+fn each_chunk<T, F>(xs: T[:], n: i64)          // F(chunk: T[:], i); asserts n > 0; last chunk may be short
 fn find<T, F>(xs: T[:]) -> T?                  // first x with F(x), as a reference; null if none
 fn find_index<T, F>(xs: T[:]) -> i64           // …or its index, -1 if none
 fn position<T>(xs: T[:], v: T) -> i64          // first i with xs[i] == v, -1 if none
