@@ -11,6 +11,7 @@ function's kept checks are several errors at once, and an error with no
 place in the program is reported as its text alone."""
 import json
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -81,6 +82,15 @@ def check_diagnostics_json(exe, base):
                 diags[0]["endCol"] == diags[0]["col"] + 1 and diags[0]["endLine"] == 2,
                 "lexer error at its caret", err + "\n" + json.dumps(diags))
 
+        # A carriage return ends a line only before a line feed: a lone one is
+        # one error at it, which ends the scan, and CRLF reads as LF.
+        diags, err = both("cr.goose", "//\rfn main() {}\r")
+        require(len(diags) == 1 and diags[0]["line"] == 1 and diags[0]["col"] == 3 and
+                "carriage return" in diags[0]["message"], "a lone CR",
+                err + "\n" + json.dumps(diags))
+        diags, err = both("crlf.goose", "// doc\r\nfn main() {}\r\n")
+        require(diags == [], "CRLF line endings", err)
+
         # The errors after a """ string the lexer rejected, which the parse
         # skips past, at their own lines: a line short of the margin, text
         # before the closing quotes, and text after the opening ones.
@@ -101,6 +111,13 @@ def check_diagnostics_json(exe, base):
         diags, err = both("rawstr.goose", raw)
         require([d["line"] for d in diags] == [4, 6, 9, 10, 11, 13],
                 "the lines of the errors after a rejected \"\"\" string", err)
+
+        # A NUL byte is an error at it rather than the end of the text, and
+        # the parse goes on past it.
+        diags, err = both("nul.goose", "fn main() {}\0\nfn f() { let x: i64 = ; }\n")
+        require([d["line"] for d in diags] == [1, 2] and
+                diags[0]["message"] == "NUL character in source" and diags[0]["col"] == 13,
+                "a NUL byte", err + "\n" + json.dumps(diags))
 
         # A typecheck error, over the node it is at, reached through a call:
         # the chain's entries are at the calls that made the instantiations.
@@ -187,6 +204,23 @@ def check_diagnostics_json(exe, base):
                 diags[0]["message"].startswith("cannot open file") and
                 diags[0]["text"] == diags[0]["message"],
                 "an error with no place", err + "\n" + json.dumps(diags))
+
+        # Source bytes that are no UTF-8 (U+D800's encoding): the message names
+        # the byte, and the source line has U+FFFD for each, so stdout is
+        # strict UTF-8 still.
+        (root / "utf8.goose").write_bytes(b"\xed\xa0\x80\n")
+        diags, err = both("utf8.goose")
+        raw = subprocess.run([str(exe), "check", "--diagnostics", "json", "utf8.goose"], cwd=root,
+                             capture_output=True).stdout
+        try:
+            strict = json.loads(raw.decode("utf-8"))
+        except ValueError as e:
+            strict = None
+            require(False, f"invalid UTF-8 source: stdout is not UTF-8 JSON ({e})", repr(raw))
+        require(strict == diags and len(diags) == 1 and
+                diags[0]["message"] == "illegal character: byte 237" and
+                diags[0]["text"].splitlines()[1] == "\ufffd" * 3,
+                "invalid UTF-8 source", repr(raw))
 
         code, out, err = tc.run_capture([exe, "check", "--diagnostics", "yaml", "ok.goose"],
                                         cwd=root)

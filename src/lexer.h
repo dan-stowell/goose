@@ -71,16 +71,11 @@ inline const char *TName(TType t) {
 inline bool IsIdentStart(char c) { return isalpha((uint8_t)c) || c == '_'; }
 inline bool IsIdentCont(char c)  { return isalnum((uint8_t)c) || c == '_'; }
 
-// The UTF-8 sequence at p, where its bytes make one; empty for a byte that
-// is no character on its own, which a message must not quote: a diagnostic
-// is text, and the server sends it as JSON, which is UTF-8 throughout.
-inline string_view Utf8CharAt(const char *p) {
-    auto c = (uint8_t)*p;
-    size_t len = c < 0x80 ? 1 : c >= 0xC2 && c < 0xE0 ? 2 : c >= 0xE0 && c < 0xF0 ? 3 : c >= 0xF0 && c < 0xF5 ? 4 : 0;
-    for (size_t i = 1; i < len; i++)
-        if (((uint8_t)p[i] & 0xC0) != 0x80) return {};
-    return string_view(p, len);
-}
+// The UTF-8 sequence at p in 0-terminated text, where its bytes make one;
+// empty for a byte that is no character on its own, which a message must not
+// quote: a diagnostic is text, and the server sends it as JSON, which is
+// UTF-8 throughout.
+inline string_view Utf8CharAt(const char *p) { return Utf8CharAt(p, p + strnlen(p, 4)); }
 
 // What a message calls the character at p: quoted, with its code point
 // where it is not ASCII, or the byte's value where it is no character.
@@ -105,6 +100,9 @@ struct Lexer {
     int line = 1;
     string_view filename;
     const char *source = nullptr;    // The whole text, for the line an error echoes.
+    // One past the text's last byte where the caller knows it: a NUL before
+    // it is a byte of the text rather than its end.
+    const char *end = nullptr;
     int fileidx = 0;                 // The file's index in Ast::sources, for diagnostics.
 
     // One past the previous token: where a construct that ended with it
@@ -136,8 +134,9 @@ struct Lexer {
     // (DepthBefore).
     int curlies = 0;
 
-    Lexer(string_view _filename, const char *_source, int _fileidx = 0)
-        : p(_source), filename(_filename), source(_source), fileidx(_fileidx) {
+    Lexer(string_view _filename, const char *_source, int _fileidx = 0,
+          const char *_end = nullptr)
+        : p(_source), filename(_filename), source(_source), end(_end), fileidx(_fileidx) {
         linestart = p;
         Next();
     }
@@ -230,7 +229,19 @@ struct Lexer {
         again:
         for (;;) {
             auto c = *p;
-            if (c == ' ' || c == '\t' || c == '\r') { p++; }
+            if (c == ' ' || c == '\t') { p++; }
+            else if (c == '\r') {
+                if (p[1] != '\n') {
+                    // The scan after the error resumes at the end: past a lone
+                    // CR, lines are no longer the ones diagnostics and editors
+                    // count.
+                    auto at = p;
+                    p += strlen(p);
+                    ErrorAt("a carriage return without a line feed after it: line endings are LF "
+                            "or CRLF", line, linestart, at);
+                }
+                p++;
+            }
             else if (c == '\n') { p++; line++; linestart = p; }
             else break;
         }
@@ -250,7 +261,13 @@ struct Lexer {
         };
         auto c = *p++;
         switch (c) {
-            case 0:   p--; Set(T_EOF); return;
+            case 0:
+                // The scan stays past the NUL, where recovery goes on from
+                // (SkipBrokenToken).
+                if (end && p <= end) Error("NUL character in source");
+                p--;
+                Set(T_EOF);
+                return;
 
             case '(': Set(T_LPAREN);   return;
             case ')': Set(T_RPAREN);   return;
@@ -332,9 +349,10 @@ struct Lexer {
                     auto own = true;
                     for (auto q = linestart; q < start; q++) own = own && (*q == ' ' || *q == '\t');
                     if (own && (!docstart || docline + 1 != line)) docstart = start;
-                    while (*p && *p != '\n') p++;
+                    // A CR is left to the scan above, which takes CRLF.
+                    while (*p && *p != '\n' && *p != '\r') p++;
                     if (own) {
-                        docend = p > start && p[-1] == '\r' ? p - 1 : p;
+                        docend = p;
                         docline = line;
                     }
                     goto again;

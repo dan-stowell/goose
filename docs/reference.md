@@ -67,8 +67,8 @@ without running, and `goose build` makes an executable
 ## 1. Lexical structure
 
 A Goose source file is UTF-8 text. A byte-order mark at its start is
-ignored, and line endings are read as `\n` whatever convention the file
-uses.
+ignored. Lines end in LF or CRLF, both read as `\n`; a carriage return
+without a line feed after it is an error.
 
 **Comments** are `//` to the end of the line and `/* … */`, which nests:
 `/* a /* b */ c */` is one comment.
@@ -3894,6 +3894,11 @@ Goose value is contiguous, so a job or a result carries real data,
 including its variable-size parts, as a single copy. A `thread_fn`'s
 parameters have no defaults.
 
+The queue is the one for the type the value has: a variant literal such as
+`Shape.Circle { r: 1.0 }` has its variant's type, and `7` is an `i64`, so
+neither reaches a `qget<Shape>()` or a `qget<i32>()`. A `qget` or `qpoll`
+of a type that no `qput` in the program sends gives a warning.
+
 <!-- check-only -->
 ```goose
 struct Job    { n: i32 }
@@ -4213,7 +4218,11 @@ declaring `goose_init(argc, argv)`, which the host calls once before
 anything else. That function sets up the runtime and the globals and runs
 the Goose `main`, if there is one, so `main` is where a library keeps its
 start-up code. Exported functions are not thread-safe: call them from the
-thread that called `goose_init`. `goose_exit()` ends the program and
+thread that called `goose_init`. Only the host calls them, between its
+calls into Goose: C that Goose code called calling an export back before
+it returns (a toolkit's handler, a `qsort` comparator) is a runtime error.
+Where Goose and C must interleave, have the C return to Goose rather than
+call it back. `goose_exit()` ends the program and
 releases what the start set up, so that `goose_init` can start it, or
 another build of it, again in the same process; it is a runtime error
 while a worker of the program still runs. `goose build --shared --header

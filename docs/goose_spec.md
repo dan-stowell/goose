@@ -822,6 +822,10 @@ rebinding the variable ends the narrowing. `o .= &x` / `o .= null` rebind
 an optional. A rebind to a plain reference narrows it, and a rebind to
 anything that may be null un-narrows it.
 
+Only variables narrow. Bind an optional field or element to a local with
+`.=` before testing and using it. For example, write
+`let next .= node.next; if next { print(next.key); }`.
+
 **What references may point to.** Anything except the interior of a
 fixed-mode ADT payload (§3.5). A reference into a grow-shrink array `[>..<]`
 is held only in a variable, and must no longer be live when the array next
@@ -3531,7 +3535,15 @@ function. It initializes the runtime and the globals and then runs the Goose
 start-up code; exported functions may be called from it. A second call does
 nothing. Initialization is idempotent on the initializing thread; exported
 calls and mutable Goose globals are not thread-safe and must remain on that
-thread. `--header` requires generated C output and at least one export, and
+thread. Only the C host calls an export through its C symbol, between its
+calls into Goose. C that Goose code called (an `extern fn`, from `main`, a
+worker or a global's initializer) calling an export before it returns is a
+runtime error, since the export would run over the data stacks of the Goose
+code that is still running. In a program that starts threads, a call on a
+thread other than the initializing one is a runtime error too. An `extern
+fn` whose C symbol is one of the program's exports is a compile error: Goose
+code calls the export as the Goose function it is. `--header` requires
+generated C output and at least one export, and
 writes declarations and the required packed C type definitions for the
 exported API.
 
@@ -4651,7 +4663,11 @@ relative of the Linda tuple-space / coordination style.
   `qget<T>(ms: i64) -> T, bool` (like `qpoll`, after waiting at most `ms`
   milliseconds; zero or less does not wait) and `qlimit<T>(n: i64)` select
   the queue by type. Queues are stored outside stack memory
-  (runtime-internal allocation is permitted here).
+  (runtime-internal allocation is permitted here). `qput` uses the queue of
+  its argument's type: a variant literal has its variant type (§3.5) and an
+  integer literal is an `i64`, so `qput(Shape.Circle { r: 1.0 })` does not
+  feed `qget<Shape>()`. A `qget` or `qpoll` of a type that no `qput` in the
+  program sends is a warning, since it can receive nothing.
 * **Bounded queues**: `qput` never blocks. It returns `true` once the value
   is queued, and returns `false` immediately, queueing nothing, when the
   queue holds its limit of messages. A call statement drops the result
