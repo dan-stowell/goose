@@ -1802,7 +1802,7 @@ int Main(int argc, char **argv) {
                 Append(out, RuntimeSections({ "runtime.h", "runtime_impl.h", "runtime_threads.h" }),
                        cg.head, RuntimeSections({ "runtime_ext.h", "runtime_os.h" }), cg.result);
             if (embedded)
-                Append(out, "\nvoid gs_jit_cleanup(void) { free(gs_stks); gs_stks = NULL; "
+                Append(out, "\nvoid gs_jit_cleanup(void) { gs_aligned_free(gs_stks); gs_stks = NULL; "
                             "gs_nstks = 0; }\n");
             return out;
         };
@@ -2095,7 +2095,14 @@ int RunOnCompilerStack(const function<int()> &fn) {
 
 }  // namespace goose
 
+// Defined by the runtime (runtime_impl.h). Linux raises the soft stack
+// limit; everywhere else it does nothing.
+extern "C" void gs_raise_main_stack(void);
+
 int main(int argc, char **argv) {
+    // Before anything that runs on this thread, including a JIT program,
+    // whose runtime records the stack bounds from the limit in force then.
+    gs_raise_main_stack();
     #ifdef _MSC_VER
         // Asserts and aborts go to stderr and exit, never a dialog, so failing
         // debug runs terminate cleanly under test automation.

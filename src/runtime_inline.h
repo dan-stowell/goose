@@ -997,7 +997,14 @@ R"GSRT(/* The program defines what goose.h gives C compiled on its own (gs_stack
 #define GOOSE_H 1
 
 )GSRT"
-R"GSRT(/* Starts the runtime on main's thread: the program's arguments, each
+R"GSRT(/* Linux: raise the soft RLIMIT_STACK to the 64 MB a Windows or macOS link
+   reserves for the main thread, when the hard limit allows and the soft
+   limit is not already higher. Called from an executable's main (a built
+   program's generated main and goose's own main), before the overflow guard's
+   stack bounds are recorded. A C host of a --shared library does not go
+   through it and keeps the limit it started with. */
+GS_API void gs_raise_main_stack(void);
+/* Starts the runtime on main's thread: the program's arguments, each
    region's usable reservation and trailing guard gap, the address space
    budgeted for regions over the whole program, and the most regions the
    main program and any one worker hold (the compiler's static counts),
@@ -1111,6 +1118,57 @@ R"GSRT(/* The current program instance's globals (goose_spec.md 11.1), a struct 
 static GS_TLS void *gs_gl;
 
 )GSRT"
+R"GSRT(/* The aligned allocators the chunks come from. Windows: the CRT's
+   _aligned_malloc, whose base _aligned_free takes back -- msvcrt exports
+   both, and tcc's small header surface declares calloc and free but not
+   these, so tcc gets them here and the rest of the platform <malloc.h>.
+   Elsewhere: C11's aligned_alloc, which stdlib.h declares and free takes
+   back. TCC compiles this header with -nostdinc (jit.h), so stdlib.h is
+   not there to declare aligned_alloc either: without a declaration here
+   it takes it for one returning int, and the pointer it hands back is
+   cut to 32 bits. */
+#if defined(_MSC_VER)
+#include <malloc.h>
+#elif defined(__TINYC__)
+#if defined(_WIN32)
+void* _aligned_malloc(size_t, size_t);
+void _aligned_free(void*);
+#else
+void* aligned_alloc(size_t, size_t);
+#endif
+#endif
+
+)GSRT"
+R"GSRT(static void *gs_aligned_calloc(size_t n) {
+  /* On Mac cache line is 128-byte size. On x86 64 bytes is the
+   * line size, but Intel's spatial prefetcher fetches pairs of lines, so
+   * 128‑byte alignment is the safe default for hot per‑thread data. */
+  size_t line = 128;
+  /* Whole lines: aligned_alloc's C11 contract wants a size multiple of
+     the alignment, and whole lines keep the chunk's last line its own
+     whatever the allocator packs beside it. */
+  size_t size = (n + line - 1) / line * line;
+  if (!size) size = line;
+#if defined(_WIN32)
+    uint8_t *raw = (uint8_t *)_aligned_malloc(size, line);
+#else
+    uint8_t *raw = (uint8_t *)aligned_alloc(line, size);
+#endif
+    if (!raw) { return NULL; }
+    memset(raw, 0, size);
+    return raw;
+}
+
+)GSRT"
+R"GSRT(static void gs_aligned_free(void *p) {
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
+    free(p);
+#endif
+}
+
+)GSRT"
 R"GSRT(#define GS(i) (&gs_stks[i])
 
 )GSRT"
@@ -1122,7 +1180,7 @@ R"GSRT(static void gs_stack_init(gs_stack *s) {
 R"GSRT(/* The calling thread program's block of n stacks, each with its region:
    main's from gs_rt_init, a worker's from its entry thunk. */
 static void gs_stack_block(int64_t n) {
-    gs_stks = (gs_stack *)calloc((size_t)(n > 0 ? n : 1), sizeof(gs_stack));
+    gs_stks = (gs_stack *)gs_aligned_calloc((size_t)(n > 0 ? n : 1) * sizeof(gs_stack));
     if (!gs_stks) gs_panic("out of memory allocating stack block");
     for (int64_t i = 0; i < n; i++) gs_stack_init(&gs_stks[i]);
     gs_nstks = n;
@@ -1160,9 +1218,9 @@ static void gs_thread_run(void (*entry)(uint8_t *), uint8_t *args) {
 R"GSRT(/* What the thread program holds once it has returned or aborted; the
    runtime releases the regions after this. */
 static void gs_thread_release(void) {
-    free(gs_gl);
+    gs_aligned_free(gs_gl);
     gs_gl = NULL;
-    free(gs_stks);
+    gs_aligned_free(gs_stks);
     gs_stks = NULL;
     gs_nstks = 0;
 }
@@ -1858,6 +1916,9 @@ R"GSRT(#include <sys/mman.h>
 #include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
+#ifdef __linux__
+#include <sys/resource.h>
+#endif
 
 )GSRT"
 R"GSRT(/* The calling thread's native stack, from GS_NATIVE_SLOP below its lowest
@@ -3088,6 +3149,30 @@ R"GSRT(GS_API int64_t gs_scan_pair(const uint8_t *p, int64_t n, const void *a, i
 }
 
 )GSRT"
+R"GSRT(/* The 64 MB of CMakeLists.txt's goose_main_stack. Linux does not reserve the
+   main thread's stack at link time: it grows until the soft RLIMIT_STACK,
+   often 8 MB where the process was started. This raises it for an executable
+   when the hard limit allows, without lowering a higher soft limit or
+   exceeding the hard limit. goose's main (main.cpp) and a built program's
+   generated main call this; a C host of a --shared library does not. */
+GS_API void gs_raise_main_stack(void) {
+#ifdef __linux__
+    struct rlimit rl;
+    const rlim_t want = (rlim_t)64 << 20;
+    if (getrlimit(RLIMIT_STACK, &rl)) return;
+    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < want) {
+        if (rl.rlim_cur < rl.rlim_max) {
+            rl.rlim_cur = rl.rlim_max;
+            (void)setrlimit(RLIMIT_STACK, &rl);
+        }
+    } else if (rl.rlim_cur < want) {
+        rl.rlim_cur = want;
+        (void)setrlimit(RLIMIT_STACK, &rl);
+    }
+#endif
+}
+
+)GSRT"
 R"GSRT(GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t gap,
                         uint64_t budget, int64_t mainregions, int64_t workerregions) {
     /* A host's goose_init of a second program (an image it reloaded, say)
@@ -3136,6 +3221,8 @@ R"GSRT(GS_API void gs_rt_start(int argc, char **argv, uint64_t reserve, uint64_t
     #endif
     gs_regions_init();
     gs_regions_begin(mainregions);
+    /* An executable's main has already raised the limit; a C host of a
+       --shared library has not. Record the bounds as they stand. */
     gs_native_stack_init();
     gs_scan_init();
 }
