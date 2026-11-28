@@ -186,6 +186,10 @@ the truncating remainder (`fmod`). The identities
 `b * div_euclid(a, b) + a % b == a` hold mathematically when the quotient
 is representable, but evaluating their intermediate products can overflow.
 
+`lerp` is the plain `a + (b - a) * t` of HLSL and most graphics libraries.
+When `b - a` overflows although `a` and `b` are finite, the result is not
+finite.
+
 ### Hashing
 
 ```goose
@@ -421,13 +425,13 @@ let smallest = q.heap_pop();
 ### Strings
 
 ```goose
-fn format_int<B>(out: B&, v: i64, base: i64, width: i64, padc: u8)   // base 2..36, right-aligned; aborts outside it
-fn format_uint<B>(out: B&, v: u64, base: i64, width: i64, padc: u8)   // B: u8[>..] or u8[..k]
-fn format_flt(out: u8[>..]&, v: f64, decimals: i64)        // fixed decimals, the exact value rounded half up; inf/-inf/nan as print writes them
+fn format_int<B>(out: B&, v: i64, base: i64 = 10, width: i64 = 0, padc: u8 = ' ')   // base 2..36, right-aligned; aborts outside it
+fn format_uint<B>(out: B&, v: u64, base: i64 = 10, width: i64 = 0, padc: u8 = ' ')   // B: u8[>..] or u8[..k]
+fn format_flt<B>(out: B&, v: f64, decimals: i64)   // fixed decimals, the exact value rounded half up; inf/-inf/nan as print writes them; B: u8[>..] or u8[..k]
 fn parse_int(s: u8[:], base: i64 = 10) -> i64, bool        // optional sign, whole string; false outside i64 or base 2..36
 fn parse_uint(s: u8[:], base: i64 = 10) -> u64, bool       // optional '+', whole string; false on '-' or outside u64 or base 2..36
 fn parse_flt(s: u8[:]) -> f64, bool                        // sign, fraction, exponent, or inf/-inf/nan; correctly rounded
-fn format_uleb(out: u8[>..]&, v: i64)                     // LEB128 (3.6), 1-10 bytes
+fn format_uleb<B>(out: B&, v: i64)                        // LEB128 (3.6), 1-10 bytes; B: u8[>..] or u8[..k]
 fn parse_uleb(s: u8[:]) -> i64, i64                       // value and byte count; 0, 0 if malformed or not shortest
 fn compare(a: u8[:], b: u8[:]) -> i64                      // bytewise: -1, 0, 1
 fn trim(s: u8[:]) -> u8[:]                                 // ASCII whitespace; a sub-slice
@@ -1113,7 +1117,8 @@ fn wrap_angle(x: f64) -> f64                                   // into [-PI, PI)
   `0.75`. A tiny negative `x` rounds to `1.0`, as in GLSL.
 - `inverse_lerp(a, b, v)` undoes `lerp(a, b, t)`: 0 at `a`, 1 at `b`, and
   not clamped, so `v` past `b` gives more than 1. It is NaN or an infinity
-  when `a == b`.
+  when `a == b`, and also when `b - a` or `v - a` overflows the type, as
+  for edges near opposite ends of its range.
 - `smoothstep(edge0, edge1, x)` is 0 up to `edge0`, 1 from `edge1`, and
   `3t² - 2t³` of the clamped `t = inverse_lerp(edge0, edge1, x)` between.
   Edges in reverse run it backwards. Equal edges, which GLSL leaves
@@ -1136,6 +1141,7 @@ A small interface to `src/runtime/runtime_os.h`:
 
 ```goose
 fn read_file(path: const u8[:], out: u8[>..]&) -> bool     // appends the whole file
+fn read_file(path: const u8[:], offset: i64, max: i64, out: u8[>..]&) -> i64
 fn write_file(path: const u8[:], data: const u8[:]) -> bool
 fn write_file_atomic(path: const u8[:], data: const u8[:]) -> bool   // the old file or all of the new
 fn append_file(path: const u8[:], data: const u8[:]) -> bool
@@ -1163,6 +1169,13 @@ fn sleep(seconds: f64)      fn sleep_ms(ms: i64)
 fn random_seed() -> u64                              // entropy, for rng
 fn random_bytes(out: u8[:]) -> bool                  // cryptographic; false: the OS gave none
 ```
+
+The offset overload of `read_file` opens and seeks the file on each call.
+It appends up to `max` bytes from the zero-based byte offset and returns
+the number appended, with a short count at EOF. It returns `-1` on an
+open, seek, or read error or for a negative offset or count, leaving the
+builder unchanged. Reuse a builder between calls to bound memory use
+when processing a large file.
 
 `trim_memory` asks the OS to discard complete pages beyond every current
 data-stack top in the calling thread program, including its globals and
